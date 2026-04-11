@@ -1,8 +1,8 @@
-package consulting.primarykey.engram
+package app.alfrd.engram
 
-import consulting.primarykey.engram.api.configureRoutes
-import consulting.primarykey.engram.db.DatabaseManager
-import consulting.primarykey.engram.db.SchemaBootstrap
+import app.alfrd.engram.api.configureRoutes
+import app.alfrd.engram.db.DatabaseManager
+import app.alfrd.engram.db.SchemaBootstrap
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*

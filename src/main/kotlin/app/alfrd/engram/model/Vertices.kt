@@ -1,4 +1,4 @@
-package consulting.primarykey.engram.model
+package app.alfrd.engram.model
 
 import kotlinx.serialization.Serializable
 

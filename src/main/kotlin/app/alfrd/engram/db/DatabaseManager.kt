@@ -1,4 +1,4 @@
-package consulting.primarykey.engram.db
+package app.alfrd.engram.db
 
 import com.arcadedb.database.Database
 import com.arcadedb.database.DatabaseFactory

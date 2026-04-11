@@ -1,4 +1,4 @@
-package consulting.primarykey.engram.api
+package app.alfrd.engram.api
 
 import com.arcadedb.database.Database
 import io.ktor.http.*

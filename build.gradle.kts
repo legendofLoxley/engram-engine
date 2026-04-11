@@ -4,7 +4,7 @@ plugins {
     application
 }
 
-group = "consulting.primarykey.engram"
+group = "app.alfrd.engram"
 version = "0.1.0"
 
 repositories {
@@ -24,11 +24,15 @@ dependencies {
     // Kotlin serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
 
+    // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+
     // Test
     testImplementation(platform("org.junit:junit-bom:5.12.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("io.ktor:ktor-server-test-host:3.1.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
 }
 
 kotlin {
@@ -44,7 +48,7 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 application {
-    mainClass.set("consulting.primarykey.engram.ApplicationKt")
+    mainClass.set("app.alfrd.engram.ApplicationKt")
     applicationDefaultJvmArgs = listOf(
         "--add-opens", "java.base/java.nio=ALL-UNNAMED",
         "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
