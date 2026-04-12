@@ -6,15 +6,15 @@ FROM eclipse-temurin:25-jdk-jammy AS build
 WORKDIR /app
 
 # Copy dependency manifests first for layer caching
-COPY build.gradle.kts settings.gradle.kts gradle.properties ./
+COPY build.gradle.kts settings.gradle.kts gradle.properties gradlew ./
 COPY gradle/ gradle/
 
 # Resolve dependencies (cached unless build files change)
-RUN gradle dependencies --no-daemon --quiet || true
+RUN chmod +x gradlew && ./gradlew dependencies --no-daemon --quiet || true
 
 # Copy source and build fat jar
 COPY src/ src/
-RUN gradle shadowJar --no-daemon
+RUN ./gradlew shadowJar --no-daemon
 
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine AS runtime
