@@ -38,10 +38,23 @@ class CognitivePipeline(
         stages.forEach { it.onInit() }
     }
 
+    /** Result of a full pipeline cycle, enriched with routing metadata. */
+    data class ChatResult(val responseText: String, val intent: IntentType)
+
     /**
      * Process a single utterance end-to-end and return the final response text.
      */
-    suspend fun process(utterance: String, sessionId: String, userId: String): String {
+    suspend fun process(utterance: String, sessionId: String, userId: String): String =
+        processInternal(utterance, sessionId, userId).responseText
+
+    /**
+     * Process a single utterance and return both the response text and the resolved intent.
+     * Used by the HTTP chat surface to populate [ChatResult.intent] in the API response.
+     */
+    suspend fun processForChat(utterance: String, sessionId: String, userId: String): ChatResult =
+        processInternal(utterance, sessionId, userId)
+
+    private suspend fun processInternal(utterance: String, sessionId: String, userId: String): ChatResult {
         // Load scaffold state before Comprehension so Rule 0 fires correctly on subsequent turns.
         // An active scaffold question means the user is mid-onboarding and any utterance is an answer.
         val scaffoldState = try {
@@ -63,7 +76,7 @@ class CognitivePipeline(
         attention.evaluate(ctx)
 
         if (ctx.attentionAction != AttentionAction.PROCESS) {
-            return ctx.responseText
+            return ChatResult(ctx.responseText, ctx.intent)
         }
 
         comprehension.evaluate(ctx)
@@ -75,6 +88,6 @@ class CognitivePipeline(
 
         stages.forEach { it.onCycleEnd(ctx) }
 
-        return ctx.responseText
+        return ChatResult(ctx.responseText, ctx.intent)
     }
 }

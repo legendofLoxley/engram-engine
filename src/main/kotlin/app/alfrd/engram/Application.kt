@@ -1,13 +1,18 @@
 package app.alfrd.engram
 
+import app.alfrd.engram.api.configureCognitiveRoutes
 import app.alfrd.engram.api.configureRoutes
+import app.alfrd.engram.cognitive.CognitivePipelineFactory
+import app.alfrd.engram.cognitive.SessionManager
 import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.SchemaBootstrap
+import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.contentnegotiation.*
+import io.ktor.server.plugins.cors.routing.*
 
 fun main() {
     val dbManager = DatabaseManager()
@@ -15,11 +20,26 @@ fun main() {
 
     SchemaBootstrap.bootstrap(db)
 
-    embeddedServer(Netty, port = 18792) {
+    val sessionManager = SessionManager(factory = { CognitivePipelineFactory.create() })
+
+    val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
+
+    embeddedServer(Netty, port = port) {
         install(ContentNegotiation) {
             json()
         }
+        install(CORS) {
+            allowHost("alfrd.app", schemes = listOf("https"))
+            allowHost("localhost:3000", schemes = listOf("http"))
+            allowHost("localhost:5173", schemes = listOf("http"))
+            allowMethod(HttpMethod.Get)
+            allowMethod(HttpMethod.Post)
+            allowMethod(HttpMethod.Options)
+            allowHeader(HttpHeaders.ContentType)
+            allowHeader(HttpHeaders.Authorization)
+        }
         configureRoutes(db)
+        configureCognitiveRoutes(sessionManager)
     }.start(wait = true)
 
     Runtime.getRuntime().addShutdownHook(Thread {

@@ -7,11 +7,15 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 
+private const val APP_VERSION = "0.1.0"
+
 @Serializable
 data class HealthResponse(
     val status: String,
+    val version: String,
+    val uptimeSeconds: Long,
     val database: String,
-    val service: String
+    val service: String,
 )
 
 @Serializable
@@ -27,14 +31,17 @@ data class TypeInfo(
 )
 
 fun Application.configureRoutes(database: Database) {
+    val startMs = System.currentTimeMillis()
     routing {
         get("/health") {
             call.respond(
                 HttpStatusCode.OK,
                 HealthResponse(
-                    status = "ok",
-                    database = if (database.isOpen) "open" else "closed",
-                    service = "engram-engine"
+                    status        = "ok",
+                    version       = APP_VERSION,
+                    uptimeSeconds = (System.currentTimeMillis() - startMs) / 1000,
+                    database      = if (database.isOpen) "open" else "closed",
+                    service       = "engram-engine",
                 )
             )
         }

@@ -2,6 +2,7 @@ plugins {
     kotlin("jvm") version "2.1.10"
     kotlin("plugin.serialization") version "2.1.10"
     application
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 group = "app.alfrd.engram"
@@ -20,6 +21,7 @@ dependencies {
     implementation("io.ktor:ktor-server-netty:3.1.1")
     implementation("io.ktor:ktor-server-content-negotiation:3.1.1")
     implementation("io.ktor:ktor-serialization-kotlinx-json:3.1.1")
+    implementation("io.ktor:ktor-server-cors:3.1.1")
 
     // Kotlin serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
@@ -44,11 +46,11 @@ kotlin {
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_23)
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
 }
 
 tasks.withType<JavaCompile>().configureEach {
-    options.release.set(23)
+    options.release.set(21)
 }
 
 application {
@@ -76,6 +78,16 @@ tasks.test {
         showStandardStreams = false
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
+}
+
+tasks.shadowJar {
+    archiveBaseName.set("engram-engine")
+    archiveClassifier.set("")
+    archiveVersion.set("")
+    manifest {
+        attributes["Main-Class"] = "app.alfrd.engram.ApplicationKt"
+    }
+    mergeServiceFiles()
 }
 
 tasks.withType<AbstractArchiveTask>().configureEach {

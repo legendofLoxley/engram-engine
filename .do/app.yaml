@@ -1,0 +1,32 @@
+name: engram-engine
+region: nyc
+
+services:
+  - name: engram-engine
+    # Replace OWNER/REPO with your GitHub repository slug, e.g. alfrd/engram-engine
+    github:
+      branch: main
+      deploy_on_push: true
+      repo: OWNER/REPO
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_size_slug: basic-xs   # 512 MB RAM, 1 vCPU
+    instance_count: 1
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 30    # JVM cold start is 10–25 s
+      period_seconds: 15
+      success_threshold: 1
+      failure_threshold: 3
+    envs:
+      - key: PORT
+        scope: RUN_AND_BUILD_TIME
+        value: "8080"
+      - key: ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # Set via DO dashboard or doctl
+      - key: GOOGLE_AI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # Set via DO dashboard or doctl
