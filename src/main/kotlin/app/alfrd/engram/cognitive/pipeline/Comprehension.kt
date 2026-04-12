@@ -1,28 +1,40 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.providers.LlmClient
+import app.alfrd.engram.cognitive.providers.LlmModel
+import app.alfrd.engram.cognitive.providers.LlmRequest
+
 /**
- * Comprehension stage — Tier 1 pattern-based intent classification.
+ * Comprehension stage — Tier 1 pattern-based intent classification with optional
+ * Tier 2 LLM escalation for AMBIGUOUS utterances.
  *
- * Rules are evaluated in priority order; the first match wins.
- * If confidence < 0.7, the intent is demoted to AMBIGUOUS (Tier 2 LLM
- * escalation is deferred to a later prompt).
+ * Tier 2 runs only when [llmClient] and [tier2Model] are both non-null,
+ * so the stage degrades gracefully to Tier 1-only when no LLM is available.
  */
-class Comprehension : CognitiveStage {
+class Comprehension(
+    private val llmClient: LlmClient? = null,
+    private val tier2Model: LlmModel? = null,
+) : CognitiveStage {
 
     override suspend fun evaluate(ctx: CognitiveContext) {
         val lower = ctx.utterance.trim().lowercase()
 
         val (rawIntent, rawConfidence) = classifyTier1(ctx, lower)
 
-        val (intent, confidence) = if (rawConfidence < 0.7 || rawIntent == IntentType.AMBIGUOUS) {
-            IntentType.AMBIGUOUS to 0.30
-        } else {
-            rawIntent to rawConfidence
-        }
+        val (intent, confidence, tier) =
+            if ((rawConfidence < 0.7 || rawIntent == IntentType.AMBIGUOUS) && llmClient != null && tier2Model != null) {
+                val tier2 = classifyTier2(ctx.utterance)
+                if (tier2 != null) Triple(tier2, 0.75, 2)
+                else Triple(IntentType.AMBIGUOUS, 0.30, 1)
+            } else if (rawConfidence < 0.7 || rawIntent == IntentType.AMBIGUOUS) {
+                Triple(IntentType.AMBIGUOUS, 0.30, 1)
+            } else {
+                Triple(rawIntent, rawConfidence, 1)
+            }
 
         ctx.intent = intent
         ctx.intentConfidence = confidence
-        ctx.comprehensionTier = 1
+        ctx.comprehensionTier = tier
         ctx.requiresMemory = intent in setOf(IntentType.ONBOARDING, IntentType.QUESTION, IntentType.META)
         ctx.memoryQueryHint = when (intent) {
             IntentType.QUESTION   -> "answer: ${ctx.utterance}"
@@ -31,6 +43,44 @@ class Comprehension : CognitiveStage {
             else                  -> null
         }
     }
+
+    // ── Tier 2: LLM intent classification ────────────────────────────────────
+
+    private suspend fun classifyTier2(utterance: String): IntentType? {
+        val prompt = """
+            Classify the following utterance into exactly one intent category.
+            Reply with ONLY the category name — no punctuation, no explanation.
+            
+            Categories:
+            - ONBOARDING  (user sharing personal info: identity, role, expertise, preferences, tools, routines)
+            - TASK        (imperative request: do something, remind, schedule, create, find)
+            - QUESTION    (asking for information or an answer)
+            - SOCIAL      (greeting, farewell, small talk, thanks)
+            - META        (asking what the assistant knows or remembers about them)
+            - CORRECTION  (correcting or clarifying a prior response)
+            - CLARIFY     (ambiguous — cannot determine intent)
+            
+            Utterance: "$utterance"
+        """.trimIndent()
+
+        return try {
+            val response = llmClient!!.complete(
+                LlmRequest(
+                    prompt     = prompt,
+                    model      = tier2Model!!,
+                    maxTokens  = 10,
+                    timeoutMs  = 8_000,
+                )
+            )
+            parseIntentFromLlm(response.text.trim())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseIntentFromLlm(raw: String): IntentType? =
+        IntentType.entries.firstOrNull { it.name.equals(raw.uppercase().trim(), ignoreCase = false) }
+            ?: IntentType.entries.firstOrNull { raw.uppercase().contains(it.name) }
 
     // ── Classification rules ──────────────────────────────────────────────────
 

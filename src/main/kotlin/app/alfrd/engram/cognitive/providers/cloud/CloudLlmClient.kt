@@ -34,11 +34,15 @@ class CloudLlmClient(
     private val googleApiKey: String = System.getenv("GOOGLE_AI_API_KEY") ?: "",
 ) : AbstractLlmClient() {
 
+    val hasAnthropicKey: Boolean get() = anthropicApiKey.isNotBlank()
+    val hasGoogleKey: Boolean    get() = googleApiKey.isNotBlank()
+
     private val json = Json { ignoreUnknownKeys = true }
     private val http: HttpClient = HttpClient.newHttpClient()
 
     override suspend fun doComplete(request: LlmRequest): LlmResponse =
         when (request.model) {
+            LlmModel.CLAUDE_HAIKU_3_5,
             LlmModel.CLAUDE_SONNET_4_5,
             LlmModel.CLAUDE_SONNET_4 -> callAnthropic(request)
 
@@ -52,6 +56,7 @@ class CloudLlmClient(
         val startMs = System.currentTimeMillis()
 
         val modelId = when (request.model) {
+            LlmModel.CLAUDE_HAIKU_3_5   -> "claude-haiku-3-5-20250307"
             LlmModel.CLAUDE_SONNET_4_5 -> "claude-sonnet-4-5-20250514"
             LlmModel.CLAUDE_SONNET_4   -> "claude-sonnet-4-20250514"
             else                       -> request.model.apiId

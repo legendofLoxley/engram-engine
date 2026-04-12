@@ -3,6 +3,8 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.providers.LlmClient
+import app.alfrd.engram.cognitive.providers.LlmModel
+import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
 
 /**
  * Top-level orchestrator for the cognitive processing cycle.
@@ -27,11 +29,24 @@ class CognitivePipeline(
 ) {
 
     private val attention     = Attention()
-    private val comprehension = Comprehension()
+    private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
     private val router        = Router(engramClient, llmClient)
     private val expression    = Expression()
 
     private val stages: List<CognitiveStage> = listOf(attention, comprehension, expression)
+
+    companion object {
+        private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
+            if (llmClient == null) return null
+            if (llmClient is CloudLlmClient) return when {
+                llmClient.hasGoogleKey    -> LlmModel.GEMINI_FLASH_2_0
+                llmClient.hasAnthropicKey -> LlmModel.CLAUDE_HAIKU_3_5
+                else                      -> null
+            }
+            // Non-cloud clients (e.g. TestLlmClient) — use Gemini as default
+            return LlmModel.GEMINI_FLASH_2_0
+        }
+    }
 
     /** Call once before first use to allow stages to initialise resources. */
     suspend fun init() {
