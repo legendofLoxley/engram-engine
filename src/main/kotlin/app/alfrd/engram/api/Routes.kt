@@ -16,6 +16,8 @@ data class HealthResponse(
     val uptimeSeconds: Long,
     val database: String,
     val service: String,
+    val anthropicKeySet: Boolean,
+    val googleKeySet: Boolean,
 )
 
 @Serializable
@@ -37,11 +39,13 @@ fun Application.configureRoutes(database: Database) {
             call.respond(
                 HttpStatusCode.OK,
                 HealthResponse(
-                    status        = "ok",
-                    version       = APP_VERSION,
-                    uptimeSeconds = (System.currentTimeMillis() - startMs) / 1000,
-                    database      = if (database.isOpen) "open" else "closed",
-                    service       = "engram-engine",
+                    status          = "ok",
+                    version         = APP_VERSION,
+                    uptimeSeconds   = (System.currentTimeMillis() - startMs) / 1000,
+                    database        = if (database.isOpen) "open" else "closed",
+                    service         = "engram-engine",
+                    anthropicKeySet = System.getenv("ANTHROPIC_API_KEY").isNullOrBlank().not(),
+                    googleKeySet    = System.getenv("GOOGLE_AI_API_KEY").isNullOrBlank().not(),
                 )
             )
         }
