@@ -7,7 +7,7 @@ services:
     github:
       branch: main
       deploy_on_push: true
-      repo: OWNER/REPO
+      repo: legendofLoxley/engram-engine
     dockerfile_path: Dockerfile
     http_port: 8080
     instance_size_slug: basic-xs   # 512 MB RAM, 1 vCPU
