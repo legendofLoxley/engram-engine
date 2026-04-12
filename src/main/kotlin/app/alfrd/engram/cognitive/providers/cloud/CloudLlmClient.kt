@@ -56,7 +56,7 @@ class CloudLlmClient(
         val startMs = System.currentTimeMillis()
 
         val modelId = when (request.model) {
-            LlmModel.CLAUDE_HAIKU_3_5   -> "claude-haiku-3-5-20250307"
+            LlmModel.CLAUDE_HAIKU_3_5   -> "claude-haiku-3-5-20241022"
             LlmModel.CLAUDE_SONNET_4_5 -> "claude-sonnet-4-5-20250514"
             LlmModel.CLAUDE_SONNET_4   -> "claude-sonnet-4-20250514"
             else                       -> request.model.apiId

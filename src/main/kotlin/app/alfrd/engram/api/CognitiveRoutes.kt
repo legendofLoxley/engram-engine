@@ -20,6 +20,7 @@ data class ChatResponse(
     val response: String,
     val intent: String,
     val latencyMs: Long,
+    val comprehensionTier: Int,
 )
 
 fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
@@ -37,9 +38,10 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 call.respond(
                     HttpStatusCode.OK,
                     ChatResponse(
-                        response  = result.responseText,
-                        intent    = result.intent.name,
-                        latencyMs = latencyMs,
+                        response          = result.responseText,
+                        intent            = result.intent.name,
+                        latencyMs         = latencyMs,
+                        comprehensionTier = result.comprehensionTier,
                     )
                 )
             }

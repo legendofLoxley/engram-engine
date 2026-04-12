@@ -54,7 +54,7 @@ class CognitivePipeline(
     }
 
     /** Result of a full pipeline cycle, enriched with routing metadata. */
-    data class ChatResult(val responseText: String, val intent: IntentType)
+    data class ChatResult(val responseText: String, val intent: IntentType, val comprehensionTier: Int)
 
     /**
      * Process a single utterance end-to-end and return the final response text.
@@ -91,7 +91,7 @@ class CognitivePipeline(
         attention.evaluate(ctx)
 
         if (ctx.attentionAction != AttentionAction.PROCESS) {
-            return ChatResult(ctx.responseText, ctx.intent)
+            return ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier)
         }
 
         comprehension.evaluate(ctx)
@@ -103,6 +103,6 @@ class CognitivePipeline(
 
         stages.forEach { it.onCycleEnd(ctx) }
 
-        return ChatResult(ctx.responseText, ctx.intent)
+        return ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier)
     }
 }
