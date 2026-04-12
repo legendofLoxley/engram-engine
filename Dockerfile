@@ -1,7 +1,7 @@
 # ─── Stage 1: Build ───────────────────────────────────────────────────────────
 # eclipse-temurin:25 matches jvmToolchain(25) in build.gradle.kts.
 # The Kotlin compiler targets JVM 21 bytecode, so the runtime stage can use JRE 21.
-FROM eclipse-temurin:25-jdk-jammy AS build
+FROM eclipse-temurin:21-jdk-jammy AS build
 
 WORKDIR /app
 
