@@ -73,7 +73,8 @@ class Comprehension(
                 )
             )
             parseIntentFromLlm(response.text.trim())
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            System.err.println("[Comprehension] Tier 2 LLM call failed: ${e::class.simpleName}: ${e.message}")
             null
         }
     }
