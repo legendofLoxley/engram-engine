@@ -13,6 +13,7 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.plugins.cors.routing.*
+import kotlinx.serialization.json.Json
 
 fun main() {
     val dbManager = DatabaseManager()
@@ -26,7 +27,7 @@ fun main() {
 
     embeddedServer(Netty, port = port) {
         install(ContentNegotiation) {
-            json()
+            json(Json { ignoreUnknownKeys = true })
         }
         install(CORS) {
             allowHost("alfrd.app", schemes = listOf("https"))
