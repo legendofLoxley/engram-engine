@@ -5,7 +5,7 @@ import kotlinx.coroutines.withTimeout
 
 /** The LLM models supported by this pipeline. */
 enum class LlmModel(val apiId: String) {
-    CLAUDE_HAIKU_3_5("claude-haiku-3-5"),
+    CLAUDE_HAIKU_3_5("claude-3-5-haiku"),
     CLAUDE_SONNET_4_5("claude-sonnet-4-5"),
     CLAUDE_SONNET_4("claude-sonnet-4"),
     GEMINI_FLASH_2_0("gemini-2.0-flash"),
