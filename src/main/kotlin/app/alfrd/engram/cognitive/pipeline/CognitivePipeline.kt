@@ -56,27 +56,48 @@ class CognitivePipeline(
     /** Result of a full pipeline cycle, enriched with routing metadata. */
     data class ChatResult(val responseText: String, val intent: IntentType, val comprehensionTier: Int)
 
+    /** Extended result including the full pipeline trace for the debug endpoint. */
+    data class DebugChatResult(val chat: ChatResult, val trace: PipelineTrace)
+
     /**
      * Process a single utterance end-to-end and return the final response text.
      */
     suspend fun process(utterance: String, sessionId: String, userId: String): String =
-        processInternal(utterance, sessionId, userId).responseText
+        processInternal(utterance, sessionId, userId, debug = false).first.responseText
 
     /**
      * Process a single utterance and return both the response text and the resolved intent.
      * Used by the HTTP chat surface to populate [ChatResult.intent] in the API response.
      */
     suspend fun processForChat(utterance: String, sessionId: String, userId: String): ChatResult =
-        processInternal(utterance, sessionId, userId)
+        processInternal(utterance, sessionId, userId, debug = false).first
 
-    private suspend fun processInternal(utterance: String, sessionId: String, userId: String): ChatResult {
+    /**
+     * Process a single utterance with full instrumentation, returning both the
+     * chat result and the pipeline trace for the debug endpoint.
+     */
+    suspend fun processForDebug(utterance: String, sessionId: String, userId: String): DebugChatResult {
+        val (chatResult, trace) = processInternal(utterance, sessionId, userId, debug = true)
+        return DebugChatResult(chatResult, trace!!)
+    }
+
+    private suspend fun processInternal(
+        utterance: String, sessionId: String, userId: String, debug: Boolean,
+    ): Pair<ChatResult, PipelineTrace?> {
+        val trace = if (debug) PipelineTrace() else null
+        val pipelineStartNs = if (debug) System.nanoTime() else 0L
         // Load scaffold state before Comprehension so Rule 0 fires correctly on subsequent turns.
         // An active scaffold question means the user is mid-onboarding and any utterance is an answer.
+        val memoryStartNs = if (debug) System.nanoTime() else 0L
         val scaffoldState = try {
             val state = engramClient.getScaffoldState(userId)
             if (state.activeScaffoldQuestion != null) state else null
         } catch (_: Exception) {
             null
+        }
+        if (debug) {
+            trace!!.latencyBreakdown.memoryMs =
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - memoryStartNs)
         }
 
         val ctx = CognitiveContext(
@@ -86,23 +107,87 @@ class CognitivePipeline(
             userId        = userId,
             timestamp     = java.time.Instant.now(),
             scaffoldState = scaffoldState,
+            trace         = trace,
         )
 
         attention.evaluate(ctx)
 
         if (ctx.attentionAction != AttentionAction.PROCESS) {
-            return ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier)
+            return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier), trace)
         }
 
+        // ── Comprehension ────────────────────────────────────────────────────
+        val comprehensionStartNs = if (debug) System.nanoTime() else 0L
         comprehension.evaluate(ctx)
+        if (debug) {
+            trace!!.latencyBreakdown.comprehensionMs =
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - comprehensionStartNs)
+            trace.model.comprehensionModel = if (trace.comprehension.tierTwoFired) tier2ModelName() else null
+        }
 
+        // ── Routing ──────────────────────────────────────────────────────────
+        val routingStartNs = if (debug) System.nanoTime() else 0L
         val branch = router.route(ctx.intent)
-        branch.execute(ctx)
+        if (debug) {
+            trace!!.latencyBreakdown.routingMs =
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - routingStartNs)
+            trace.routing.intentType = ctx.intent.name
+            trace.routing.confidence = ctx.intentConfidence
+            trace.routing.secondaryIntent = ctx.secondaryIntent?.name
+            trace.routing.branchSelected = branch::class.simpleName ?: "Unknown"
+            trace.routing.route = routeNameFor(ctx.intent)
+        }
 
+        // ── Reason (Branch execution) ────────────────────────────────────────
+        val reasonStartNs = if (debug) System.nanoTime() else 0L
+        branch.execute(ctx)
+        if (debug) {
+            trace!!.latencyBreakdown.reasonMs =
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reasonStartNs)
+            val (provider, model) = reasonModelInfo(branch)
+            trace.model.reasonProvider = provider
+            trace.model.reasonModel = model
+        }
+
+        // ── Expression ───────────────────────────────────────────────────────
+        val expressionStartNs = if (debug) System.nanoTime() else 0L
         expression.evaluate(ctx)
+        if (debug) {
+            trace!!.latencyBreakdown.expressionMs =
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - expressionStartNs)
+            trace.latencyBreakdown.totalPipelineMs =
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pipelineStartNs)
+
+            trace.session.scaffoldState = null // Serialising arbitrary objects is fragile; null for now
+            trace.session.trustPhase = ctx.trustPhase?.toIntOrNull()
+            trace.session.turnCount = ctx.priorUtterances.size + 1
+            trace.session.sessionAgeMs = 0 // SessionManager doesn't expose creation time to pipeline
+        }
 
         stages.forEach { it.onCycleEnd(ctx) }
 
-        return ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier)
+        return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier), trace)
+    }
+
+    private fun tier2ModelName(): String? {
+        val model = selectTier2Model(llmClient) ?: return null
+        return model.name.lowercase().replace('_', '-')
+    }
+
+    private fun routeNameFor(intent: IntentType): String = when (intent) {
+        IntentType.SOCIAL      -> "short_circuit_social"
+        IntentType.ONBOARDING  -> "decompose_and_scaffold"
+        IntentType.QUESTION    -> "graph_augmented_answer"
+        IntentType.TASK        -> "task_accept"
+        IntentType.CORRECTION  -> "correction_branch"
+        IntentType.META        -> "meta_branch"
+        IntentType.CLARIFY,
+        IntentType.AMBIGUOUS   -> "clarification_branch"
+    }
+
+    private fun reasonModelInfo(branch: Branch): Pair<String?, String?> = when (branch) {
+        is QuestionBranch    -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
+        is OnboardingBranch  -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
+        else                 -> null to null
     }
 }

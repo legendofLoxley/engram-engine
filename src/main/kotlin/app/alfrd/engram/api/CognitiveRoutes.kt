@@ -1,6 +1,7 @@
 package app.alfrd.engram.api
 
 import app.alfrd.engram.cognitive.SessionManager
+import app.alfrd.engram.cognitive.pipeline.PipelineTrace
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -23,6 +24,15 @@ data class ChatResponse(
     val comprehensionTier: Int,
 )
 
+@Serializable
+data class DebugChatResponse(
+    val response: String,
+    val intent: String,
+    val latencyMs: Long,
+    val comprehensionTier: Int,
+    val debug: PipelineTrace,
+)
+
 fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
     routing {
         route("/cognitive") {
@@ -42,6 +52,27 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                         intent            = result.intent.name,
                         latencyMs         = latencyMs,
                         comprehensionTier = result.comprehensionTier,
+                    )
+                )
+            }
+
+            post("/chat/debug") {
+                val req = call.receive<ChatRequest>()
+                val startMs = System.currentTimeMillis()
+
+                val pipeline = sessionManager.getOrCreate(req.sessionId)
+                val debugResult = pipeline.processForDebug(req.utterance, req.sessionId, req.userId)
+
+                val latencyMs = System.currentTimeMillis() - startMs
+
+                call.respond(
+                    HttpStatusCode.OK,
+                    DebugChatResponse(
+                        response          = debugResult.chat.responseText,
+                        intent            = debugResult.chat.intent.name,
+                        latencyMs         = latencyMs,
+                        comprehensionTier = debugResult.chat.comprehensionTier,
+                        debug             = debugResult.trace,
                     )
                 )
             }

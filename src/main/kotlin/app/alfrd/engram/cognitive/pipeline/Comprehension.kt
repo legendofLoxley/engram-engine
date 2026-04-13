@@ -19,11 +19,15 @@ class Comprehension(
     override suspend fun evaluate(ctx: CognitiveContext) {
         val lower = ctx.utterance.trim().lowercase()
 
-        val (rawIntent, rawConfidence) = classifyTier1(ctx, lower)
+        val (rawIntent, rawConfidence, ruleName) = classifyTier1(ctx, lower)
+
+        var tier2Fired = false
+        var tier2RawResult: String? = null
 
         val (intent, confidence, tier) =
             if ((rawConfidence < 0.7 || rawIntent == IntentType.AMBIGUOUS) && llmClient != null && tier2Model != null) {
-                val tier2 = classifyTier2(ctx.utterance)
+                tier2Fired = true
+                val tier2 = classifyTier2(ctx.utterance) { raw -> tier2RawResult = raw }
                 if (tier2 != null) Triple(tier2, 0.75, 2)
                 else Triple(IntentType.AMBIGUOUS, 0.30, 1)
             } else if (rawConfidence < 0.7 || rawIntent == IntentType.AMBIGUOUS) {
@@ -31,6 +35,14 @@ class Comprehension(
             } else {
                 Triple(rawIntent, rawConfidence, 1)
             }
+
+        ctx.trace?.comprehension?.let { c ->
+            c.tier = tier
+            c.tierOneRuleMatched = ruleName
+            c.tierOneConfidence = rawConfidence
+            c.tierTwoFired = tier2Fired
+            c.tierTwoResult = tier2RawResult
+        }
 
         ctx.intent = intent
         ctx.intentConfidence = confidence
@@ -46,7 +58,7 @@ class Comprehension(
 
     // ── Tier 2: LLM intent classification ────────────────────────────────────
 
-    private suspend fun classifyTier2(utterance: String): IntentType? {
+    private suspend fun classifyTier2(utterance: String, onRawResult: (String) -> Unit = {}): IntentType? {
         val prompt = """
             Classify the following utterance into exactly one intent category.
             Reply with ONLY the category name — no punctuation, no explanation.
@@ -72,7 +84,9 @@ class Comprehension(
                     timeoutMs  = 8_000,
                 )
             )
-            parseIntentFromLlm(response.text.trim())
+            val raw = response.text.trim()
+            onRawResult(raw)
+            parseIntentFromLlm(raw)
         } catch (e: Exception) {
             System.err.println("[Comprehension] Tier 2 LLM call failed: ${e::class.simpleName}: ${e.message}")
             null
@@ -85,30 +99,32 @@ class Comprehension(
 
     // ── Classification rules ──────────────────────────────────────────────────
 
-    private fun classifyTier1(ctx: CognitiveContext, lower: String): Pair<IntentType, Double> {
+    private data class Tier1Result(val intent: IntentType, val confidence: Double, val ruleName: String)
+
+    private fun classifyTier1(ctx: CognitiveContext, lower: String): Tier1Result {
         // Rule 0 — Scaffold context-default: treat utterance as onboarding answer
-        if (ctx.scaffoldState != null) return IntentType.ONBOARDING to 0.95
+        if (ctx.scaffoldState != null) return Tier1Result(IntentType.ONBOARDING, 0.95, "scaffold_context_default")
 
         // Rule 1 — Social / phatic
-        if (isSocial(lower)) return IntentType.SOCIAL to 0.90
+        if (isSocial(lower)) return Tier1Result(IntentType.SOCIAL, 0.90, "social_phatic")
 
         // Rule 2 — Correction
-        if (isCorrection(lower)) return IntentType.CORRECTION to 0.80
+        if (isCorrection(lower)) return Tier1Result(IntentType.CORRECTION, 0.80, "correction")
 
         // Rule 3 — Meta query
-        if (isMeta(lower)) return IntentType.META to 0.85
+        if (isMeta(lower)) return Tier1Result(IntentType.META, 0.85, "meta_query")
 
         // Rule 4 — Task request (imperative verbs)
-        if (isTask(lower)) return IntentType.TASK to 0.70
+        if (isTask(lower)) return Tier1Result(IntentType.TASK, 0.70, "task_imperative")
 
         // Rule 5 — Question (interrogative or trailing "?")
-        if (isQuestion(ctx.utterance.trim(), lower)) return IntentType.QUESTION to 0.70
+        if (isQuestion(ctx.utterance.trim(), lower)) return Tier1Result(IntentType.QUESTION, 0.70, "question_interrogative")
 
         // Rule 6 — Onboarding fallback during active onboarding session
-        if (ctx.trustPhase != null) return IntentType.ONBOARDING to 0.60
+        if (ctx.trustPhase != null) return Tier1Result(IntentType.ONBOARDING, 0.60, "onboarding_fallback")
 
         // Rule 7 — Ambiguous
-        return IntentType.AMBIGUOUS to 0.30
+        return Tier1Result(IntentType.AMBIGUOUS, 0.30, "ambiguous")
     }
 
     // ── Pattern helpers ───────────────────────────────────────────────────────

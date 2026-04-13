@@ -44,4 +44,7 @@ data class CognitiveContext(
 
     // ── Affect (static) ───────────────────────────────────────────────────────
     val affect: AffectConfig = AffectConfig(),
+
+    // ── Debug trace (populated only for debug endpoint) ───────────────────────
+    var trace: PipelineTrace? = null,
 )
