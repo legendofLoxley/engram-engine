@@ -5,6 +5,7 @@ import app.alfrd.engram.api.configureRoutes
 import app.alfrd.engram.cognitive.CognitivePipelineFactory
 import app.alfrd.engram.cognitive.SessionManager
 import app.alfrd.engram.db.DatabaseManager
+import app.alfrd.engram.db.ResponsePhraseSeed
 import app.alfrd.engram.db.SchemaBootstrap
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
@@ -20,6 +21,7 @@ fun main() {
     val db = dbManager.getDatabase()
 
     SchemaBootstrap.bootstrap(db)
+    ResponsePhraseSeed.seed(db)
 
     val sessionManager = SessionManager(factory = { CognitivePipelineFactory.create() })
 

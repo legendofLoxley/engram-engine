@@ -56,6 +56,22 @@ object SchemaBootstrap {
                 vt.createProperty("parentScope", Type.STRING)   // nullable
             }
 
+            ensureVertex(schema, "ResponsePhrase") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("text", Type.STRING)
+                vt.createProperty("hash", Type.STRING)
+                vt.createProperty("visibility", Type.STRING)        // internal
+                vt.createProperty("createdAt", Type.LONG)
+                vt.createProperty("updatedAt", Type.LONG)
+                vt.createProperty("branchAffinity", Type.STRING)    // JSON array
+                vt.createProperty("phaseAffinity", Type.STRING)     // JSON array
+                vt.createProperty("expressionPhase", Type.STRING)
+                vt.createProperty("category", Type.STRING)
+                vt.createProperty("variants", Type.STRING)          // JSON array, nullable
+                vt.createProperty("requiresInterpolation", Type.BOOLEAN)
+                vt.createProperty("interpolationKeys", Type.STRING) // JSON array, nullable
+            }
+
             // ── Edge types ────────────────────────────────────────────────
             ensureEdge(schema, "FOLLOWS") { et ->
                 et.createProperty("attributions", Type.STRING)  // JSON array
@@ -91,6 +107,27 @@ object SchemaBootstrap {
                 et.createProperty("scores", Type.STRING)        // JSON array
             }
 
+            ensureEdge(schema, "SELECTED") { et ->
+                et.createProperty("phraseUid", Type.STRING)
+                et.createProperty("sessionId", Type.STRING)
+                et.createProperty("userId", Type.STRING)
+                et.createProperty("turnIndex", Type.INTEGER)
+                et.createProperty("branch", Type.STRING)
+                et.createProperty("compositeScore", Type.DOUBLE)
+                et.createProperty("scoreBreakdown", Type.STRING)  // JSON map
+                et.createProperty("timestamp", Type.LONG)
+            }
+
+            ensureEdge(schema, "OUTCOME") { et ->
+                et.createProperty("phraseUid", Type.STRING)
+                et.createProperty("sessionId", Type.STRING)
+                et.createProperty("userId", Type.STRING)
+                et.createProperty("turnIndex", Type.INTEGER)
+                et.createProperty("signal", Type.STRING)
+                et.createProperty("contextSnapshot", Type.STRING)
+                et.createProperty("timestamp", Type.LONG)
+            }
+
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
@@ -100,6 +137,8 @@ object SchemaBootstrap {
             ensureIndex(schema, "User",        "uid")
             ensureIndex(schema, "ScoreType",   "uid")
             ensureIndex(schema, "Scope",       "uid")
+            ensureIndex(schema, "ResponsePhrase", "uid")
+            ensureIndex(schema, "ResponsePhrase", "hash")
         }
     }
 
