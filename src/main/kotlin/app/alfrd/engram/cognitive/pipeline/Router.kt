@@ -18,7 +18,7 @@ class Router(
         IntentType.TASK                  -> TaskBranch(engramClient)
         IntentType.CORRECTION            -> CorrectionBranch()
         IntentType.META                  -> MetaBranch()
-        IntentType.CLARIFY,
+        IntentType.CLARIFICATION,
         IntentType.AMBIGUOUS             -> ClarificationBranch()
     }
 }

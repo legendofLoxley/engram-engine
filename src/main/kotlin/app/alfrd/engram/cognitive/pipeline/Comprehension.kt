@@ -70,7 +70,7 @@ class Comprehension(
             - SOCIAL      (greeting, farewell, small talk, thanks)
             - META        (asking what the assistant knows or remembers about them)
             - CORRECTION  (correcting or clarifying a prior response)
-            - CLARIFY     (ambiguous — cannot determine intent)
+            - CLARIFICATION (ambiguous — cannot determine intent)
             
             Utterance: "$utterance"
         """.trimIndent()

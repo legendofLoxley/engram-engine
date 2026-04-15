@@ -183,7 +183,7 @@ class CognitivePipeline(
         IntentType.TASK        -> "task_accept"
         IntentType.CORRECTION  -> "correction_branch"
         IntentType.META        -> "meta_branch"
-        IntentType.CLARIFY,
+        IntentType.CLARIFICATION,
         IntentType.AMBIGUOUS   -> "clarification_branch"
     }
 

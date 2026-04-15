@@ -6,7 +6,7 @@ enum class AttentionPriority { HIGH, NORMAL, LOW }
 
 enum class EnergyLevel { HIGH, MEDIUM, LOW }
 
-enum class IntentType { ONBOARDING, TASK, QUESTION, CORRECTION, SOCIAL, META, CLARIFY, AMBIGUOUS }
+enum class IntentType { ONBOARDING, TASK, QUESTION, CORRECTION, SOCIAL, META, CLARIFICATION, AMBIGUOUS }
 
 enum class ResponseStrategy { SIMPLE, COMPLEX, EMOTIONAL, SOCIAL }
 

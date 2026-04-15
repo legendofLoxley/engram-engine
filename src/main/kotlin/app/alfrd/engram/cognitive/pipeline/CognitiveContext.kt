@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.model.ResponsePhrase
 import java.time.Instant
 
 /**
@@ -35,7 +36,7 @@ data class CognitiveContext(
     // ── Reason ────────────────────────────────────────────────────────────────
     var branchResult: BranchResult? = null,
     var responseIntent: IntentType? = null,
-    var responsePhrases: List<String>? = null,
+    var responsePhrases: List<ResponsePhrase>? = null,
     var phaseTransitionEvidence: String? = null,
 
     // ── Expression ────────────────────────────────────────────────────────────
