@@ -2,6 +2,8 @@ package app.alfrd.engram
 
 import app.alfrd.engram.api.configureCognitiveRoutes
 import app.alfrd.engram.api.configureRoutes
+import app.alfrd.engram.api.configureSelectionRoutes
+import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.CognitivePipelineFactory
 import app.alfrd.engram.cognitive.SessionManager
 import app.alfrd.engram.db.DatabaseManager
@@ -23,7 +25,7 @@ fun main() {
     SchemaBootstrap.bootstrap(db)
     ResponsePhraseSeed.seed(db)
 
-    val sessionManager = SessionManager(factory = { CognitivePipelineFactory.create() })
+    val sessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db) })
 
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
 
@@ -43,6 +45,7 @@ fun main() {
         }
         configureRoutes(db)
         configureCognitiveRoutes(sessionManager)
+        configureSelectionRoutes(ResponseSelectionService(db))
     }.start(wait = true)
 
     Runtime.getRuntime().addShutdownHook(Thread {

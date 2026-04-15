@@ -159,11 +159,11 @@ class ExpressionTest {
     }
 
     @Test
-    fun `COMPLEX strategy produces five phases`() = runTest {
+    fun `COMPLEX strategy produces three phases`() = runTest {
         val ctx = CognitiveContext(utterance = "some complex query", sessionId = "s", userId = "u")
         ctx.branchResult = BranchResult(content = "The answer.", responseStrategy = ResponseStrategy.COMPLEX)
         expression.evaluate(ctx)
-        assertEquals(5, ctx.streamingPhases!!.size)
+        assertEquals(3, ctx.streamingPhases!!.size) // acknowledge + bridge + synthesis
         assertTrue(ctx.responseText.contains("The answer."))
     }
 

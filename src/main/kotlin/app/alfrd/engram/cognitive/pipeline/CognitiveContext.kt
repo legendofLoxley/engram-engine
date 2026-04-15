@@ -41,6 +41,7 @@ data class CognitiveContext(
     // ── Expression ────────────────────────────────────────────────────────────
     var streamingPhases: List<String>? = null,
     var responseText: String = "",
+    var streamingExpressionResult: StreamingExpressionResult? = null,
 
     // ── Affect (static) ───────────────────────────────────────────────────────
     val affect: AffectConfig = AffectConfig(),
