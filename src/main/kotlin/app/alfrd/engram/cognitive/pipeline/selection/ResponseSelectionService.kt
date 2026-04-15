@@ -73,7 +73,9 @@ class ResponseSelectionService(
             )
         }
 
+        val candidateCount = scored.size
         val ranked = scored.sortedByDescending { it.compositeScore }.take(query.limit)
+            .map { it.copy(candidatesConsidered = candidateCount) }
 
         // 5. Record — fire-and-forget SELECTED edge
         for (result in ranked) {

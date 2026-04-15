@@ -65,8 +65,24 @@ class SocialBranch(
                 context = ctx,
                 limit = 1,
             )
+            val startNs = System.nanoTime()
             val results = selectionService.select(query)
-            results.firstOrNull()?.interpolated ?: fallback
+            val selectionLatencyMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
+
+            val winner = results.firstOrNull() ?: return fallback
+
+            ctx.trace?.responseSelection = ResponseSelectionTrace(
+                phraseId = winner.phrase.uid,
+                phraseText = winner.phrase.text,
+                interpolatedText = winner.interpolated,
+                strategy = ResponseStrategy.SOCIAL,
+                compositeScore = winner.compositeScore,
+                scores = winner.scoreBreakdown,
+                candidatesConsidered = winner.candidatesConsidered,
+                selectionLatencyMs = selectionLatencyMs,
+            )
+
+            winner.interpolated
         } catch (_: Exception) {
             fallback
         }

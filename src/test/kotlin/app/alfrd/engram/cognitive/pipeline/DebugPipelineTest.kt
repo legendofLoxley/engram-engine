@@ -54,6 +54,9 @@ class DebugPipelineTest {
         assertNull(result.trace.model.reasonProvider)
         assertNull(result.trace.model.reasonModel)
         assertNull(result.trace.model.comprehensionModel)
+
+        // No selection service → responseSelection is absent
+        assertNull(result.trace.responseSelection)
     }
 
     // ── Ambiguous utterance with LLM: Tier 2 fires ───────────────────────────

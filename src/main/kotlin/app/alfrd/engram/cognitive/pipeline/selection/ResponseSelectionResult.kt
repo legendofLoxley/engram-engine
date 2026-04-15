@@ -9,4 +9,5 @@ data class ResponseSelectionResult(
     val compositeScore: Double,
     val scoreBreakdown: Map<String, Double>,
     val interpolated: String,
+    val candidatesConsidered: Int = 0,
 )
