@@ -181,6 +181,7 @@ class HttpEngramClient(
         val activeScaffoldQuestion: String? = null,
         val sessionCount: Int = 0,
         val lastInteractionAt: Long? = null,
+        val phaseTransitions: List<PhaseTransitionDto> = emptyList(),
     ) {
         fun toScaffoldState(): ScaffoldState {
             val phase = when (trustPhase) {
@@ -192,13 +193,32 @@ class HttpEngramClient(
             val categories = answeredCategories.mapNotNull {
                 try { PhraseCategory.valueOf(it) } catch (_: Exception) { null }
             }.toSet()
+            val transitions = phaseTransitions.map {
+                ScaffoldPhaseTransition(
+                    from      = it.from,
+                    to        = it.to,
+                    timestamp = it.timestamp,
+                    evidence  = it.evidence,
+                )
+            }
             return ScaffoldState(
                 trustPhase             = phase,
                 answeredCategories     = categories,
                 activeScaffoldQuestion = activeScaffoldQuestion,
+                sessionCount           = sessionCount,
+                lastInteractionAt      = lastInteractionAt,
+                phaseTransitions       = transitions,
             )
         }
     }
+
+    @Serializable
+    private data class PhaseTransitionDto(
+        val from: String,
+        val to: String,
+        val timestamp: Long,
+        val evidence: String,
+    )
 
     @Serializable
     private data class UpdateScaffoldRequest(
@@ -207,7 +227,7 @@ class HttpEngramClient(
         val activeScaffoldQuestion: String? = null,
         val sessionCount: Int = 0,
         val lastInteractionAt: Long? = null,
-        val phaseTransitions: List<String> = emptyList(),
+        val phaseTransitions: List<PhaseTransitionDto> = emptyList(),
     )
 
     private fun ScaffoldState.toUpdateRequest() = UpdateScaffoldRequest(
@@ -219,6 +239,15 @@ class HttpEngramClient(
         },
         answeredCategories     = answeredCategories.map { it.name }.toSet(),
         activeScaffoldQuestion = activeScaffoldQuestion,
-        lastInteractionAt      = System.currentTimeMillis(),
+        sessionCount           = sessionCount,
+        lastInteractionAt      = lastInteractionAt ?: System.currentTimeMillis(),
+        phaseTransitions       = phaseTransitions.map {
+            PhaseTransitionDto(
+                from      = it.from,
+                to        = it.to,
+                timestamp = it.timestamp,
+                evidence  = it.evidence,
+            )
+        },
     )
 }

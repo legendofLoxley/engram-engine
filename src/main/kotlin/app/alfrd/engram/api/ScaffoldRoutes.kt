@@ -63,6 +63,18 @@ fun Application.configureScaffoldRoutes(db: Database) {
     routing {
         route("/scaffold") {
             /**
+             * GET /scaffold/state/{userId}/transitions
+             * Returns the ordered phase-transition history for a user.
+             * Read-only; no side effects. Used by Cognitive Explorer for debugging.
+             */
+            get("/state/{userId}/transitions") {
+                val userId = call.parameters["userId"]
+                    ?: return@get call.respond(HttpStatusCode.BadRequest, "Missing userId")
+
+                call.respond(HttpStatusCode.OK, store.get(userId).phaseTransitions)
+            }
+
+            /**
              * GET /scaffold/state/{userId}
              * Returns the persisted scaffold state for a user.
              * Returns a default ORIENTATION state (not stored) for users with no history.

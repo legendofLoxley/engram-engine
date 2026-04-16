@@ -5,6 +5,8 @@ import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
+import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
+import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.LlmClient
@@ -36,6 +38,7 @@ class CognitivePipeline(
     private val llmClient: LlmClient? = null,
     private val selectionService: ResponseSelectionService? = null,
     private val memoryWriteService: MemoryWriteService? = null,
+    private val transitionService: TrustPhaseTransitionService? = null,
 ) {
 
     private val attention     = Attention()
@@ -144,10 +147,25 @@ class CognitivePipeline(
 
         // Load scaffold state for context-aware greeting selection.
         // Failure is non-fatal — selection falls back to phase-neutral scoring.
-        val scaffoldState: ScaffoldState? = try {
+        var scaffoldState: ScaffoldState? = try {
             engramClient.getScaffoldState(userId)
         } catch (_: Exception) {
             null
+        }
+
+        // Evaluate dormancy regression before using state for greeting selection.
+        // If the user has been away more than 90 days, regress their phase by one level
+        // (capped at WORKING_RHYTHM — never back to ORIENTATION from dormancy alone).
+        if (scaffoldState != null && transitionService != null) {
+            val regression = transitionService.evaluateDormancyRegression(scaffoldState)
+            if (regression is TransitionDecision.Transition) {
+                try {
+                    transitionService.apply(userId, regression)
+                    scaffoldState = engramClient.getScaffoldState(userId)
+                } catch (_: Exception) {
+                    // Regression write failure is non-fatal — greet with stale phase
+                }
+            }
         }
 
         val trustPhaseString = when (scaffoldState?.trustPhase) {

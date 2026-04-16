@@ -1,5 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline.memory
 
+import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
+import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,13 +20,21 @@ import java.util.logging.Logger
  * the scaffold state is updated via a read-modify-write so the answered category is
  * persisted in sync with the actual ingested data.
  *
- * @param engramClient Memory backend to write to.
- * @param scope        Coroutine scope for launches. Override in tests to inject a
- *                     controllable scope (e.g. the [kotlinx.coroutines.test.TestScope]).
+ * When a new category is added (not an amendment of an existing one), [transitionService]
+ * is asked to evaluate whether the updated state satisfies advancement criteria. Any
+ * resulting transition is applied before the coroutine exits.
+ *
+ * @param engramClient      Memory backend to write to.
+ * @param scope             Coroutine scope for launches. Override in tests to inject a
+ *                          controllable scope (e.g. the [kotlinx.coroutines.test.TestScope]).
+ * @param transitionService Optional phase-transition service. When null, transitions are
+ *                          never evaluated — the phase stays unchanged until the service
+ *                          is wired in.
  */
 class MemoryWriteService(
     private val engramClient: EngramClient,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val transitionService: TrustPhaseTransitionService? = null,
 ) {
 
     private val logger = Logger.getLogger(MemoryWriteService::class.java.name)
@@ -72,6 +82,28 @@ class MemoryWriteService(
                                     userId,
                                     state.copy(answeredCategories = state.answeredCategories + category),
                                 )
+                                // Only evaluate transition when a genuinely new category was added.
+                                // Amending an existing phrase (same category already answered) skips this.
+                                if (transitionService != null) {
+                                    try {
+                                        val updatedState = engramClient.getScaffoldState(userId)
+                                        val decision = transitionService.evaluate(updatedState)
+                                        if (decision is TransitionDecision.Transition) {
+                                            transitionService.apply(userId, decision)
+                                            logger.info(
+                                                "Trust phase transition: user=$userId " +
+                                                    "${transitionService.phaseIntToString(decision.from)} → " +
+                                                    "${transitionService.phaseIntToString(decision.to)} " +
+                                                    "evidence='${decision.evidence}'"
+                                            )
+                                        }
+                                    } catch (e: Exception) {
+                                        logger.warning(
+                                            "Phase transition evaluation failed for userId=$userId " +
+                                                "turn=$turnIndex: ${e.message}"
+                                        )
+                                    }
+                                }
                             }
                         } catch (e: Exception) {
                             logger.warning(

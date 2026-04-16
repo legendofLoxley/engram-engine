@@ -3,6 +3,7 @@ package app.alfrd.engram.cognitive
 import app.alfrd.engram.cognitive.pipeline.CognitivePipeline
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
+import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
 import com.arcadedb.database.Database
@@ -31,12 +32,14 @@ object CognitivePipelineFactory {
 
         val selectionService = db?.let { ResponseSelectionService(it) }
         val engramClient     = InMemoryEngramClient()
+        val transitionService = TrustPhaseTransitionService(engramClient)
 
         return CognitivePipeline(
-            engramClient      = engramClient,
-            llmClient         = llmClient,
-            selectionService  = selectionService,
-            memoryWriteService = MemoryWriteService(engramClient),
+            engramClient       = engramClient,
+            llmClient          = llmClient,
+            selectionService   = selectionService,
+            memoryWriteService = MemoryWriteService(engramClient, transitionService = transitionService),
+            transitionService  = transitionService,
         )
     }
 }
