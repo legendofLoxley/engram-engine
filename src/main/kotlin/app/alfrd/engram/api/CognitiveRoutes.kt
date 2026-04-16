@@ -90,6 +90,22 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                     )
                 )
             }
+
+            post("/init") {
+                val req = call.receive<InitSessionRequest>()
+
+                val pipeline = sessionManager.getOrCreate(req.sessionId)
+                val result   = pipeline.initSession(req.sessionId, req.userId, req.context)
+
+                call.respond(
+                    HttpStatusCode.OK,
+                    InitSessionResponse(
+                        greeting  = result.greeting,
+                        phraseId  = result.phraseId,
+                        sessionId = result.sessionId,
+                    )
+                )
+            }
         }
     }
 }
