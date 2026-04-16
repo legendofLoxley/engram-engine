@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.providers.LlmClient
@@ -13,17 +14,25 @@ import app.alfrd.engram.cognitive.providers.LlmRequest
  * Flow per turn:
  * 1. Load scaffold state from [engramClient].
  * 2. On first interaction ever: return the opening question, store as active scaffold question.
- * 3. Otherwise: decompose + ingest the utterance, mark newly covered categories, determine
+ * 3. Otherwise: capture the utterance for async memory ingestion via [memoryWriteService]
+ *    (or synchronously if no service is wired), advance answered categories, determine
  *    the next uncovered category in priority order (IDENTITY → EXPERTISE → PREFERENCE →
  *    ROUTINE → RELATIONSHIP → CONTEXT), generate a contextual question via [llmClient],
  *    and store it as the new active scaffold question.
  * 4. When all categories are covered: emit a summary acknowledgment and clear the active question.
+ *
+ * When [memoryWriteService] is provided the decompose + ingest step runs asynchronously
+ * after the response is sent — the user never waits for phrase ingestion. Category
+ * advancement uses a heuristic: the category the active question was about is marked
+ * as answered. When [memoryWriteService] is null the old synchronous path is used
+ * (backward-compatible for tests that construct the branch directly).
  *
  * LLM failure falls back to a hardcoded question — the onboarding loop never stalls.
  */
 class OnboardingBranch(
     private val engramClient: EngramClient,
     private val llmClient: LlmClient?,
+    private val memoryWriteService: MemoryWriteService? = null,
 ) : Branch {
 
     companion object {
@@ -56,19 +65,35 @@ class OnboardingBranch(
         }
 
         // ── Decompose and ingest the user's answer ────────────────────────────
-        val candidates = try {
-            engramClient.decompose(ctx.utterance, ctx.priorUtterances)
-        } catch (e: Exception) {
-            emptyList()
+        val updatedAnswered: Set<PhraseCategory>
+        val recentContent: List<String>
+        if (memoryWriteService != null) {
+            // Async path — fire-and-forget; user response is not blocked on ingestion
+            val currentCategory = SCAFFOLD_PRIORITY.firstOrNull { it !in state.answeredCategories }
+            memoryWriteService.captureUtterance(
+                utterance        = ctx.utterance,
+                userId           = ctx.userId,
+                sessionId        = ctx.sessionId,
+                turnIndex        = ctx.priorUtterances.size,
+                scaffoldCategory = currentCategory?.name,
+                sourceTag        = "onboarding_conversation",
+            )
+            // Optimistically advance: assume the user answered the category we were asking about
+            updatedAnswered = state.answeredCategories + setOfNotNull(currentCategory)
+            recentContent   = emptyList() // no candidates available in the async path
+        } else {
+            // Sync path — backward-compatible for tests that construct the branch directly
+            val candidates = try {
+                engramClient.decompose(ctx.utterance, ctx.priorUtterances)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            try {
+                if (candidates.isNotEmpty()) engramClient.ingest(candidates)
+            } catch (_: Exception) {}
+            updatedAnswered = state.answeredCategories + candidates.map { it.category }.toSet()
+            recentContent   = candidates.take(3).map { it.content }
         }
-
-        try {
-            if (candidates.isNotEmpty()) engramClient.ingest(candidates)
-        } catch (_: Exception) {}
-
-        // ── Advance answered categories ───────────────────────────────────────
-        val newlyCovered = candidates.map { it.category }.toSet()
-        val updatedAnswered = state.answeredCategories + newlyCovered
 
         // ── Find next uncovered category ──────────────────────────────────────
         val nextUncovered = SCAFFOLD_PRIORITY.firstOrNull { it !in updatedAnswered }
@@ -84,7 +109,7 @@ class OnboardingBranch(
         }
 
         // ── Generate next scaffold question ───────────────────────────────────
-        val question = generateScaffoldQuestion(nextUncovered, candidates.take(3).map { it.content }, ctx)
+        val question = generateScaffoldQuestion(nextUncovered, recentContent, ctx)
 
         val newState = state.copy(answeredCategories = updatedAnswered, activeScaffoldQuestion = question)
         tryUpdateState(ctx.userId, newState)

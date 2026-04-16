@@ -2,6 +2,7 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.LlmClient
@@ -32,11 +33,12 @@ class CognitivePipeline(
     private val engramClient: EngramClient = InMemoryEngramClient(),
     private val llmClient: LlmClient? = null,
     private val selectionService: ResponseSelectionService? = null,
+    private val memoryWriteService: MemoryWriteService? = null,
 ) {
 
     private val attention     = Attention()
     private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
-    private val router        = Router(engramClient, llmClient, selectionService)
+    private val router        = Router(engramClient, llmClient, selectionService, memoryWriteService)
     private val expression    = Expression()
 
     private val stages: List<CognitiveStage> = listOf(attention, comprehension, expression)
