@@ -65,7 +65,10 @@ class SocialBranch(
                 context = ctx,
                 limit = 1,
             )
+            val selectionStartMs = System.currentTimeMillis()
             val results = selectionService.select(query)
+            ctx.selectionLatencyMs = System.currentTimeMillis() - selectionStartMs
+            ctx.selectionResult = results.firstOrNull()
             results.firstOrNull()?.interpolated ?: fallback
         } catch (_: Exception) {
             fallback

@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
 import app.alfrd.engram.model.ResponsePhrase
 import java.time.Instant
 
@@ -49,4 +50,9 @@ data class CognitiveContext(
 
     // ── Debug trace (populated only for debug endpoint) ───────────────────────
     var trace: PipelineTrace? = null,
+
+    // ── Selection (populated by ResponseSelectionService during branch execution) ──
+    var selectionResult: ResponseSelectionResult? = null,
+    var selectionCandidatesConsidered: Int = 0,
+    var selectionLatencyMs: Long = 0L,
 )

@@ -10,6 +10,7 @@ data class PipelineTrace(
     val session: SessionTrace = SessionTrace(),
     val latencyBreakdown: LatencyBreakdownTrace = LatencyBreakdownTrace(),
     val model: ModelTrace = ModelTrace(),
+    var responseSelection: ResponseSelectionTrace? = null,
 )
 
 @Serializable
@@ -53,4 +54,16 @@ data class ModelTrace(
     var reasonProvider: String? = null,
     var reasonModel: String? = null,
     var comprehensionModel: String? = null,
+)
+
+@Serializable
+data class ResponseSelectionTrace(
+    val phraseId: String,
+    val phraseText: String,
+    val interpolatedText: String,
+    val strategy: ResponseStrategy,
+    val compositeScore: Double,
+    val scores: Map<String, Double>,
+    val candidatesConsidered: Int,
+    val selectionLatencyMs: Long,
 )

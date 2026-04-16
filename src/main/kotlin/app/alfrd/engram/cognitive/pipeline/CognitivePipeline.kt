@@ -149,6 +149,27 @@ class CognitivePipeline(
             val (provider, model) = reasonModelInfo(branch)
             trace.model.reasonProvider = provider
             trace.model.reasonModel = model
+
+            val selResult = ctx.selectionResult
+            if (selResult != null) {
+                val strategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE
+                trace.responseSelection = ResponseSelectionTrace(
+                    phraseId = selResult.phrase.uid,
+                    phraseText = selResult.phrase.text,
+                    interpolatedText = selResult.interpolated,
+                    strategy = strategy,
+                    compositeScore = selResult.compositeScore,
+                    scores = mapOf(
+                        "freshness"           to (selResult.scoreBreakdown["freshness"]           ?: 0.0),
+                        "contextual_fit"      to (selResult.scoreBreakdown["contextualFit"]       ?: 0.0),
+                        "communication_fit"   to (selResult.scoreBreakdown["communicationFit"]    ?: 0.0),
+                        "phase_appropriateness" to (selResult.scoreBreakdown["phaseAppropriateness"] ?: 0.0),
+                        "effectiveness"       to (selResult.scoreBreakdown["effectiveness"]       ?: 0.0),
+                    ),
+                    candidatesConsidered = ctx.selectionCandidatesConsidered,
+                    selectionLatencyMs = ctx.selectionLatencyMs,
+                )
+            }
         }
 
         // ── Expression ───────────────────────────────────────────────────────

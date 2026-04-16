@@ -34,6 +34,9 @@ class ResponseSelectionService(
         val candidates = filterCandidates(query)
         if (candidates.isEmpty()) return emptyList()
 
+        // Expose filter count for trace capture
+        ctx.selectionCandidatesConsidered = candidates.size
+
         // 2. Score + 3. Rank
         val weights = SelectionWeights.forBranch(query.branch)
         val turnIndex = ctx.priorUtterances.size + 1
