@@ -45,6 +45,8 @@ data class InitSessionResponse(
     val greeting: String,
     val phraseId: String,
     val sessionId: String,
+    /** Scaffold question to append for ORIENTATION users with < 3 answered categories. Null otherwise. */
+    val scaffoldQuestion: String? = null,
 )
 
 fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
@@ -100,9 +102,10 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 call.respond(
                     HttpStatusCode.OK,
                     InitSessionResponse(
-                        greeting  = result.greeting,
-                        phraseId  = result.phraseId,
-                        sessionId = result.sessionId,
+                        greeting         = result.greeting,
+                        phraseId         = result.phraseId,
+                        sessionId        = result.sessionId,
+                        scaffoldQuestion = result.scaffoldQuestion,
                     )
                 )
             }

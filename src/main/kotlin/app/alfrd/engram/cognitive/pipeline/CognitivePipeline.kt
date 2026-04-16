@@ -3,6 +3,8 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
+import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
+import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.LlmClient
@@ -72,6 +74,8 @@ class CognitivePipeline(
         val greeting: String,
         val phraseId: String,
         val sessionId: String,
+        /** Scaffold question to append for ORIENTATION users with < 3 answered categories. Null otherwise. */
+        val scaffoldQuestion: String? = null,
     )
 
     /**
@@ -97,11 +101,12 @@ class CognitivePipeline(
     }
 
     /**
-     * INIT signal — selects a greeting phrase when a session starts.
+     * INIT signal — selects a scaffold-aware greeting phrase when a session starts.
      *
-     * Builds a minimal [CognitiveContext] from the provided hints, runs response
-     * selection against the SOCIAL/GREETING pool, records a SELECTED edge for
-     * freshness tracking, and returns the interpolated greeting text.
+     * Loads the user's scaffold state so that:
+     *   - Trust phase drives phase-appropriateness scoring
+     *   - Session gap drives contextual-fit scoring (gap-aware phrases)
+     *   - First-ever sessions receive a greeting + the opening scaffold question
      *
      * No LLM, no streaming, no pipeline trace — single-shot selection only.
      *
@@ -137,12 +142,31 @@ class CognitivePipeline(
             )
         }
 
+        // Load scaffold state for context-aware greeting selection.
+        // Failure is non-fatal — selection falls back to phase-neutral scoring.
+        val scaffoldState: ScaffoldState? = try {
+            engramClient.getScaffoldState(userId)
+        } catch (_: Exception) {
+            null
+        }
+
+        val trustPhaseString = when (scaffoldState?.trustPhase) {
+            1 -> "ORIENTATION"
+            2 -> "WORKING_RHYTHM"
+            3 -> "CONTEXT"
+            4 -> "UNDERSTANDING"
+            else -> null
+        }
+
         val ctx = CognitiveContext(
-            utterance = "",
-            sessionId = sessionId,
-            userId    = userId,
-            timestamp = timestamp,
-            zoneId    = zoneId,
+            utterance         = "",
+            sessionId         = sessionId,
+            userId            = userId,
+            timestamp         = timestamp,
+            zoneId            = zoneId,
+            trustPhase        = trustPhaseString,
+            sessionCount      = scaffoldState?.sessionCount ?: 0,
+            lastInteractionAt = scaffoldState?.lastInteractionAt,
         )
 
         val query = ResponseSelectionQuery(
@@ -155,25 +179,57 @@ class CognitivePipeline(
 
         return try {
             val result = selectionService.select(query).firstOrNull()
-            if (result != null) {
-                InitResponse(
-                    greeting  = result.interpolated,
-                    phraseId  = result.phrase.uid,
-                    sessionId = sessionId,
-                )
-            } else {
-                InitResponse(
-                    greeting  = fallbackGreeting(),
-                    phraseId  = "fallback",
-                    sessionId = sessionId,
-                )
-            }
+            val greeting = result?.interpolated ?: fallbackGreeting()
+            val phraseId = result?.phrase?.uid ?: "fallback"
+
+            InitResponse(
+                greeting         = greeting,
+                phraseId         = phraseId,
+                sessionId        = sessionId,
+                scaffoldQuestion = resolveScaffoldQuestion(scaffoldState),
+            )
         } catch (_: Exception) {
             InitResponse(
                 greeting  = fallbackGreeting(),
                 phraseId  = "fallback",
                 sessionId = sessionId,
             )
+        }
+    }
+
+    /**
+     * Returns the scaffold question to pair with the INIT greeting, or null.
+     *
+     * Rules:
+     *   - ORIENTATION phase only
+     *   - Fewer than 3 answered categories
+     *   - Uses the active question if one exists; otherwise derives from the next
+     *     uncovered category (or the opener question for a brand-new user)
+     */
+    private fun resolveScaffoldQuestion(scaffoldState: ScaffoldState?): String? {
+        if (scaffoldState == null) return null
+        if (scaffoldState.trustPhase != 1) return null         // Not ORIENTATION
+        if (scaffoldState.answeredCategories.size >= 3) return null
+
+        // Return the question that was active when the user last left
+        scaffoldState.activeScaffoldQuestion?.let { return it }
+
+        // First-ever session — no question has been stored yet
+        if (scaffoldState.answeredCategories.isEmpty()) {
+            return "What are you working on right now?"
+        }
+
+        // Has some answered categories but no active question — derive the next one
+        val next = OnboardingBranch.SCAFFOLD_PRIORITY.firstOrNull { it !in scaffoldState.answeredCategories }
+        return next?.let { category ->
+            when (category) {
+                PhraseCategory.IDENTITY     -> "What are you working on right now?"
+                PhraseCategory.EXPERTISE    -> "What tools or technologies do you work with most?"
+                PhraseCategory.PREFERENCE   -> "Is there a particular way you prefer to work?"
+                PhraseCategory.ROUTINE      -> "What does a typical day look like for you?"
+                PhraseCategory.RELATIONSHIP -> "Do you work with a team, or mostly independently?"
+                PhraseCategory.CONTEXT      -> "Is there anything important about your current situation I should know?"
+            }
         }
     }
 

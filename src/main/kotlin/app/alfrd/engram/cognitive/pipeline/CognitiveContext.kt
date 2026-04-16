@@ -32,6 +32,8 @@ data class CognitiveContext(
     // ── Memory ────────────────────────────────────────────────────────────────
     var scaffoldState: Any? = null,
     var trustPhase: String? = null,
+    var sessionCount: Int = 0,
+    var lastInteractionAt: Long? = null,
     var relevantPhrases: List<String>? = null,
     val priorUtterances: MutableList<String> = mutableListOf(),
 

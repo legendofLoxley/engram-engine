@@ -28,14 +28,18 @@ data class Phrase(
 /**
  * Snapshot of a user's onboarding progress.
  *
- * @param trustPhase        Current trust phase (1–4).
- * @param answeredCategories Categories the user has already provided information for.
+ * @param trustPhase             Current trust phase (1–4).
+ * @param answeredCategories     Categories the user has already provided information for.
  * @param activeScaffoldQuestion The question currently being asked (drives Comprehension Rule 0).
+ * @param sessionCount           Total number of sessions this user has started.
+ * @param lastInteractionAt      Epoch-millis timestamp of the user's most recent interaction.
  */
 data class ScaffoldState(
     val trustPhase: Int = 1,
     val answeredCategories: Set<PhraseCategory> = emptySet(),
     val activeScaffoldQuestion: String? = null,
+    val sessionCount: Int = 0,
+    val lastInteractionAt: Long? = null,
 )
 
 /**
