@@ -58,7 +58,7 @@ object SelectionScorer {
     fun contextualFit(phrase: ResponsePhrase, ctx: CognitiveContext): Double {
         var score = 0.5 // baseline
         val text = phrase.text.lowercase()
-        val hour = LocalTime.ofInstant(ctx.timestamp, java.time.ZoneId.systemDefault()).hour
+        val hour = LocalTime.ofInstant(ctx.timestamp, ctx.zoneId ?: java.time.ZoneId.systemDefault()).hour
         val turnCount = ctx.priorUtterances.size + 1
 
         // Time-of-day alignment for greetings

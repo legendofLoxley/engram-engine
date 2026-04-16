@@ -15,6 +15,7 @@ data class CognitiveContext(
     val roomId: String = "foyer",
     val userId: String,
     val timestamp: Instant = Instant.now(),
+    val zoneId: java.time.ZoneId? = null,
 
     // ── Attention ─────────────────────────────────────────────────────────────
     var attentionAction: AttentionAction = AttentionAction.PROCESS,

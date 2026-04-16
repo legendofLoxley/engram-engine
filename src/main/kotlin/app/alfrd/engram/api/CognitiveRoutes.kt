@@ -33,6 +33,20 @@ data class DebugChatResponse(
     val debug: PipelineTrace,
 )
 
+@Serializable
+data class InitSessionRequest(
+    val sessionId: String,
+    val userId: String,
+    val context: Map<String, String>? = null,
+)
+
+@Serializable
+data class InitSessionResponse(
+    val greeting: String,
+    val phraseId: String,
+    val sessionId: String,
+)
+
 fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
     routing {
         route("/cognitive") {

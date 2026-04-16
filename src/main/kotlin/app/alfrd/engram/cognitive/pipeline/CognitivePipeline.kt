@@ -2,10 +2,14 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
+import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
+import app.alfrd.engram.model.BranchType
+import app.alfrd.engram.model.ExpressionPhase
+import app.alfrd.engram.model.ResponseCategory
 
 /**
  * Top-level orchestrator for the cognitive processing cycle.
@@ -61,6 +65,13 @@ class CognitivePipeline(
     /** Extended result including the full pipeline trace for the debug endpoint. */
     data class DebugChatResult(val chat: ChatResult, val trace: PipelineTrace)
 
+    /** Result of an INIT signal — the selected greeting for a new session. */
+    data class InitResponse(
+        val greeting: String,
+        val phraseId: String,
+        val sessionId: String,
+    )
+
     /**
      * Process a single utterance end-to-end and return the final response text.
      */
@@ -83,11 +94,99 @@ class CognitivePipeline(
         return DebugChatResult(chatResult, trace!!)
     }
 
+    /**
+     * INIT signal — selects a greeting phrase when a session starts.
+     *
+     * Builds a minimal [CognitiveContext] from the provided hints, runs response
+     * selection against the SOCIAL/GREETING pool, records a SELECTED edge for
+     * freshness tracking, and returns the interpolated greeting text.
+     *
+     * No LLM, no streaming, no pipeline trace — single-shot selection only.
+     *
+     * @param context  Optional client-side hints. Recognized keys:
+     *                   - `"timezone"` — IANA time-zone ID (e.g. "America/Los_Angeles")
+     * @param timestamp  Override the "now" instant used for time-of-day scoring.
+     *                   Defaults to [java.time.Instant.now]. Useful in tests.
+     */
+    suspend fun initSession(
+        sessionId: String,
+        userId: String,
+        context: Map<String, String>? = null,
+        timestamp: java.time.Instant = java.time.Instant.now(),
+    ): InitResponse {
+        val zoneId = context?.get("timezone")?.let {
+            try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
+        }
+
+        val fallbackGreeting: () -> String = {
+            val hour = java.time.LocalTime.now(zoneId ?: java.time.ZoneId.systemDefault()).hour
+            when {
+                hour < 12 -> "Good morning."
+                hour < 17 -> "Good afternoon."
+                else -> "Good evening."
+            }
+        }
+
+        if (selectionService == null) {
+            return InitResponse(
+                greeting  = fallbackGreeting(),
+                phraseId  = "fallback",
+                sessionId = sessionId,
+            )
+        }
+
+        val ctx = CognitiveContext(
+            utterance = "",
+            sessionId = sessionId,
+            userId    = userId,
+            timestamp = timestamp,
+            zoneId    = zoneId,
+        )
+
+        val query = ResponseSelectionQuery(
+            branch          = BranchType.SOCIAL,
+            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            category        = ResponseCategory.GREETING,
+            context         = ctx,
+            limit           = 1,
+        )
+
+        return try {
+            val result = selectionService.select(query).firstOrNull()
+            if (result != null) {
+                InitResponse(
+                    greeting  = result.interpolated,
+                    phraseId  = result.phrase.uid,
+                    sessionId = sessionId,
+                )
+            } else {
+                InitResponse(
+                    greeting  = fallbackGreeting(),
+                    phraseId  = "fallback",
+                    sessionId = sessionId,
+                )
+            }
+        } catch (_: Exception) {
+            InitResponse(
+                greeting  = fallbackGreeting(),
+                phraseId  = "fallback",
+                sessionId = sessionId,
+            )
+        }
+    }
+
     private suspend fun processInternal(
         utterance: String, sessionId: String, userId: String, debug: Boolean,
     ): Pair<ChatResult, PipelineTrace?> {
         val trace = if (debug) PipelineTrace() else null
-        val pipelineStartNs = if (debug) System.nanoTime() else 0L
+        // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
+        // the breakdown always adds up correctly regardless of sub-millisecond rounding.
+        var memoryNs = 0L
+        var comprehensionNs = 0L
+        var routingNs = 0L
+        var reasonNs = 0L
+        var expressionNs = 0L
+
         // Load scaffold state before Comprehension so Rule 0 fires correctly on subsequent turns.
         // An active scaffold question means the user is mid-onboarding and any utterance is an answer.
         val memoryStartNs = if (debug) System.nanoTime() else 0L
@@ -98,8 +197,9 @@ class CognitivePipeline(
             null
         }
         if (debug) {
+            memoryNs = System.nanoTime() - memoryStartNs
             trace!!.latencyBreakdown.memoryMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - memoryStartNs)
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(memoryNs)
         }
 
         val ctx = CognitiveContext(
@@ -122,8 +222,9 @@ class CognitivePipeline(
         val comprehensionStartNs = if (debug) System.nanoTime() else 0L
         comprehension.evaluate(ctx)
         if (debug) {
+            comprehensionNs = System.nanoTime() - comprehensionStartNs
             trace!!.latencyBreakdown.comprehensionMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - comprehensionStartNs)
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(comprehensionNs)
             trace.model.comprehensionModel = if (trace.comprehension.tierTwoFired) tier2ModelName() else null
         }
 
@@ -131,8 +232,9 @@ class CognitivePipeline(
         val routingStartNs = if (debug) System.nanoTime() else 0L
         val branch = router.route(ctx.intent)
         if (debug) {
+            routingNs = System.nanoTime() - routingStartNs
             trace!!.latencyBreakdown.routingMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - routingStartNs)
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(routingNs)
             trace.routing.intentType = ctx.intent.name
             trace.routing.confidence = ctx.intentConfidence
             trace.routing.secondaryIntent = ctx.secondaryIntent?.name
@@ -144,8 +246,9 @@ class CognitivePipeline(
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
         if (debug) {
+            reasonNs = System.nanoTime() - reasonStartNs
             trace!!.latencyBreakdown.reasonMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reasonStartNs)
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(reasonNs)
             val (provider, model) = reasonModelInfo(branch)
             trace.model.reasonProvider = provider
             trace.model.reasonModel = model
@@ -176,10 +279,13 @@ class CognitivePipeline(
         val expressionStartNs = if (debug) System.nanoTime() else 0L
         expression.evaluate(ctx)
         if (debug) {
+            expressionNs = System.nanoTime() - expressionStartNs
             trace!!.latencyBreakdown.expressionMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - expressionStartNs)
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(expressionNs)
             trace.latencyBreakdown.totalPipelineMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - pipelineStartNs)
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    memoryNs + comprehensionNs + routingNs + reasonNs + expressionNs
+                )
 
             trace.session.scaffoldState = null // Serialising arbitrary objects is fragile; null for now
             trace.session.trustPhase = ctx.trustPhase?.toIntOrNull()
