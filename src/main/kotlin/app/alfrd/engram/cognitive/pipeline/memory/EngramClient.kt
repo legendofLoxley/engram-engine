@@ -51,8 +51,11 @@ interface EngramClient {
     /** Write phrase candidates to the memory graph. */
     suspend fun ingest(candidates: List<PhraseCandidate>)
 
-    /** Retrieve relevant phrases by concept or keyword. */
-    suspend fun queryPhrases(concept: String): List<Phrase>
+    /**
+     * Retrieve relevant phrases by concept or keyword.
+     * [userId] filters results to phrases owned by that user; blank means no filter (dev/test only).
+     */
+    suspend fun queryPhrases(concept: String, userId: String = ""): List<Phrase>
 
     /** Get onboarding progress for [userId], initialising a fresh state if none exists. */
     suspend fun getScaffoldState(userId: String): ScaffoldState

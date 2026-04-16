@@ -1,7 +1,9 @@
 package app.alfrd.engram
 
 import app.alfrd.engram.api.configureCognitiveRoutes
+import app.alfrd.engram.api.configurePhrasesRoutes
 import app.alfrd.engram.api.configureRoutes
+import app.alfrd.engram.api.configureScaffoldRoutes
 import app.alfrd.engram.api.configureSelectionRoutes
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.CognitivePipelineFactory
@@ -46,6 +48,8 @@ fun main() {
         configureRoutes(db)
         configureCognitiveRoutes(sessionManager)
         configureSelectionRoutes(ResponseSelectionService(db))
+        configureScaffoldRoutes(db)
+        configurePhrasesRoutes(db)
     }.start(wait = true)
 
     Runtime.getRuntime().addShutdownHook(Thread {

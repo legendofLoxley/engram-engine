@@ -81,7 +81,8 @@ class InMemoryEngramClient : EngramClient {
 
     // ── Query ─────────────────────────────────────────────────────────────────
 
-    override suspend fun queryPhrases(concept: String): List<Phrase> {
+    // userId filtering is enforced server-side; InMemory returns all matching phrases regardless of userId.
+    override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> {
         val words = concept.lowercase().split(Regex("\\s+")).filter { it.length > 2 }
         return phrases.filter { phrase ->
             val lower = phrase.content.lowercase()

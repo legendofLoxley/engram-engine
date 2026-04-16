@@ -18,6 +18,11 @@ object SchemaBootstrap {
                 vt.createProperty("visibility", Type.STRING)   // public/private/archived
                 vt.createProperty("createdAt", Type.LONG)
                 vt.createProperty("updatedAt", Type.LONG)
+                // Read-path fields — written by the ingest pipeline (separate task)
+                vt.createProperty("userId", Type.STRING)
+                vt.createProperty("source", Type.STRING)
+                vt.createProperty("trustPhase", Type.INTEGER)
+                vt.createProperty("score", Type.DOUBLE)
             }
 
             ensureVertex(schema, "Concept") { vt ->
@@ -70,6 +75,17 @@ object SchemaBootstrap {
                 vt.createProperty("variants", Type.STRING)          // JSON array, nullable
                 vt.createProperty("requiresInterpolation", Type.BOOLEAN)
                 vt.createProperty("interpolationKeys", Type.STRING) // JSON array, nullable
+            }
+
+            ensureVertex(schema, "UserScaffoldState") { vt ->
+                vt.createProperty("userId", Type.STRING)
+                vt.createProperty("trustPhase", Type.STRING)         // ORIENTATION | WORKING_RHYTHM | CONTEXT | UNDERSTANDING
+                vt.createProperty("answeredCategories", Type.STRING) // JSON array of PhraseCategory names
+                vt.createProperty("activeScaffoldQuestion", Type.STRING) // nullable
+                vt.createProperty("sessionCount", Type.INTEGER)
+                vt.createProperty("lastInteractionAt", Type.LONG)    // nullable
+                vt.createProperty("phaseTransitions", Type.STRING)   // JSON array of PhaseTransitionRecord
+                vt.createProperty("updatedAt", Type.LONG)
             }
 
             // ── Edge types ────────────────────────────────────────────────
@@ -131,6 +147,7 @@ object SchemaBootstrap {
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
+            ensureIndex(schema, "Phrase",      "userId")
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Source",      "uid")
@@ -139,6 +156,7 @@ object SchemaBootstrap {
             ensureIndex(schema, "Scope",       "uid")
             ensureIndex(schema, "ResponsePhrase", "uid")
             ensureIndex(schema, "ResponsePhrase", "hash")
+            ensureIndex(schema, "UserScaffoldState", "userId")
         }
     }
 

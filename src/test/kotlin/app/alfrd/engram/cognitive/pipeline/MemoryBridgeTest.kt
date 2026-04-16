@@ -166,6 +166,11 @@ class MemoryBridgeIntegrationTest {
                 capturedPrompt!!.systemPrompt?.contains("fintech") == true,
             "Expected phrase context injected into system prompt, got: ${capturedPrompt!!.systemPrompt}",
         )
+        // Source attribution and confidence should be present when phrases exist
+        assertTrue(
+            capturedPrompt!!.systemPrompt?.contains("source:") == true,
+            "Expected source attribution in system prompt, got: ${capturedPrompt!!.systemPrompt}",
+        )
     }
 
     @Test
@@ -234,7 +239,7 @@ class MemoryBridgeIntegrationTest {
                 throw RuntimeException("db down")
             override suspend fun ingest(candidates: List<PhraseCandidate>) =
                 throw RuntimeException("db down")
-            override suspend fun queryPhrases(concept: String): List<Phrase> =
+            override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> =
                 throw RuntimeException("db down")
             override suspend fun getScaffoldState(userId: String): ScaffoldState =
                 throw RuntimeException("db down")
