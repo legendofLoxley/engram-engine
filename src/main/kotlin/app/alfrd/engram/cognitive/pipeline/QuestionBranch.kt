@@ -31,19 +31,22 @@ class QuestionBranch(
         }
 
         val phrases = try {
-            engramClient.queryPhrases(ctx.memoryQueryHint ?: ctx.utterance)
+            engramClient.queryPhrases(ctx.memoryQueryHint ?: ctx.utterance, ctx.userId)
         } catch (_: Exception) {
             emptyList()
         }
 
         try {
             val systemPrompt = if (phrases.isNotEmpty()) {
-                val context = phrases.take(5).joinToString("\n") { "- ${it.content}" }
+                val context = phrases.take(5).joinToString("\n") { phrase ->
+                    val confidence = "%.0f".format(phrase.score * 100)
+                    "- ${phrase.content} [source: ${phrase.source}, confidence: $confidence%]"
+                }
                 """
                     You are a composed, warm assistant. Answer the user's question using what you know about them.
-                    Context about the user:
+                    Context about the user (source and confidence shown):
                     $context
-                    Answer concisely and warmly. 1–3 sentences unless more depth is clearly needed.
+                    Treat lower-confidence items as tentative. Answer concisely and warmly. 1–3 sentences unless more depth is clearly needed.
                 """.trimIndent()
             } else {
                 "You are a composed, warm assistant. No personal context is available. Answer generally and helpfully. Be concise."

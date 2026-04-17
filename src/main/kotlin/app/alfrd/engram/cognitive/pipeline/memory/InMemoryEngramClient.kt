@@ -19,16 +19,30 @@ class InMemoryEngramClient : EngramClient {
      * each segment by keyword matching. The real decomposition will use an LLM.
      */
     override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> {
-        val sentences = text.split(Regex("[.!?]+"))
+        val segments = text.split(Regex("[.!?]+"))
             .map { it.trim() }
             .filter { it.isNotBlank() }
-        return sentences.map { segment ->
+            .flatMap { sentence ->
+                // Split further on contrastive markers — each clause may carry a different truth value
+                sentence.split(CONTRASTIVE_MARKERS)
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+            }
+        return segments.map { segment ->
             PhraseCandidate(
                 content = segment,
                 source = "user",
                 category = classifySegment(segment.lowercase()),
             )
         }
+    }
+
+    companion object {
+        /** Matches contrastive conjunctions used to split a sentence into distinct claims. */
+        private val CONTRASTIVE_MARKERS = Regex(
+            """\s+(?:but|however|although|yet|while|whereas|though|even\s+though)\s+""",
+            RegexOption.IGNORE_CASE,
+        )
     }
 
     private fun classifySegment(lower: String): PhraseCategory = when {
@@ -81,7 +95,8 @@ class InMemoryEngramClient : EngramClient {
 
     // ── Query ─────────────────────────────────────────────────────────────────
 
-    override suspend fun queryPhrases(concept: String): List<Phrase> {
+    // userId filtering is enforced server-side; InMemory returns all matching phrases regardless of userId.
+    override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> {
         val words = concept.lowercase().split(Regex("\\s+")).filter { it.length > 2 }
         return phrases.filter { phrase ->
             val lower = phrase.content.lowercase()

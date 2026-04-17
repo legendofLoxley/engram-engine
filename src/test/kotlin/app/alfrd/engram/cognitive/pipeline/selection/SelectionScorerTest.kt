@@ -117,6 +117,114 @@ class SelectionScorerTest {
     }
 
     @Test
+    fun `contextual fit scores 1_0 for midnight oil phrase at 11 PM`() {
+        val lateNight = LocalDate.now().atTime(23, 0)
+            .atZone(ZoneId.systemDefault()).toInstant()
+        val ctx = CognitiveContext(utterance = "hello", sessionId = "s", userId = "u", timestamp = lateNight)
+        val score = SelectionScorer.contextualFit(phrase(text = "Burning the midnight oil, I see."), ctx)
+        assertEquals(1.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 0_0 for midnight oil phrase at 2 PM`() {
+        val afternoon = LocalDate.now().atTime(14, 0)
+            .atZone(ZoneId.systemDefault()).toInstant()
+        val ctx = CognitiveContext(utterance = "hello", sessionId = "s", userId = "u", timestamp = afternoon)
+        val score = SelectionScorer.contextualFit(phrase(text = "Burning the midnight oil, I see."), ctx)
+        assertEquals(0.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 1_0 for early start phrase before 7 AM`() {
+        val earlyMorning = LocalDate.now().atTime(5, 30)
+            .atZone(ZoneId.systemDefault()).toInstant()
+        val ctx = CognitiveContext(utterance = "hello", sessionId = "s", userId = "u", timestamp = earlyMorning)
+        val score = SelectionScorer.contextualFit(phrase(text = "Early start today."), ctx)
+        assertEquals(1.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 0_0 for early start phrase at 9 AM`() {
+        val morning = LocalDate.now().atTime(9, 0)
+            .atZone(ZoneId.systemDefault()).toInstant()
+        val ctx = CognitiveContext(utterance = "hello", sessionId = "s", userId = "u", timestamp = morning)
+        val score = SelectionScorer.contextualFit(phrase(text = "Early start today."), ctx)
+        assertEquals(0.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 1_0 for been-a-while phrase with 8-day gap`() {
+        val now = Instant.now()
+        val eightDaysAgo = now.minusSeconds(8 * 24 * 3600).toEpochMilli()
+        val ctx = CognitiveContext(
+            utterance = "hello", sessionId = "s", userId = "u",
+            timestamp = now,
+            lastInteractionAt = eightDaysAgo,
+        )
+        val score = SelectionScorer.contextualFit(
+            phrase(text = "It's been a while. Good to have you back."), ctx,
+        )
+        assertEquals(1.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 0_1 for been-a-while phrase with no gap data`() {
+        val ctx = CognitiveContext(utterance = "hello", sessionId = "s", userId = "u")
+        val score = SelectionScorer.contextualFit(
+            phrase(text = "It's been a while. Good to have you back."), ctx,
+        )
+        assertEquals(0.1, score)
+    }
+
+    @Test
+    fun `contextual fit scores 1_0 for left-off phrase with same-day gap`() {
+        val now = Instant.now()
+        val twoHoursAgo = now.minusSeconds(2 * 3600).toEpochMilli()
+        val ctx = CognitiveContext(
+            utterance = "hello", sessionId = "s", userId = "u",
+            timestamp = now,
+            lastInteractionAt = twoHoursAgo,
+        )
+        val score = SelectionScorer.contextualFit(
+            phrase(text = "Right where we left off."), ctx,
+        )
+        assertEquals(1.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 1_0 for first-ever session meet-you phrase`() {
+        val ctx = CognitiveContext(
+            utterance = "hello", sessionId = "s", userId = "u",
+            sessionCount = 0,
+        )
+        val score = SelectionScorer.contextualFit(
+            phrase(text = "Good to meet you. I'd like to get oriented so I can be useful quickly."), ctx,
+        )
+        assertEquals(1.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 0_0 for meet-you phrase on returning user`() {
+        val ctx = CognitiveContext(
+            utterance = "hello", sessionId = "s", userId = "u",
+            sessionCount = 5,
+        )
+        val score = SelectionScorer.contextualFit(
+            phrase(text = "Good to meet you. I'd like to get oriented so I can be useful quickly."), ctx,
+        )
+        assertEquals(0.0, score)
+    }
+
+    @Test
+    fun `contextual fit scores 0_0 for acquainted phrase on returning user`() {
+        val ctx = CognitiveContext(utterance = "hello", sessionId = "s", userId = "u", sessionCount = 3)
+        val score = SelectionScorer.contextualFit(
+            phrase(text = "Welcome. I'm alfrd — let's get acquainted."), ctx,
+        )
+        assertEquals(0.0, score)
+    }
+
+    @Test
     fun `contextual fit boosts greeting on turn 1`() {
         val ctx = CognitiveContext(
             utterance = "hello", sessionId = "s", userId = "u",

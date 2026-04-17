@@ -34,6 +34,9 @@ class ResponseSelectionService(
         val candidates = filterCandidates(query)
         if (candidates.isEmpty()) return emptyList()
 
+        // Expose filter count for trace capture
+        ctx.selectionCandidatesConsidered = candidates.size
+
         // 2. Score + 3. Rank
         val weights = SelectionWeights.forBranch(query.branch)
         val turnIndex = ctx.priorUtterances.size + 1
@@ -223,7 +226,7 @@ class ResponseSelectionService(
     private fun interpolate(template: String, ctx: CognitiveContext): String {
         if (!template.contains("{")) return template
 
-        val hour = java.time.LocalTime.ofInstant(ctx.timestamp, java.time.ZoneId.systemDefault()).hour
+        val hour = java.time.LocalTime.ofInstant(ctx.timestamp, ctx.zoneId ?: java.time.ZoneId.systemDefault()).hour
         val timeOfDay = when {
             hour < 12 -> "morning"
             hour < 17 -> "afternoon"

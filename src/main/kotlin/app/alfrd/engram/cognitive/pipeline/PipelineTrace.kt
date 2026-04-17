@@ -14,18 +14,6 @@ data class PipelineTrace(
 )
 
 @Serializable
-data class ResponseSelectionTrace(
-    val phraseId: String,
-    val phraseText: String,
-    val interpolatedText: String,
-    val strategy: ResponseStrategy,
-    val compositeScore: Double,
-    val scores: Map<String, Double>,
-    val candidatesConsidered: Int,
-    val selectionLatencyMs: Long,
-)
-
-@Serializable
 data class ComprehensionTrace(
     var tier: Int = 1,
     var tierOneRuleMatched: String? = null,
@@ -66,4 +54,16 @@ data class ModelTrace(
     var reasonProvider: String? = null,
     var reasonModel: String? = null,
     var comprehensionModel: String? = null,
+)
+
+@Serializable
+data class ResponseSelectionTrace(
+    val phraseId: String,
+    val phraseText: String,
+    val interpolatedText: String,
+    val strategy: ResponseStrategy,
+    val compositeScore: Double,
+    val scores: Map<String, Double>,
+    val candidatesConsidered: Int,
+    val selectionLatencyMs: Long,
 )

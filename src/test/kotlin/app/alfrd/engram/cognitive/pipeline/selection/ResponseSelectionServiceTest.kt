@@ -204,7 +204,7 @@ class ResponseSelectionServiceTest {
             expressionPhase = ExpressionPhase.ACKNOWLEDGE,
             category = ResponseCategory.GREETING,
             context = ctx,
-            limit = 10,
+            limit = 25, // large enough to include all greeting phrases regardless of pool size
         )
         val results = service.select(query)
         val morningPhrase = results.find { it.phrase.text == "Good morning." }

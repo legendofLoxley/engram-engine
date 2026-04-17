@@ -23,17 +23,53 @@ object ResponsePhraseSeed {
     )
 
     private val seedPhrases = listOf(
-        // ── Greetings ─────────────────────────────────────────────────
+        // ── Greetings — time-of-day ────────────────────────────────────
         SeedPhrase("Good morning.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"), allPhases),
         SeedPhrase("Good afternoon.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"), allPhases),
         SeedPhrase("Good evening.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"), allPhases),
+        SeedPhrase("Good afternoon. The day's half gone — let's make the rest count.", "GREETING", "ACKNOWLEDGE",
+            listOf("SOCIAL"), listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
+        SeedPhrase("Early start today.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"), allPhases),
+        SeedPhrase("Burning the midnight oil, I see.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"), allPhases),
+
+        // ── Greetings — first-ever session (ORIENTATION only) ─────────
+        SeedPhrase("Good to meet you. I'd like to get oriented so I can be useful quickly.", "GREETING", "ACKNOWLEDGE",
+            listOf("SOCIAL"), listOf("ORIENTATION")),
+        SeedPhrase("Welcome. I'm alfrd — let's get acquainted.", "GREETING", "ACKNOWLEDGE",
+            listOf("SOCIAL"), listOf("ORIENTATION")),
+        SeedPhrase("Hello. I work best when I know who I'm working with.", "GREETING", "ACKNOWLEDGE",
+            listOf("SOCIAL"), listOf("ORIENTATION")),
+
+        // ── Greetings — returning user, early relationship ─────────────
         SeedPhrase("Good to see you.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
             listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
         SeedPhrase("Welcome back.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
             listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
+        SeedPhrase("Welcome back. Where were we?", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
+            listOf("WORKING_RHYTHM")),
+        SeedPhrase("Good to see you again. Ready to pick up where we left off?", "GREETING", "ACKNOWLEDGE",
+            listOf("SOCIAL"), listOf("ORIENTATION", "WORKING_RHYTHM")),
+        SeedPhrase("Back again. What's on your mind?", "GREETING", "ACKNOWLEDGE",
+            listOf("SOCIAL"), listOf("WORKING_RHYTHM")),
+
+        // ── Greetings — returning user, established relationship ───────
         SeedPhrase("Good to see you again, {userName}.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
             listOf("CONTEXT", "UNDERSTANDING"),
             requiresInterpolation = true, interpolationKeys = listOf("userName")),
+        SeedPhrase("Good {timeOfDay}. What are we working on?", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
+            listOf("CONTEXT", "UNDERSTANDING"),
+            requiresInterpolation = true, interpolationKeys = listOf("timeOfDay")),
+        SeedPhrase("Welcome back, {userName}. The usual?", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
+            listOf("CONTEXT", "UNDERSTANDING"),
+            requiresInterpolation = true, interpolationKeys = listOf("userName")),
+
+        // ── Greetings — session-gap-aware ──────────────────────────────
+        SeedPhrase("It's been a while. Good to have you back.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
+            listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
+        SeedPhrase("Right where we left off.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
+            listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
+        SeedPhrase("Good to have you back.", "GREETING", "ACKNOWLEDGE", listOf("SOCIAL"),
+            listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
 
         // ── Acknowledgments ───────────────────────────────────────────
         SeedPhrase("Of course.", "ACKNOWLEDGMENT", "ACKNOWLEDGE",

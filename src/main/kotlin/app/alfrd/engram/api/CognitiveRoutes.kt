@@ -33,6 +33,22 @@ data class DebugChatResponse(
     val debug: PipelineTrace,
 )
 
+@Serializable
+data class InitSessionRequest(
+    val sessionId: String,
+    val userId: String,
+    val context: Map<String, String>? = null,
+)
+
+@Serializable
+data class InitSessionResponse(
+    val greeting: String,
+    val phraseId: String,
+    val sessionId: String,
+    /** Scaffold question to append for ORIENTATION users with < 3 answered categories. Null otherwise. */
+    val scaffoldQuestion: String? = null,
+)
+
 fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
     routing {
         route("/cognitive") {
@@ -73,6 +89,23 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                         latencyMs         = latencyMs,
                         comprehensionTier = debugResult.chat.comprehensionTier,
                         debug             = debugResult.trace,
+                    )
+                )
+            }
+
+            post("/init") {
+                val req = call.receive<InitSessionRequest>()
+
+                val pipeline = sessionManager.getOrCreate(req.sessionId)
+                val result   = pipeline.initSession(req.sessionId, req.userId, req.context)
+
+                call.respond(
+                    HttpStatusCode.OK,
+                    InitSessionResponse(
+                        greeting         = result.greeting,
+                        phraseId         = result.phraseId,
+                        sessionId        = result.sessionId,
+                        scaffoldQuestion = result.scaffoldQuestion,
                     )
                 )
             }

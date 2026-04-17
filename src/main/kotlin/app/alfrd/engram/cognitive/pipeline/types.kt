@@ -1,5 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import kotlinx.serialization.Serializable
+
 enum class AttentionAction { PROCESS, IGNORE, INTERRUPT, CONTEXT_SWITCH }
 
 enum class AttentionPriority { HIGH, NORMAL, LOW }
@@ -8,6 +10,7 @@ enum class EnergyLevel { HIGH, MEDIUM, LOW }
 
 enum class IntentType { ONBOARDING, TASK, QUESTION, CORRECTION, SOCIAL, META, CLARIFICATION, AMBIGUOUS }
 
+@Serializable
 enum class ResponseStrategy { SIMPLE, COMPLEX, EMOTIONAL, SOCIAL }
 
 data class AffectConfig(

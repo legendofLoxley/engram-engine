@@ -6,11 +6,6 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -22,14 +17,15 @@ import java.util.logging.Logger
  * HTTP implementation of [EngramClient] targeting the engram-engine REST API at [baseUrl].
  *
  * Endpoint availability:
- * - `POST /ingest/text` — available
- * - `GET /phrases?q=…` — available
- * - `PATCH /phrases/:id` — available
- * - `decompose` — not yet available; falls back to the naive keyword heuristic
- * - `getScaffoldState` / `updateScaffoldState` — not yet available; falls back to in-memory map
+ * - `POST /ingest/text`              — available
+ * - `GET  /phrases?q=…&userId=…`    — available
+ * - `PATCH /phrases/:id`             — available
+ * - `GET  /scaffold/state/{userId}`  — available
+ * - `PUT  /scaffold/state/{userId}`  — available
+ * - `decompose`                      — not yet available; falls back to the naive keyword heuristic
  *
  * Any network failure leads to a logged warning and a graceful degradation —
- * branches are expected to continue producing responses using LLM general knowledge.
+ * branches continue producing responses using LLM general knowledge.
  */
 class HttpEngramClient(
     private val baseUrl: String = "http://localhost:18792",
@@ -38,9 +34,6 @@ class HttpEngramClient(
     private val logger = Logger.getLogger(HttpEngramClient::class.java.name)
     private val json = Json { ignoreUnknownKeys = true }
     private val http: HttpClient = HttpClient.newHttpClient()
-
-    // Scaffold state is not yet persisted server-side.
-    private val scaffoldStates = mutableMapOf<String, ScaffoldState>()
 
     // ── Decompose (local heuristic — no server endpoint yet) ──────────────────
 
@@ -68,11 +61,12 @@ class HttpEngramClient(
 
     // ── Query phrases ─────────────────────────────────────────────────────────
 
-    override suspend fun queryPhrases(concept: String): List<Phrase> = withContext(Dispatchers.IO) {
+    override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> = withContext(Dispatchers.IO) {
         try {
             val encoded = URLEncoder.encode(concept, "UTF-8")
+            val userParam = if (userId.isNotBlank()) "&userId=${URLEncoder.encode(userId, "UTF-8")}" else ""
             val req = HttpRequest.newBuilder()
-                .uri(URI.create("$baseUrl/phrases?q=$encoded"))
+                .uri(URI.create("$baseUrl/phrases?q=$encoded$userParam"))
                 .GET()
                 .build()
             val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
@@ -108,18 +102,48 @@ class HttpEngramClient(
         }
     }
 
-    // ── Scaffold state (in-memory fallback — no server endpoint yet) ──────────
+    // ── Scaffold state ────────────────────────────────────────────────────────
+    //
+    // Graceful degradation: if the endpoint is unreachable, return a default "new user"
+    // state (ORIENTATION, no categories). Do NOT fall back to an in-memory map — stale
+    // in-memory data after a container restart is worse than starting fresh.
 
-    override suspend fun getScaffoldState(userId: String): ScaffoldState {
-        logger.warning("Scaffold persistence is deferred — using in-memory state for userId=$userId")
-        return scaffoldStates.getOrPut(userId) { ScaffoldState() }
+    override suspend fun getScaffoldState(userId: String): ScaffoldState = withContext(Dispatchers.IO) {
+        try {
+            val req = HttpRequest.newBuilder()
+                .uri(URI.create("$baseUrl/scaffold/state/${URLEncoder.encode(userId, "UTF-8")}"))
+                .GET()
+                .build()
+            val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
+            if (resp.statusCode() in 200..299) {
+                val dto = json.decodeFromString<ScaffoldStateDto>(resp.body())
+                dto.toScaffoldState()
+            } else {
+                logger.warning("getScaffoldState returned HTTP ${resp.statusCode()} for userId=$userId")
+                ScaffoldState()
+            }
+        } catch (e: Exception) {
+            logger.warning("engram-engine unreachable during getScaffoldState for userId=$userId: ${e.message}")
+            ScaffoldState() // default new-user state — no stale in-memory fallback
+        }
     }
 
-    override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) {
-        scaffoldStates[userId] = state
+    override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = withContext(Dispatchers.IO) {
+        try {
+            val body = json.encodeToString(state.toUpdateRequest())
+            val req = HttpRequest.newBuilder()
+                .uri(URI.create("$baseUrl/scaffold/state/${URLEncoder.encode(userId, "UTF-8")}"))
+                .header("Content-Type", "application/json")
+                .PUT(HttpRequest.BodyPublishers.ofString(body))
+                .build()
+            val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
+            if (resp.statusCode() !in 200..299) {
+                logger.warning("updateScaffoldState returned HTTP ${resp.statusCode()} for userId=$userId")
+            }
+        } catch (e: Exception) {
+            logger.warning("engram-engine unreachable during updateScaffoldState for userId=$userId: ${e.message}")
+        }
     }
-
-    // ── Private serialization shapes ──────────────────────────────────────────
 
     @Serializable
     private data class IngestRequest(val texts: List<String>)
@@ -143,4 +167,87 @@ class HttpEngramClient(
             score = score,
         )
     }
+
+    /**
+     * DTO for GET /scaffold/state/{userId} response.
+     * Maps [trustPhase] string ("ORIENTATION", "WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")
+     * to the pipeline's integer representation (1–4).
+     */
+    @Serializable
+    private data class ScaffoldStateDto(
+        val userId: String = "",
+        val trustPhase: String = "ORIENTATION",
+        val answeredCategories: Set<String> = emptySet(),
+        val activeScaffoldQuestion: String? = null,
+        val sessionCount: Int = 0,
+        val lastInteractionAt: Long? = null,
+        val phaseTransitions: List<PhaseTransitionDto> = emptyList(),
+    ) {
+        fun toScaffoldState(): ScaffoldState {
+            val phase = when (trustPhase) {
+                "WORKING_RHYTHM" -> 2
+                "CONTEXT"        -> 3
+                "UNDERSTANDING"  -> 4
+                else             -> 1 // ORIENTATION
+            }
+            val categories = answeredCategories.mapNotNull {
+                try { PhraseCategory.valueOf(it) } catch (_: Exception) { null }
+            }.toSet()
+            val transitions = phaseTransitions.map {
+                ScaffoldPhaseTransition(
+                    from      = it.from,
+                    to        = it.to,
+                    timestamp = it.timestamp,
+                    evidence  = it.evidence,
+                )
+            }
+            return ScaffoldState(
+                trustPhase             = phase,
+                answeredCategories     = categories,
+                activeScaffoldQuestion = activeScaffoldQuestion,
+                sessionCount           = sessionCount,
+                lastInteractionAt      = lastInteractionAt,
+                phaseTransitions       = transitions,
+            )
+        }
+    }
+
+    @Serializable
+    private data class PhaseTransitionDto(
+        val from: String,
+        val to: String,
+        val timestamp: Long,
+        val evidence: String,
+    )
+
+    @Serializable
+    private data class UpdateScaffoldRequest(
+        val trustPhase: String,
+        val answeredCategories: Set<String>,
+        val activeScaffoldQuestion: String? = null,
+        val sessionCount: Int = 0,
+        val lastInteractionAt: Long? = null,
+        val phaseTransitions: List<PhaseTransitionDto> = emptyList(),
+    )
+
+    private fun ScaffoldState.toUpdateRequest() = UpdateScaffoldRequest(
+        trustPhase = when (trustPhase) {
+            2    -> "WORKING_RHYTHM"
+            3    -> "CONTEXT"
+            4    -> "UNDERSTANDING"
+            else -> "ORIENTATION"
+        },
+        answeredCategories     = answeredCategories.map { it.name }.toSet(),
+        activeScaffoldQuestion = activeScaffoldQuestion,
+        sessionCount           = sessionCount,
+        lastInteractionAt      = lastInteractionAt ?: System.currentTimeMillis(),
+        phaseTransitions       = phaseTransitions.map {
+            PhaseTransitionDto(
+                from      = it.from,
+                to        = it.to,
+                timestamp = it.timestamp,
+                evidence  = it.evidence,
+            )
+        },
+    )
 }

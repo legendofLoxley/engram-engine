@@ -58,35 +58,58 @@ object SelectionScorer {
     fun contextualFit(phrase: ResponsePhrase, ctx: CognitiveContext): Double {
         var score = 0.5 // baseline
         val text = phrase.text.lowercase()
-        val hour = LocalTime.ofInstant(ctx.timestamp, java.time.ZoneId.systemDefault()).hour
+        val hour = LocalTime.ofInstant(ctx.timestamp, ctx.zoneId ?: java.time.ZoneId.systemDefault()).hour
         val turnCount = ctx.priorUtterances.size + 1
 
-        // Time-of-day alignment for greetings
+        // Time-of-day alignment for greetings — non-overlapping windows
         if (phrase.category == "GREETING") {
-            val isMorningPhrase = text.contains("morning")
+            val isMorningPhrase   = text.contains("morning") && !text.contains("good morning. the day")
             val isAfternoonPhrase = text.contains("afternoon")
-            val isEveningPhrase = text.contains("evening")
+            val isEveningPhrase   = text.contains("evening")
 
             if (isMorningPhrase || isAfternoonPhrase || isEveningPhrase) {
                 val inWindow = when {
-                    isMorningPhrase -> hour < 12
+                    isMorningPhrase   -> hour in 7..11
                     isAfternoonPhrase -> hour in 12..16
-                    isEveningPhrase -> hour >= 17
-                    else -> true
+                    isEveningPhrase   -> hour in 17..21
+                    else              -> true
                 }
-                score = if (inWindow) 1.0 else 0.0
-                // No further adjustments for time-specific greetings
-                return score
+                return if (inWindow) 1.0 else 0.0
             }
-        }
 
-        // Turn count: greetings score high on turn 1, decay toward 0 by turn 5
-        if (phrase.category == "GREETING") {
+            // Late-night phrase: 10 PM – 11:59 PM
+            if (text.contains("midnight oil")) {
+                return if (hour in 22..23) 1.0 else 0.0
+            }
+
+            // Early-start phrase: midnight – 6:59 AM
+            if (text.contains("early start")) {
+                return if (hour in 0..6) 1.0 else 0.0
+            }
+
+            // Session-gap-aware phrases
+            val gapMs   = ctx.lastInteractionAt?.let { ctx.timestamp.toEpochMilli() - it }
+            val gapDays = gapMs?.let { it / (1000.0 * 60 * 60 * 24) }
+
+            if (text.contains("been a while")) {
+                return if (gapDays != null && gapDays > 7) 1.0 else 0.1
+            }
+
+            if (text.contains("right where we left off")) {
+                return if (gapDays != null && gapDays < 1.0) 1.0 else 0.1
+            }
+
+            // First-ever session: boost meet/acquaint phrases; penalise them for returning users
+            if (text.contains("meet you") || text.contains("acquainted") || text.contains("work best when")) {
+                return if (ctx.sessionCount == 0) 1.0 else 0.0
+            }
+
+            // Turn count: greetings score high on turn 1, decay toward 0 by turn 5
             score += when {
-                turnCount == 1 -> 0.4
-                turnCount <= 3 -> 0.2
-                turnCount <= 5 -> 0.0
-                else -> -0.3
+                turnCount == 1  -> 0.4
+                turnCount <= 3  -> 0.2
+                turnCount <= 5  -> 0.0
+                else            -> -0.3
             }
         }
 

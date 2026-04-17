@@ -3,6 +3,8 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
@@ -121,5 +123,49 @@ class DebugPipelineTest {
         assertEquals(1, result.comprehensionTier)
         // No trace leaks into regular result
         assertTrue(result is CognitivePipeline.ChatResult)
+    }
+
+    // ── responseSelection is null when no selectionService is configured ──────
+
+    @Test
+    fun `responseSelection is null when no selectionService configured`() = runTest {
+        val pipeline = CognitivePipeline()
+        pipeline.init()
+
+        val result = pipeline.processForDebug("Hey", "session-1", "user-1")
+
+        assertNull(result.trace.responseSelection)
+    }
+
+    // ── ResponseSelectionTrace serialization round-trip ───────────────────────
+
+    @Test
+    fun `ResponseSelectionTrace serializes and deserializes correctly`() {
+        val trace = ResponseSelectionTrace(
+            phraseId = "phrase-abc123",
+            phraseText = "Good {timeOfDay}, sir.",
+            interpolatedText = "Good evening, sir.",
+            strategy = ResponseStrategy.SOCIAL,
+            compositeScore = 0.847,
+            scores = mapOf(
+                "freshness"             to 0.9,
+                "contextual_fit"        to 0.95,
+                "communication_fit"     to 0.7,
+                "phase_appropriateness" to 1.0,
+                "effectiveness"         to 0.5,
+            ),
+            candidatesConsidered = 6,
+            selectionLatencyMs = 3L,
+        )
+
+        val json = Json.encodeToString(trace)
+        val decoded = Json.decodeFromString<ResponseSelectionTrace>(json)
+
+        assertEquals(trace, decoded)
+        assertTrue(json.contains("\"phraseId\":\"phrase-abc123\""))
+        assertTrue(json.contains("\"strategy\":\"SOCIAL\""))
+        assertTrue(json.contains("\"contextual_fit\""))
+        assertTrue(json.contains("\"phase_appropriateness\""))
+        assertTrue(json.contains("\"communication_fit\""))
     }
 }

@@ -26,16 +26,32 @@ data class Phrase(
 )
 
 /**
+ * A single phase-transition event recorded in the scaffold history.
+ */
+data class ScaffoldPhaseTransition(
+    val from: String,
+    val to: String,
+    val timestamp: Long,
+    val evidence: String,
+)
+
+/**
  * Snapshot of a user's onboarding progress.
  *
- * @param trustPhase        Current trust phase (1–4).
- * @param answeredCategories Categories the user has already provided information for.
+ * @param trustPhase             Current trust phase (1–4).
+ * @param answeredCategories     Categories the user has already provided information for.
  * @param activeScaffoldQuestion The question currently being asked (drives Comprehension Rule 0).
+ * @param sessionCount           Total number of sessions this user has started.
+ * @param lastInteractionAt      Epoch-millis timestamp of the user's most recent interaction.
+ * @param phaseTransitions       Ordered history of phase-transition events for this user.
  */
 data class ScaffoldState(
     val trustPhase: Int = 1,
     val answeredCategories: Set<PhraseCategory> = emptySet(),
     val activeScaffoldQuestion: String? = null,
+    val sessionCount: Int = 0,
+    val lastInteractionAt: Long? = null,
+    val phaseTransitions: List<ScaffoldPhaseTransition> = emptyList(),
 )
 
 /**
@@ -51,8 +67,11 @@ interface EngramClient {
     /** Write phrase candidates to the memory graph. */
     suspend fun ingest(candidates: List<PhraseCandidate>)
 
-    /** Retrieve relevant phrases by concept or keyword. */
-    suspend fun queryPhrases(concept: String): List<Phrase>
+    /**
+     * Retrieve relevant phrases by concept or keyword.
+     * [userId] filters results to phrases owned by that user; blank means no filter (dev/test only).
+     */
+    suspend fun queryPhrases(concept: String, userId: String = ""): List<Phrase>
 
     /** Get onboarding progress for [userId], initialising a fresh state if none exists. */
     suspend fun getScaffoldState(userId: String): ScaffoldState
