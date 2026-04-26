@@ -1,13 +1,16 @@
 package app.alfrd.engram.api
 
 import app.alfrd.engram.cognitive.SessionManager
+import app.alfrd.engram.cognitive.pipeline.PhaseEventStreamer
 import app.alfrd.engram.cognitive.pipeline.PipelineTrace
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.utils.io.*
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 @Serializable
 data class ChatRequest(
@@ -91,6 +94,25 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                         debug             = debugResult.trace,
                     )
                 )
+            }
+
+            post("/chat/stream") {
+                val req = call.receive<ChatRequest>()
+                val pipeline = sessionManager.getOrCreate(req.sessionId)
+                val streamer = PhaseEventStreamer(pipeline)
+
+                call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
+                call.response.headers.append(HttpHeaders.Connection, "keep-alive")
+                // Disable proxy buffering so events reach the browser immediately.
+                call.response.headers.append("X-Accel-Buffering", "no")
+
+                call.respondBytesWriter(contentType = ContentType.parse("text/event-stream; charset=utf-8")) {
+                    streamer.stream(req.utterance, req.sessionId, req.userId).collect { event ->
+                        val line = "data: ${Json.encodeToString(event)}\n\n"
+                        writeFully(line.encodeToByteArray())
+                        flush()
+                    }
+                }
             }
 
             post("/init") {
