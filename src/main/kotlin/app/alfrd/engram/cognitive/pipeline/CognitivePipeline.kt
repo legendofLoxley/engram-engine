@@ -41,9 +41,13 @@ class CognitivePipeline(
     private val transitionService: TrustPhaseTransitionService? = null,
 ) {
 
+    // Wrap with voice identity so every LLM call includes the base voice-modality prompt.
+    // The original llmClient is kept separately for the CloudLlmClient type check in selectTier2Model.
+    private val voiceLlmClient: LlmClient? = llmClient?.let { VoiceContextLlmClient(it) }
+
     private val attention     = Attention()
-    private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
-    private val router        = Router(engramClient, llmClient, selectionService, memoryWriteService)
+    private val comprehension = Comprehension(voiceLlmClient, selectTier2Model(llmClient))
+    private val router        = Router(engramClient, voiceLlmClient, selectionService, memoryWriteService)
     private val expression    = Expression()
 
     private val stages: List<CognitiveStage> = listOf(attention, comprehension, expression)

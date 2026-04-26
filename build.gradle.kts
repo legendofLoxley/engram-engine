@@ -66,7 +66,7 @@ application {
 tasks.test {
     useJUnitPlatform()
     javaLauncher.set(javaToolchains.launcherFor {
-        languageVersion.set(JavaLanguageVersion.of(25))
+        languageVersion.set(JavaLanguageVersion.of(21))
     })
     jvmArgs(
         "--add-opens", "java.base/java.nio=ALL-UNNAMED",

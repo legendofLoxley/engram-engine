@@ -35,6 +35,7 @@ class SocialBranch(
                 expressionPhase = ExpressionPhase.ACKNOWLEDGE,
                 fallback = "Of course.",
             )
+            isModalityCheck(lower) -> pickModalityConfirmation()
             else -> selectOrFallback(
                 ctx = ctx,
                 category = ResponseCategory.GREETING,
@@ -89,4 +90,22 @@ class SocialBranch(
 
     private fun isThanks(lower: String) =
         listOf("thanks", "thank you", "cheers").any { lower.contains(it) }
+
+    private fun isModalityCheck(lower: String) =
+        listOf(
+            "can you hear me", "are you listening", "are you there",
+            "is this working", "can you see me", "hello?",
+            "is anyone there", "can you understand me",
+        ).any { lower == it || lower.contains(it) }
+
+    private fun pickModalityConfirmation(): String {
+        val options = listOf(
+            "Loud and clear.",
+            "I'm here.",
+            "I can hear you.",
+            "Right here — go ahead.",
+            "Hearing you fine.",
+        )
+        return options.random()
+    }
 }

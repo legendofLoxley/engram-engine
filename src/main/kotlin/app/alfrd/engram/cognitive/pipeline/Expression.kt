@@ -9,10 +9,19 @@ package app.alfrd.engram.cognitive.pipeline
  */
 class Expression : CognitiveStage {
 
+    private val modalityLeakPhrases = listOf(
+        "i can see what you type",
+        "as a text-based",
+        "i don't have ears",
+        "i can't hear",
+        "i'm a language model",
+    )
+
     override suspend fun evaluate(ctx: CognitiveContext) {
         val result = ctx.branchResult ?: return
 
-        val streaming = toStreamingResult(result)
+        val filtered = applyModalityFilter(result)
+        val streaming = toStreamingResult(filtered)
         ctx.streamingExpressionResult = streaming
 
         // Backward-compat: flatten phases into the list / concatenated text
@@ -24,6 +33,13 @@ class Expression : CognitiveStage {
 
         ctx.streamingPhases = phases
         ctx.responseText = phases.joinToString(" ")
+    }
+
+    private fun applyModalityFilter(result: BranchResult): BranchResult {
+        val lower = result.content.lowercase()
+        return if (modalityLeakPhrases.any { lower.contains(it) })
+            result.copy(content = "I'm right here. What do you need?")
+        else result
     }
 
     /**

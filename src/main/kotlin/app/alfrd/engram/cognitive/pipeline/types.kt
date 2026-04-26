@@ -26,3 +26,12 @@ data class BranchResult(
     val memoryWrites: List<String>? = null,
     val phaseTransitionEvidence: String? = null,
 )
+
+/**
+ * Base system prompt injected into every LLM request so the model knows it is
+ * powering a spoken voice assistant rather than a text chatbot.
+ */
+const val VOICE_IDENTITY_SYSTEM_PROMPT =
+    "You are alfrd, a voice assistant. The user is speaking to you aloud and you are responding with speech. " +
+    "You can hear them. Never say you cannot hear, listen, or speak. Never reference text input, typing, reading, or screens. " +
+    "Respond conversationally as someone who is present in the room."

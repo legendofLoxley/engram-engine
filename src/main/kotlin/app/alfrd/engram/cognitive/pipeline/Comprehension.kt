@@ -108,6 +108,9 @@ class Comprehension(
         // Rule 1 — Social / phatic
         if (isSocial(lower)) return Tier1Result(IntentType.SOCIAL, 0.90, "social_phatic")
 
+        // Rule 1.5 — Modality check ("can you hear me", "are you there", etc.)
+        if (isModalityCheck(lower)) return Tier1Result(IntentType.SOCIAL, 0.90, "modality_check")
+
         // Rule 2 — Correction
         if (isCorrection(lower)) return Tier1Result(IntentType.CORRECTION, 0.80, "correction")
 
@@ -128,6 +131,15 @@ class Comprehension(
     }
 
     // ── Pattern helpers ───────────────────────────────────────────────────────
+
+    private fun isModalityCheck(lower: String): Boolean {
+        val patterns = listOf(
+            "can you hear me", "are you listening", "are you there",
+            "is this working", "can you see me", "hello?",
+            "is anyone there", "can you understand me",
+        )
+        return patterns.any { lower == it || lower.contains(it) }
+    }
 
     private fun isSocial(lower: String): Boolean {
         val greetings = listOf("hey", "hi", "hello", "good morning", "good evening", "good afternoon", "howdy", "yo")

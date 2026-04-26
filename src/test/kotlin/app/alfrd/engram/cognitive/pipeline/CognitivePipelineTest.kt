@@ -1,5 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.providers.LlmRequest
+import app.alfrd.engram.cognitive.providers.LlmResponse
+import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -181,5 +184,226 @@ class ExpressionTest {
         val ctx = CognitiveContext(utterance = "ignored", sessionId = "s", userId = "u")
         expression.evaluate(ctx)
         assertEquals("", ctx.responseText)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — Comprehension modality-check rule (priority 1.5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ComprehensionModalityCheckTest {
+
+    private val comprehension = Comprehension()
+
+    @Test
+    fun `can you hear me classified as SOCIAL via modality_check rule`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you hear me?", sessionId = "s", userId = "u")
+        comprehension.evaluate(ctx)
+        assertEquals(IntentType.SOCIAL, ctx.intent)
+        assertEquals(0.90, ctx.intentConfidence)
+    }
+
+    @Test
+    fun `are you there classified as SOCIAL via modality_check rule`() = runTest {
+        val ctx = CognitiveContext(utterance = "are you there?", sessionId = "s", userId = "u")
+        comprehension.evaluate(ctx)
+        assertEquals(IntentType.SOCIAL, ctx.intent)
+        assertEquals(0.90, ctx.intentConfidence)
+    }
+
+    @Test
+    fun `is this working classified as SOCIAL via modality_check rule`() = runTest {
+        val ctx = CognitiveContext(utterance = "is this working", sessionId = "s", userId = "u")
+        comprehension.evaluate(ctx)
+        assertEquals(IntentType.SOCIAL, ctx.intent)
+        assertEquals(0.90, ctx.intentConfidence)
+    }
+
+    @Test
+    fun `can you understand me classified as SOCIAL via modality_check rule`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you understand me", sessionId = "s", userId = "u")
+        comprehension.evaluate(ctx)
+        assertEquals(IntentType.SOCIAL, ctx.intent)
+        assertEquals(0.90, ctx.intentConfidence)
+    }
+
+    @Test
+    fun `hello question mark classified as SOCIAL via modality_check rule`() = runTest {
+        val ctx = CognitiveContext(utterance = "hello?", sessionId = "s", userId = "u")
+        comprehension.evaluate(ctx)
+        assertEquals(IntentType.SOCIAL, ctx.intent)
+        assertEquals(0.90, ctx.intentConfidence)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — SocialBranch modality-check responses
+// ─────────────────────────────────────────────────────────────────────────────
+
+class SocialBranchModalityTest {
+
+    private val branch = SocialBranch()
+
+    private val voiceConfirmations = setOf(
+        "Loud and clear.",
+        "I'm here.",
+        "I can hear you.",
+        "Right here \u2014 go ahead.",
+        "Hearing you fine.",
+    )
+
+    @Test
+    fun `can you hear me returns a voice-aware confirmation`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you hear me?", sessionId = "s", userId = "u")
+        branch.execute(ctx)
+        val content = ctx.branchResult!!.content
+        assertTrue(content in voiceConfirmations, "Expected voice confirmation, got: $content")
+    }
+
+    @Test
+    fun `are you there returns a voice-aware confirmation`() = runTest {
+        val ctx = CognitiveContext(utterance = "are you there?", sessionId = "s", userId = "u")
+        branch.execute(ctx)
+        val content = ctx.branchResult!!.content
+        assertTrue(content in voiceConfirmations, "Expected voice confirmation, got: $content")
+    }
+
+    @Test
+    fun `is this working returns a voice-aware confirmation`() = runTest {
+        val ctx = CognitiveContext(utterance = "is this working", sessionId = "s", userId = "u")
+        branch.execute(ctx)
+        val content = ctx.branchResult!!.content
+        assertTrue(content in voiceConfirmations, "Expected voice confirmation, got: $content")
+    }
+
+    @Test
+    fun `modality-check response strategy is SOCIAL`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you hear me?", sessionId = "s", userId = "u")
+        branch.execute(ctx)
+        assertEquals(ResponseStrategy.SOCIAL, ctx.branchResult!!.responseStrategy)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — VoiceContextLlmClient prompt injection
+// ─────────────────────────────────────────────────────────────────────────────
+
+class VoiceContextLlmClientTest {
+
+    @Test
+    fun `prepends voice identity to existing system prompt`() = runTest {
+        var captured: LlmRequest? = null
+        val delegate = TestLlmClient { req ->
+            captured = req
+            LlmResponse(text = "ok", latencyMs = 0, retryCount = 0)
+        }
+        val client = VoiceContextLlmClient(delegate)
+        client.complete(
+            LlmRequest(prompt = "hello", systemPrompt = "You are helpful.")
+        )
+        val sys = captured!!.systemPrompt!!
+        assertTrue(sys.startsWith(VOICE_IDENTITY_SYSTEM_PROMPT), "Expected voice identity prefix, got: $sys")
+        assertTrue(sys.contains("You are helpful."), "Expected branch prompt preserved, got: $sys")
+    }
+
+    @Test
+    fun `injects voice identity when system prompt is null`() = runTest {
+        var captured: LlmRequest? = null
+        val delegate = TestLlmClient { req ->
+            captured = req
+            LlmResponse(text = "ok", latencyMs = 0, retryCount = 0)
+        }
+        val client = VoiceContextLlmClient(delegate)
+        client.complete(LlmRequest(prompt = "What time is it?", systemPrompt = null))
+        assertEquals(VOICE_IDENTITY_SYSTEM_PROMPT, captured!!.systemPrompt)
+    }
+
+    @Test
+    fun `voice identity prompt contains key voice-only constraints`() {
+        assertTrue(VOICE_IDENTITY_SYSTEM_PROMPT.contains("voice assistant"))
+        assertTrue(VOICE_IDENTITY_SYSTEM_PROMPT.contains("Never say you cannot hear"))
+        assertTrue(VOICE_IDENTITY_SYSTEM_PROMPT.contains("Never reference text input"))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — Expression modality post-filter
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ExpressionModalityFilterTest {
+
+    private val expression = Expression()
+
+    @Test
+    fun `response containing i can't hear is replaced with fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "say something", sessionId = "s", userId = "u")
+        ctx.branchResult = BranchResult(
+            content = "Sorry, I can't hear audio input directly.",
+            responseStrategy = ResponseStrategy.SIMPLE,
+        )
+        expression.evaluate(ctx)
+        assertEquals("Understood. I'm right here. What do you need?", ctx.responseText)
+    }
+
+    @Test
+    fun `response containing i'm a language model is replaced with fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you speak?", sessionId = "s", userId = "u")
+        ctx.branchResult = BranchResult(
+            content = "I'm a language model so I cannot speak or hear.",
+            responseStrategy = ResponseStrategy.SIMPLE,
+        )
+        expression.evaluate(ctx)
+        assertEquals("Understood. I'm right here. What do you need?", ctx.responseText)
+    }
+
+    @Test
+    fun `response containing as a text-based is replaced with fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "hello?", sessionId = "s", userId = "u")
+        ctx.branchResult = BranchResult(
+            content = "As a text-based assistant I process written input.",
+            responseStrategy = ResponseStrategy.SIMPLE,
+        )
+        expression.evaluate(ctx)
+        assertEquals("Understood. I'm right here. What do you need?", ctx.responseText)
+    }
+
+    @Test
+    fun `clean LLM response passes through post-filter unchanged`() = runTest {
+        val ctx = CognitiveContext(utterance = "what is the capital of France?", sessionId = "s", userId = "u")
+        ctx.branchResult = BranchResult(
+            content = "Paris is the capital of France.",
+            responseStrategy = ResponseStrategy.SIMPLE,
+        )
+        expression.evaluate(ctx)
+        assertTrue(ctx.responseText.contains("Paris is the capital of France."))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration tests — modality-check end-to-end routing
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ModalityCheckIntegrationTest {
+
+    private val pipeline = CognitivePipeline()
+
+    private val voiceConfirmations = setOf(
+        "Loud and clear.",
+        "I'm here.",
+        "I can hear you.",
+        "Right here \u2014 go ahead.",
+        "Hearing you fine.",
+    )
+
+    @Test
+    fun `can you hear me routes to SOCIAL and returns voice confirmation`() = runTest {
+        val response = pipeline.process("can you hear me?", "session-1", "user-1")
+        assertTrue(response in voiceConfirmations, "Expected voice confirmation, got: $response")
+    }
+
+    @Test
+    fun `are you there routes to SOCIAL and returns voice confirmation`() = runTest {
+        val response = pipeline.process("are you there?", "session-1", "user-1")
+        assertTrue(response in voiceConfirmations, "Expected voice confirmation, got: $response")
     }
 }
