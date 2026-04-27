@@ -50,6 +50,9 @@ class PhaseEventStreamer(
      *
      * The returned [Flow] is cold — collection drives execution. The flow completes
      * naturally once all phases have been emitted (or the apology fires).
+     *
+     * Invariant: every turn terminates with exactly one `synthesis` or `apology` event.
+     * A turn can never end after only an `acknowledge` or `bridge`.
      */
     fun stream(
         utterance: String,
@@ -59,84 +62,128 @@ class PhaseEventStreamer(
         traceId: String = UUID.randomUUID().toString(),
     ): Flow<PhaseEvent> = channelFlow {
         val strategy = classifyStrategy(utterance)
+        // Track whether a terminal event (synthesis or apology) has been sent so the
+        // catch block can emit a fallback apology without double-sending.
+        var terminalSent = false
 
-        if (strategy == ResponseStrategy.SOCIAL) {
-            // SOCIAL path: no acknowledge/bridge — synthesise directly.
-            val result = awaitWithTimeout(turnId, traceId) {
-                pipeline.process(utterance, sessionId, userId)
-            }
-            send(synthesisEvent(result, turnId, traceId, sequence = 1, final = true))
-            return@channelFlow
-        }
-
-        // Non-SOCIAL: emit acknowledge immediately.
-        val ackPhrase = phraseTracker.pickAcknowledge(strategy)
-        if (ackPhrase != null) {
-            send(phaseEvent("acknowledge", ackPhrase, turnId, traceId))
-        }
-
-        val bridgeNeeded = strategy == ResponseStrategy.COMPLEX || strategy == ResponseStrategy.EMOTIONAL
-
-        // Start the pipeline in parallel.
-        val pipelineDeferred = async { pipeline.process(utterance, sessionId, userId) }
-
-        val pipelineResult: String
-
-        if (bridgeNeeded) {
-            val fastResult = withTimeoutOrNull(bridgeDelayMs) { pipelineDeferred.await() }
-
-            if (fastResult != null) {
-                // Pipeline was fast — bridge skipped.
-                pipelineResult = fastResult
-            } else {
-                // First bridge.
-                val firstBridgePhrase = phraseTracker.pickBridge(strategy)
-                if (firstBridgePhrase != null) {
-                    send(phaseEvent("bridge", firstBridgePhrase, turnId, traceId))
+        try {
+            if (strategy == ResponseStrategy.SOCIAL) {
+                // SOCIAL path: no acknowledge/bridge — synthesise directly.
+                val result = awaitWithTimeout {
+                    pipeline.process(utterance, sessionId, userId)
                 }
-
-                // Race to second bridge at bridgeSecondDelayMs from the start of the turn.
-                // We already waited bridgeDelayMs, so remaining = bridgeSecondDelayMs - bridgeDelayMs.
-                val secondBridgeWait = bridgeSecondDelayMs - bridgeDelayMs
-                val afterFirstBridge = withTimeoutOrNull(secondBridgeWait) { pipelineDeferred.await() }
-
-                if (afterFirstBridge != null) {
-                    pipelineResult = afterFirstBridge
+                if (result == APOLOGY_TEXT) {
+                    send(phaseEvent("apology", result, turnId, traceId))
                 } else {
-                    // Second bridge allowed at 5s.
-                    val secondBridgePhrase = phraseTracker.pickBridge(strategy)
-                    if (secondBridgePhrase != null) {
-                        send(phaseEvent("bridge", secondBridgePhrase, turnId, traceId))
+                    send(synthesisEvent(result, turnId, traceId, sequence = 1, final = true))
+                }
+                terminalSent = true
+                return@channelFlow
+            }
+
+            // Non-SOCIAL: emit acknowledge immediately.
+            val ackPhrase = phraseTracker.pickAcknowledge(strategy)
+            if (ackPhrase != null) {
+                send(phaseEvent("acknowledge", ackPhrase, turnId, traceId))
+            }
+
+            val bridgeNeeded = strategy == ResponseStrategy.COMPLEX || strategy == ResponseStrategy.EMOTIONAL
+
+            // Start the pipeline in parallel. Exceptions are caught inside the lambda so
+            // they never propagate as scope-cancellation to the parent channelFlow coroutine.
+            val pipelineDeferred = async {
+                try {
+                    pipeline.process(utterance, sessionId, userId)
+                } catch (e: CancellationException) {
+                    throw e // external scope cancel — propagate
+                } catch (_: Exception) {
+                    APOLOGY_TEXT
+                }
+            }
+
+            val pipelineResult: String
+
+            if (bridgeNeeded) {
+                val fastResult = withTimeoutOrNull(bridgeDelayMs) { pipelineDeferred.await() }
+
+                if (fastResult != null) {
+                    // Pipeline was fast — bridge skipped.
+                    pipelineResult = fastResult
+                } else {
+                    // First bridge.
+                    val firstBridgePhrase = phraseTracker.pickBridge(strategy)
+                    if (firstBridgePhrase != null) {
+                        send(phaseEvent("bridge", firstBridgePhrase, turnId, traceId))
                     }
 
-                    // Final wait with global timeout.
-                    pipelineResult = awaitWithTimeout(turnId, traceId) { pipelineDeferred.await() }
-                        .also { if (it == APOLOGY_TEXT) pipelineDeferred.cancel() }
+                    // Race to second bridge at bridgeSecondDelayMs from the start of the turn.
+                    // We already waited bridgeDelayMs, so remaining = bridgeSecondDelayMs - bridgeDelayMs.
+                    val secondBridgeWait = bridgeSecondDelayMs - bridgeDelayMs
+                    val afterFirstBridge = withTimeoutOrNull(secondBridgeWait) { pipelineDeferred.await() }
+
+                    if (afterFirstBridge != null) {
+                        pipelineResult = afterFirstBridge
+                    } else {
+                        // Second bridge allowed at 5s.
+                        val secondBridgePhrase = phraseTracker.pickBridge(strategy)
+                        if (secondBridgePhrase != null) {
+                            send(phaseEvent("bridge", secondBridgePhrase, turnId, traceId))
+                        }
+
+                        // Final wait with global timeout.
+                        pipelineResult = awaitWithTimeout { pipelineDeferred.await() }
+                            .also { if (it == APOLOGY_TEXT) pipelineDeferred.cancel() }
+                    }
+                }
+            } else {
+                // SIMPLE: no bridge — just wait for pipeline with global timeout.
+                pipelineResult = awaitWithTimeout { pipelineDeferred.await() }
+            }
+
+            if (pipelineResult == APOLOGY_TEXT) {
+                send(phaseEvent("apology", pipelineResult, turnId, traceId))
+            } else {
+                send(synthesisEvent(pipelineResult, turnId, traceId, sequence = 1, final = true))
+            }
+            terminalSent = true
+
+        } catch (e: CancellationException) {
+            // External scope cancellation — propagate, don't emit apology.
+            throw e
+        } catch (e: Exception) {
+            // Any unexpected failure after acknowledge was sent: guarantee apology so
+            // the browser always receives a terminal event.
+            if (!terminalSent) {
+                try {
+                    send(phaseEvent("apology", APOLOGY_TEXT, turnId, traceId))
+                } catch (_: Exception) {
+                    // Channel already closed — nothing to do.
                 }
             }
-        } else {
-            // SIMPLE: no bridge — just wait for pipeline with global timeout.
-            pipelineResult = awaitWithTimeout(turnId, traceId) { pipelineDeferred.await() }
-        }
-
-        if (pipelineResult == APOLOGY_TEXT) {
-            send(phaseEvent("apology", pipelineResult, turnId, traceId))
-        } else {
-            send(synthesisEvent(pipelineResult, turnId, traceId, sequence = 1, final = true))
         }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * Await [block] with a global timeout. Returns [APOLOGY_TEXT] on:
+     * - [reasonTimeoutMs] exceeded ([TimeoutCancellationException])
+     * - Any other exception from the pipeline (LLM failure, network error, branch crash)
+     *
+     * External [CancellationException] (scope cancelled) is re-thrown — callers must not
+     * swallow it.
+     */
     private suspend fun awaitWithTimeout(
-        turnId: String,
-        traceId: String,
         block: suspend () -> String,
     ): String {
         return try {
             withTimeout(reasonTimeoutMs) { block() }
         } catch (_: TimeoutCancellationException) {
             APOLOGY_TEXT
+        } catch (e: CancellationException) {
+            throw e  // propagate external scope cancellation
+        } catch (_: Exception) {
+            APOLOGY_TEXT  // any pipeline/LLM/branch failure → apology
         }
     }
 

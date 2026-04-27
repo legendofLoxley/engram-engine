@@ -1,6 +1,5 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
 import app.alfrd.engram.model.PhaseEvent
@@ -194,4 +193,48 @@ class PhaseEventStreamerTest {
         assertNull(ack.sequence, "Acknowledge must not carry sequence")
         assertNull(ack.final,    "Acknowledge must not carry final")
     }
+
+    // ── Pipeline throws directly → apology, never silent close ─────────
+
+    @Test
+    fun `pipeline exception after acknowledge emits apology not silent close`() = runTest {
+        // Simulate an infrastructure failure (e.g. DB crash, OOM) that bypasses branch-level
+        // graceful degradation and propagates directly from process().
+        // Root cause of 2026-04-26 incident: old awaitWithTimeout only caught
+        // TimeoutCancellationException; any other exception silently closed the stream
+        // after acknowledge had already been flushed to the browser.
+        val throwingPipeline = object : CognitivePipeline() {
+            override suspend fun process(utterance: String, sessionId: String, userId: String): String {
+                throw RuntimeException("simulated infrastructure failure")
+            }
+        }
+        val streamer = buildStreamer(pipeline = throwingPipeline)
+
+        val events = streamer.stream("Can you hear the snow?", "s1", "u1").toList()
+        val phases = events.map { it.phase }
+
+        assertFalse(phases.isEmpty(), "Stream must not be empty after a pipeline failure")
+        assertEquals("apology", phases.last(), "Last event must be apology on pipeline failure, got: $phases")
+        assertFalse(phases.contains("synthesis"), "Synthesis must not fire when pipeline throws")
+    }
+
+    // ── SOCIAL path pipeline throws directly → apology, not silent close ─
+
+    @Test
+    fun `SOCIAL pipeline exception emits apology not silent close`() = runTest {
+        val throwingPipeline = object : CognitivePipeline() {
+            override suspend fun process(utterance: String, sessionId: String, userId: String): String {
+                throw RuntimeException("simulated infrastructure failure")
+            }
+        }
+        val streamer = buildStreamer(pipeline = throwingPipeline)
+
+        val events = streamer.stream("Hey", "s1", "u1").toList()
+        val phases = events.map { it.phase }
+
+        assertFalse(phases.isEmpty(), "SOCIAL stream must not be empty after pipeline failure")
+        assertEquals("apology", phases.last(), "SOCIAL path must emit apology on failure, got: $phases")
+        assertFalse(phases.contains("synthesis"), "Synthesis must not fire when SOCIAL pipeline throws")
+    }
 }
+

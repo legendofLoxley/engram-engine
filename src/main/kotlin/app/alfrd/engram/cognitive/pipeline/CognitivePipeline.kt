@@ -33,7 +33,7 @@ import app.alfrd.engram.model.ResponseCategory
  *                     runs standalone without an external engram-engine instance.
  * @param llmClient    LLM backend. Null by default — branches degrade gracefully.
  */
-class CognitivePipeline(
+open class CognitivePipeline(
     private val engramClient: EngramClient = InMemoryEngramClient(),
     private val llmClient: LlmClient? = null,
     private val selectionService: ResponseSelectionService? = null,
@@ -88,7 +88,7 @@ class CognitivePipeline(
     /**
      * Process a single utterance end-to-end and return the final response text.
      */
-    suspend fun process(utterance: String, sessionId: String, userId: String): String =
+    open suspend fun process(utterance: String, sessionId: String, userId: String): String =
         processInternal(utterance, sessionId, userId, debug = false).first.responseText
 
     /**
