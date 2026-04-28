@@ -71,10 +71,13 @@ open class CognitivePipeline(
     }
 
     /** Result of a full pipeline cycle, enriched with routing metadata. */
-    data class ChatResult(val responseText: String, val intent: IntentType, val comprehensionTier: Int)
+    data class ChatResult(val responseText: String, val intent: IntentType, val comprehensionTier: Int, val synthesisSource: String = "pool")
 
     /** Extended result including the full pipeline trace for the debug endpoint. */
     data class DebugChatResult(val chat: ChatResult, val trace: PipelineTrace)
+
+    /** The synthesis text and its origin, for SSE streaming. */
+    data class SynthesisResult(val text: String, val source: String)
 
     /** Result of an INIT signal — the selected greeting for a new session. */
     data class InitResponse(
@@ -90,6 +93,18 @@ open class CognitivePipeline(
      */
     open suspend fun process(utterance: String, sessionId: String, userId: String): String =
         processInternal(utterance, sessionId, userId, debug = false).first.responseText
+
+    /**
+     * Process a single utterance end-to-end and return synthesis text with its source tag.
+     * Used by [app.alfrd.engram.cognitive.pipeline.PhaseEventStreamer] to populate the
+     * `source` field on every synthesis [app.alfrd.engram.model.PhaseEvent].
+     *
+     * Overridable so tests can inject controlled failures without touching [process].
+     */
+    open suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
+        val (chatResult, _) = processInternal(utterance, sessionId, userId, debug = false)
+        return SynthesisResult(chatResult.responseText, chatResult.synthesisSource)
+    }
 
     /**
      * Process a single utterance and return both the response text and the resolved intent.
@@ -295,7 +310,7 @@ open class CognitivePipeline(
         attention.evaluate(ctx)
 
         if (ctx.attentionAction != AttentionAction.PROCESS) {
-            return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier), trace)
+            return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, "pool"), trace)
         }
 
         // ── Comprehension ────────────────────────────────────────────────────
@@ -343,11 +358,11 @@ open class CognitivePipeline(
                     strategy = strategy,
                     compositeScore = selResult.compositeScore,
                     scores = mapOf(
-                        "freshness"           to (selResult.scoreBreakdown["freshness"]           ?: 0.0),
-                        "contextual_fit"      to (selResult.scoreBreakdown["contextualFit"]       ?: 0.0),
-                        "communication_fit"   to (selResult.scoreBreakdown["communicationFit"]    ?: 0.0),
-                        "phase_appropriateness" to (selResult.scoreBreakdown["phaseAppropriateness"] ?: 0.0),
-                        "effectiveness"       to (selResult.scoreBreakdown["effectiveness"]       ?: 0.0),
+                        "freshness"              to (selResult.scoreBreakdown["freshness"]             ?: 0.0),
+                        "contextualFit"          to (selResult.scoreBreakdown["contextualFit"]         ?: 0.0),
+                        "communicationFit"       to (selResult.scoreBreakdown["communicationFit"]      ?: 0.0),
+                        "phaseAppropriateness"   to (selResult.scoreBreakdown["phaseAppropriateness"]  ?: 0.0),
+                        "effectiveness"          to (selResult.scoreBreakdown["effectiveness"]         ?: 0.0),
                     ),
                     candidatesConsidered = ctx.selectionCandidatesConsidered,
                     selectionLatencyMs = ctx.selectionLatencyMs,
@@ -375,7 +390,10 @@ open class CognitivePipeline(
 
         stages.forEach { it.onCycleEnd(ctx) }
 
-        return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier), trace)
+        return Pair(
+            ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, ctx.branchResult?.source ?: "pool"),
+            trace,
+        )
     }
 
     private fun tier2ModelName(): String? {

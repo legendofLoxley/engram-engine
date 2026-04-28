@@ -156,9 +156,16 @@ class ExpressionTest {
             responseStrategy = ResponseStrategy.SIMPLE,
         )
         expression.evaluate(ctx)
-        assertTrue(ctx.responseText.startsWith("Understood."))
-        assertTrue(ctx.responseText.contains("I've noted that"))
+        // responseText carries synthesis only — acknowledge is a separate phase, not prepended
+        assertFalse(ctx.responseText.startsWith("Understood."), "responseText must not start with ack phrase")
+        assertEquals("I've noted that — task execution is coming soon.", ctx.responseText)
+        // streamingPhases still has 2 elements so the streamer can emit ack + synthesis separately
         assertEquals(2, ctx.streamingPhases!!.size)
+        // acknowledge phrase is still captured in streamingExpressionResult
+        assertTrue(
+            ctx.streamingExpressionResult?.acknowledge in ExpressionPhrasePool.acknowledgeFor(ResponseStrategy.SIMPLE),
+            "Acknowledge phrase must be in the SIMPLE pool",
+        )
     }
 
     @Test
@@ -342,7 +349,8 @@ class ExpressionModalityFilterTest {
             responseStrategy = ResponseStrategy.SIMPLE,
         )
         expression.evaluate(ctx)
-        assertEquals("Understood. I'm right here. What do you need?", ctx.responseText)
+        // synthesis-only (no ack prefix) — acknowledge is a separate phase
+        assertEquals("I'm right here. What do you need?", ctx.responseText)
     }
 
     @Test
@@ -353,7 +361,7 @@ class ExpressionModalityFilterTest {
             responseStrategy = ResponseStrategy.SIMPLE,
         )
         expression.evaluate(ctx)
-        assertEquals("Understood. I'm right here. What do you need?", ctx.responseText)
+        assertEquals("I'm right here. What do you need?", ctx.responseText)
     }
 
     @Test
@@ -364,7 +372,7 @@ class ExpressionModalityFilterTest {
             responseStrategy = ResponseStrategy.SIMPLE,
         )
         expression.evaluate(ctx)
-        assertEquals("Understood. I'm right here. What do you need?", ctx.responseText)
+        assertEquals("I'm right here. What do you need?", ctx.responseText)
     }
 
     @Test

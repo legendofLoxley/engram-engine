@@ -32,7 +32,9 @@ class Expression : CognitiveStage {
         }
 
         ctx.streamingPhases = phases
-        ctx.responseText = phases.joinToString(" ")
+        // responseText carries only the synthesis content so that pipeline.process() and
+        // the SSE synthesis frame never contain an acknowledge/bridge prefix.
+        ctx.responseText = streaming.synthesis
     }
 
     private fun applyModalityFilter(result: BranchResult): BranchResult {

@@ -170,6 +170,71 @@ class PhaseEventStreamerTest {
         assertTrue(events.all { it.timestamp > 0 }, "All events must have a positive timestamp")
     }
 
+    // ── Ack/synthesis separation: ack carries known phrase; synthesis is clean ─
+
+    @Test
+    fun `acknowledge event text is a known ack pool phrase`() = runTest {
+        val streamer = buildStreamer()
+        val events = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+        val ack = events.first { it.phase == "acknowledge" }
+
+        val allAckPhrases = ResponseStrategy.values()
+            .flatMap { ExpressionPhrasePool.acknowledgeFor(it) }
+            .toSet()
+
+        assertTrue(
+            ack.text in allAckPhrases,
+            "Acknowledge text must be from the phrase pool, got: '${ack.text}'",
+        )
+    }
+
+    @Test
+    fun `synthesis text does not begin with an acknowledge filler`() = runTest {
+        val streamer = buildStreamer()
+        val events = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+        val synth = events.first { it.phase == "synthesis" }
+
+        val ackFillers = listOf(
+            "Understood", "Got it", "Of course", "Right.", "Mm-hmm",
+            "I hear you", "I understand", "Certainly", "Sure",
+        )
+        for (filler in ackFillers) {
+            assertFalse(
+                synth.text.startsWith(filler),
+                "Synthesis must not start with ack filler '$filler', got: '${synth.text}'",
+            )
+        }
+    }
+
+    @Test
+    fun `synthesis event always carries a non-null source`() = runTest {
+        val streamer = buildStreamer()
+        // SIMPLE (pool) path
+        val simpleEvents = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+        val simpleSynth = simpleEvents.first { it.phase == "synthesis" }
+        assertNotNull(simpleSynth.source, "Synthesis source must not be null")
+        assertEquals("pool", simpleSynth.source, "TaskBranch synthesis must have source=pool")
+
+        // SOCIAL (pool) path
+        val socialEvents = streamer.stream("Hey", "s1", "u1").toList()
+        val socialSynth = socialEvents.first { it.phase == "synthesis" }
+        assertNotNull(socialSynth.source, "Social synthesis source must not be null")
+        assertEquals("pool", socialSynth.source, "SocialBranch synthesis must have source=pool")
+    }
+
+    @Test
+    fun `synthesis source is llm when QuestionBranch uses LLM`() = runTest {
+        val llm = TestLlmClient { LlmResponse(text = "Paris is the capital of France.", latencyMs = 0, retryCount = 0) }
+        val pipeline = CognitivePipeline(llmClient = llm)
+        val streamer = buildStreamer(pipeline = pipeline)
+
+        val events = streamer.stream("What is the capital of France?", "s1", "u1").toList()
+        val synth = events.first { it.phase == "synthesis" }
+
+        assertNotNull(synth.source, "Source must not be null for LLM synthesis")
+        assertEquals("llm", synth.source, "QuestionBranch LLM synthesis must have source=llm")
+    }
+
     // ── Synthesis event has sequence + final flags ────────────────────────
 
     @Test
@@ -199,12 +264,12 @@ class PhaseEventStreamerTest {
     @Test
     fun `pipeline exception after acknowledge emits apology not silent close`() = runTest {
         // Simulate an infrastructure failure (e.g. DB crash, OOM) that bypasses branch-level
-        // graceful degradation and propagates directly from process().
+        // graceful degradation and propagates directly from processForStream().
         // Root cause of 2026-04-26 incident: old awaitWithTimeout only caught
         // TimeoutCancellationException; any other exception silently closed the stream
         // after acknowledge had already been flushed to the browser.
         val throwingPipeline = object : CognitivePipeline() {
-            override suspend fun process(utterance: String, sessionId: String, userId: String): String {
+            override suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
                 throw RuntimeException("simulated infrastructure failure")
             }
         }
@@ -223,7 +288,7 @@ class PhaseEventStreamerTest {
     @Test
     fun `SOCIAL pipeline exception emits apology not silent close`() = runTest {
         val throwingPipeline = object : CognitivePipeline() {
-            override suspend fun process(utterance: String, sessionId: String, userId: String): String {
+            override suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
                 throw RuntimeException("simulated infrastructure failure")
             }
         }

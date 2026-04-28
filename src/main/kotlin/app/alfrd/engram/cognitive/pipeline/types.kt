@@ -25,6 +25,8 @@ data class BranchResult(
     val responseStrategy: ResponseStrategy,
     val memoryWrites: List<String>? = null,
     val phaseTransitionEvidence: String? = null,
+    /** "pool" for canned/selection responses, "llm" for LLM-generated responses. */
+    val source: String = "pool",
 )
 
 /**

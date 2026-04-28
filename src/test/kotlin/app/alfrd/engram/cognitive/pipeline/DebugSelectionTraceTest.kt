@@ -63,11 +63,11 @@ class DebugSelectionTraceTest {
         assertEquals(ResponseStrategy.SOCIAL, sel.strategy)
         assertTrue(sel.compositeScore > 0.0, "compositeScore should be positive")
 
-        // All 5 score dimensions must be present with snake_case keys
+        // All 5 score dimensions must be present with camelCase keys
         assertTrue(sel.scores.containsKey("freshness"), "scores must contain freshness")
-        assertTrue(sel.scores.containsKey("contextual_fit"), "scores must contain contextual_fit")
-        assertTrue(sel.scores.containsKey("communication_fit"), "scores must contain communication_fit")
-        assertTrue(sel.scores.containsKey("phase_appropriateness"), "scores must contain phase_appropriateness")
+        assertTrue(sel.scores.containsKey("contextualFit"), "scores must contain contextualFit")
+        assertTrue(sel.scores.containsKey("communicationFit"), "scores must contain communicationFit")
+        assertTrue(sel.scores.containsKey("phaseAppropriateness"), "scores must contain phaseAppropriateness")
         assertTrue(sel.scores.containsKey("effectiveness"), "scores must contain effectiveness")
 
         assertTrue(sel.candidatesConsidered >= 1, "candidatesConsidered should be at least 1")
@@ -91,10 +91,10 @@ class DebugSelectionTraceTest {
         assertTrue(sel.compositeScore > 0.0)
         assertTrue(sel.candidatesConsidered >= 1)
 
-        // Score keys must use snake_case
-        assertTrue(sel.scores.containsKey("contextual_fit"))
-        assertTrue(sel.scores.containsKey("communication_fit"))
-        assertTrue(sel.scores.containsKey("phase_appropriateness"))
+        // Score keys must use camelCase
+        assertTrue(sel.scores.containsKey("contextualFit"))
+        assertTrue(sel.scores.containsKey("communicationFit"))
+        assertTrue(sel.scores.containsKey("phaseAppropriateness"))
     }
 
     // ── candidatesConsidered reflects filter count not total pool size ─────────

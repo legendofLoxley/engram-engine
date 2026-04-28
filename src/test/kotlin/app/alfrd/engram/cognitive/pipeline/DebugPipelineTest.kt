@@ -149,9 +149,9 @@ class DebugPipelineTest {
             compositeScore = 0.847,
             scores = mapOf(
                 "freshness"             to 0.9,
-                "contextual_fit"        to 0.95,
-                "communication_fit"     to 0.7,
-                "phase_appropriateness" to 1.0,
+                "contextualFit"         to 0.95,
+                "communicationFit"      to 0.7,
+                "phaseAppropriateness"  to 1.0,
                 "effectiveness"         to 0.5,
             ),
             candidatesConsidered = 6,
@@ -164,8 +164,8 @@ class DebugPipelineTest {
         assertEquals(trace, decoded)
         assertTrue(json.contains("\"phraseId\":\"phrase-abc123\""))
         assertTrue(json.contains("\"strategy\":\"SOCIAL\""))
-        assertTrue(json.contains("\"contextual_fit\""))
-        assertTrue(json.contains("\"phase_appropriateness\""))
-        assertTrue(json.contains("\"communication_fit\""))
+        assertTrue(json.contains("\"contextualFit\""))
+        assertTrue(json.contains("\"phaseAppropriateness\""))
+        assertTrue(json.contains("\"communicationFit\""))
     }
 }

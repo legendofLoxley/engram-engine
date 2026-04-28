@@ -26,6 +26,7 @@ class QuestionBranch(
             ctx.branchResult = BranchResult(
                 content = "I'm having trouble with that question right now. Could you ask again?",
                 responseStrategy = ResponseStrategy.SIMPLE,
+                source = "pool",
             )
             return
         }
@@ -65,11 +66,12 @@ class QuestionBranch(
             val wordCount = response.text.trim().split(Regex("\\s+")).size
             val strategy = if (wordCount > 100) ResponseStrategy.COMPLEX else ResponseStrategy.SIMPLE
 
-            ctx.branchResult = BranchResult(content = response.text, responseStrategy = strategy)
+            ctx.branchResult = BranchResult(content = response.text, responseStrategy = strategy, source = "llm")
         } catch (_: Exception) {
             ctx.branchResult = BranchResult(
                 content = "I'm having trouble with that question right now. Could you ask again?",
                 responseStrategy = ResponseStrategy.SIMPLE,
+                source = "pool",
             )
         }
     }

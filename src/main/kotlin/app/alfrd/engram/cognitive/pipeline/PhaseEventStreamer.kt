@@ -70,12 +70,12 @@ class PhaseEventStreamer(
             if (strategy == ResponseStrategy.SOCIAL) {
                 // SOCIAL path: no acknowledge/bridge — synthesise directly.
                 val result = awaitWithTimeout {
-                    pipeline.process(utterance, sessionId, userId)
+                    pipeline.processForStream(utterance, sessionId, userId)
                 }
-                if (result == APOLOGY_TEXT) {
-                    send(phaseEvent("apology", result, turnId, traceId))
+                if (result.text == APOLOGY_TEXT) {
+                    send(phaseEvent("apology", result.text, turnId, traceId))
                 } else {
-                    send(synthesisEvent(result, turnId, traceId, sequence = 1, final = true))
+                    send(synthesisEvent(result.text, result.source, turnId, traceId, sequence = 1, final = true))
                 }
                 terminalSent = true
                 return@channelFlow
@@ -93,15 +93,15 @@ class PhaseEventStreamer(
             // they never propagate as scope-cancellation to the parent channelFlow coroutine.
             val pipelineDeferred = async {
                 try {
-                    pipeline.process(utterance, sessionId, userId)
+                    pipeline.processForStream(utterance, sessionId, userId)
                 } catch (e: CancellationException) {
                     throw e // external scope cancel — propagate
                 } catch (_: Exception) {
-                    APOLOGY_TEXT
+                    CognitivePipeline.SynthesisResult(APOLOGY_TEXT, "pool")
                 }
             }
 
-            val pipelineResult: String
+            val pipelineResult: CognitivePipeline.SynthesisResult
 
             if (bridgeNeeded) {
                 val fastResult = withTimeoutOrNull(bridgeDelayMs) { pipelineDeferred.await() }
@@ -132,7 +132,7 @@ class PhaseEventStreamer(
 
                         // Final wait with global timeout.
                         pipelineResult = awaitWithTimeout { pipelineDeferred.await() }
-                            .also { if (it == APOLOGY_TEXT) pipelineDeferred.cancel() }
+                            .also { if (it.text == APOLOGY_TEXT) pipelineDeferred.cancel() }
                     }
                 }
             } else {
@@ -140,10 +140,10 @@ class PhaseEventStreamer(
                 pipelineResult = awaitWithTimeout { pipelineDeferred.await() }
             }
 
-            if (pipelineResult == APOLOGY_TEXT) {
-                send(phaseEvent("apology", pipelineResult, turnId, traceId))
+            if (pipelineResult.text == APOLOGY_TEXT) {
+                send(phaseEvent("apology", pipelineResult.text, turnId, traceId))
             } else {
-                send(synthesisEvent(pipelineResult, turnId, traceId, sequence = 1, final = true))
+                send(synthesisEvent(pipelineResult.text, pipelineResult.source, turnId, traceId, sequence = 1, final = true))
             }
             terminalSent = true
 
@@ -166,7 +166,8 @@ class PhaseEventStreamer(
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**
-     * Await [block] with a global timeout. Returns [APOLOGY_TEXT] on:
+     * Await [block] with a global timeout. Returns a [CognitivePipeline.SynthesisResult] containing
+     * [APOLOGY_TEXT] on:
      * - [reasonTimeoutMs] exceeded ([TimeoutCancellationException])
      * - Any other exception from the pipeline (LLM failure, network error, branch crash)
      *
@@ -174,16 +175,16 @@ class PhaseEventStreamer(
      * swallow it.
      */
     private suspend fun awaitWithTimeout(
-        block: suspend () -> String,
-    ): String {
+        block: suspend () -> CognitivePipeline.SynthesisResult,
+    ): CognitivePipeline.SynthesisResult {
         return try {
             withTimeout(reasonTimeoutMs) { block() }
         } catch (_: TimeoutCancellationException) {
-            APOLOGY_TEXT
+            CognitivePipeline.SynthesisResult(APOLOGY_TEXT, "pool")
         } catch (e: CancellationException) {
             throw e  // propagate external scope cancellation
         } catch (_: Exception) {
-            APOLOGY_TEXT  // any pipeline/LLM/branch failure → apology
+            CognitivePipeline.SynthesisResult(APOLOGY_TEXT, "pool")  // any pipeline/LLM/branch failure → apology
         }
     }
 
@@ -198,6 +199,7 @@ class PhaseEventStreamer(
 
     private fun synthesisEvent(
         text: String,
+        source: String,
         turnId: String,
         traceId: String,
         sequence: Int,
@@ -205,6 +207,7 @@ class PhaseEventStreamer(
     ) = PhaseEvent(
         phase     = "synthesis",
         text      = text,
+        source    = source,
         turnId    = turnId,
         traceId   = traceId,
         timestamp = System.currentTimeMillis(),

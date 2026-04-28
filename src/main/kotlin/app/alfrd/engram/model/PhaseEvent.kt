@@ -13,6 +13,8 @@ import kotlinx.serialization.Serializable
  * @property timestamp Epoch milliseconds when the event was emitted by the server.
  * @property sequence  1-based chunk index within a synthesis stream. Null for non-synthesis phases.
  * @property final     True on the last synthesis chunk. Null for non-synthesis phases.
+ * @property source    "pool" for canned/selection synthesis, "llm" for LLM-generated synthesis.
+ *                     Only set on synthesis frames; null for acknowledge/bridge/apology.
  */
 @Serializable
 data class PhaseEvent(
@@ -23,4 +25,5 @@ data class PhaseEvent(
     val timestamp: Long,
     val sequence: Int? = null,
     val final: Boolean? = null,
+    val source: String? = null,
 )
