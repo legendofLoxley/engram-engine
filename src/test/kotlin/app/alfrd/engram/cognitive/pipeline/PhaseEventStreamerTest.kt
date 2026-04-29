@@ -17,12 +17,16 @@ class PhaseEventStreamerTest {
         bridgeDelayMs: Long = 1_500L,
         bridgeSecondDelayMs: Long = 5_000L,
         reasonTimeoutMs: Long = 10_000L,
+        cachedAudioIndex: Set<String> = emptySet(),
+        voiceModelId: String = "alfrd-v1",
     ) = PhaseEventStreamer(
         pipeline            = pipeline,
         phraseTracker       = phraseTracker,
         bridgeDelayMs       = bridgeDelayMs,
         bridgeSecondDelayMs = bridgeSecondDelayMs,
         reasonTimeoutMs     = reasonTimeoutMs,
+        cachedAudioIndex    = cachedAudioIndex,
+        voiceModelId        = voiceModelId,
     )
 
     // ── SOCIAL path: synthesis only ──────────────────────────────────────
@@ -300,6 +304,136 @@ class PhaseEventStreamerTest {
         assertFalse(phases.isEmpty(), "SOCIAL stream must not be empty after pipeline failure")
         assertEquals("apology", phases.last(), "SOCIAL path must emit apology on failure, got: $phases")
         assertFalse(phases.contains("synthesis"), "Synthesis must not fire when SOCIAL pipeline throws")
+    }
+
+    // ── renderStrategy defaults to "live" on every event ─────────────────
+
+    @Test
+    fun `every event carries renderStrategy defaulting to live`() = runTest {
+        val streamer = buildStreamer()
+        // Use SIMPLE path so we get acknowledge + synthesis
+        val events = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+
+        assertTrue(events.isNotEmpty())
+        assertTrue(
+            events.all { it.renderStrategy == "live" },
+            "All events must carry renderStrategy=live until VRP is wired, got: ${events.map { it.renderStrategy }}",
+        )
+    }
+
+    @Test
+    fun `SOCIAL synthesis event carries renderStrategy live`() = runTest {
+        val streamer = buildStreamer()
+        val events = streamer.stream("Hey", "s1", "u1").toList()
+
+        assertEquals(1, events.size)
+        assertEquals("live", events[0].renderStrategy)
+    }
+
+    @Test
+    fun `apology event carries renderStrategy live`() = runTest {
+        val hangingLlm = TestLlmClient {
+            delay(Long.MAX_VALUE)
+            error("unreachable")
+        }
+        val pipeline = CognitivePipeline(llmClient = hangingLlm)
+        val streamer = buildStreamer(pipeline = pipeline, reasonTimeoutMs = 500L)
+
+        val events = streamer.stream("Explain quantum entanglement", "s1", "u1").toList()
+        val apology = events.first { it.phase == "apology" }
+
+        assertEquals("live", apology.renderStrategy, "Apology must carry renderStrategy=live")
+    }
+
+    // ── phraseHash is null when renderStrategy is "live" ─────────────────
+
+    @Test
+    fun `phraseHash is null on all live events`() = runTest {
+        val streamer = buildStreamer()
+        val events = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+
+        assertTrue(events.isNotEmpty())
+        assertTrue(
+            events.all { it.phraseHash == null },
+            "phraseHash must be null when renderStrategy=live, got: ${events.map { it.phraseHash }}",
+        )
+    }
+
+    // ── VRP cache-hit integration: acknowledge ────────────────────────────────
+
+    @Test
+    fun `acknowledge event has renderStrategy cached when phrase hash is in cachedAudioIndex`() = runTest {
+        // Build the index so the first SIMPLE acknowledge phrase is pre-cached.
+        val phrase       = ExpressionPhrasePool.acknowledgeFor(ResponseStrategy.SIMPLE).first()
+        val voiceModelId = "alfrd-v1"
+        val hash         = VoiceRenderPolicy.phraseHash(phrase, voiceModelId)
+
+        val streamer = buildStreamer(cachedAudioIndex = setOf(hash), voiceModelId = voiceModelId)
+        val events   = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+        val ack      = events.firstOrNull { it.phase == "acknowledge" }
+
+        assertNotNull(ack, "SIMPLE path must emit an acknowledge event")
+        assertEquals("cached", ack!!.renderStrategy, "Acknowledge must be cached when phrase is in index")
+        assertEquals(hash, ack.phraseHash, "phraseHash must match the pre-computed hash")
+    }
+
+    @Test
+    fun `acknowledge event has renderStrategy live when phrase hash is not in cachedAudioIndex`() = runTest {
+        val streamer = buildStreamer(cachedAudioIndex = emptySet())
+        val events   = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+        val ack      = events.firstOrNull { it.phase == "acknowledge" }
+
+        assertNotNull(ack, "SIMPLE path must emit an acknowledge event")
+        assertEquals("live", ack!!.renderStrategy)
+        assertNull(ack.phraseHash)
+    }
+
+    // ── VRP cache-hit integration: bridge ─────────────────────────────────────
+
+    @Test
+    fun `bridge event has renderStrategy cached when bridge phrase is in cachedAudioIndex`() = runTest {
+        val slowLlm = TestLlmClient {
+            delay(3_000L)
+            LlmResponse(text = "Deep answer.", latencyMs = 3_000L, retryCount = 0)
+        }
+        val pipeline = CognitivePipeline(llmClient = slowLlm)
+
+        // Pre-cache the first COMPLEX bridge phrase.
+        val bridgePhrase = ExpressionPhrasePool.bridgeFor(ResponseStrategy.COMPLEX).first()
+        val voiceModelId = "alfrd-v1"
+        val hash         = VoiceRenderPolicy.phraseHash(bridgePhrase, voiceModelId)
+
+        val streamer = buildStreamer(
+            pipeline         = pipeline,
+            bridgeDelayMs    = 500L,
+            reasonTimeoutMs  = 10_000L,
+            cachedAudioIndex = setOf(hash),
+            voiceModelId     = voiceModelId,
+        )
+
+        val events       = streamer.stream("Explain how photosynthesis works", "s1", "u1").toList()
+        val bridgeEvent  = events.firstOrNull { it.phase == "bridge" }
+
+        assertNotNull(bridgeEvent, "Bridge must fire on slow pipeline")
+        assertEquals("cached", bridgeEvent!!.renderStrategy, "Bridge must be cached when phrase is in index")
+        assertEquals(hash, bridgeEvent.phraseHash)
+    }
+
+    @Test
+    fun `synthesis event always has renderStrategy live regardless of cachedAudioIndex`() = runTest {
+        // Even if synthesis text hash were in the index (hypothetically), it must remain "live".
+        val voiceModelId = "alfrd-v1"
+        val streamer     = buildStreamer(
+            cachedAudioIndex = setOf("aaaa", "bbbb"),  // arbitrary hashes — synthesis ignores them
+            voiceModelId     = voiceModelId,
+        )
+
+        val events    = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
+        val synthesis = events.firstOrNull { it.phase == "synthesis" }
+
+        assertNotNull(synthesis, "SIMPLE path must emit a synthesis event")
+        assertEquals("live", synthesis!!.renderStrategy)
+        assertNull(synthesis.phraseHash)
     }
 }
 

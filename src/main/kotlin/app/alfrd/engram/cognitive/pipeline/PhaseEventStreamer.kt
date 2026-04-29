@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.model.ExpressionPhase
 import app.alfrd.engram.model.PhaseEvent
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -38,6 +39,17 @@ class PhaseEventStreamer(
     private val bridgeDelayMs: Long = 1_500L,
     private val bridgeSecondDelayMs: Long = 5_000L,
     private val reasonTimeoutMs: Long = 10_000L,
+    /**
+     * Set of [VoiceRenderPolicy.phraseHash] values for which the browser has pre-rendered
+     * audio. Populated at pipeline startup from the cached audio index. Defaults to empty
+     * (all phrases → "live") until the index is loaded.
+     */
+    private val cachedAudioIndex: Set<String> = emptySet(),
+    /**
+     * TTS voice model identifier included in phrase hash computation. Must match the model
+     * used to render the audio in [cachedAudioIndex].
+     */
+    private val voiceModelId: String = "alfrd-v1",
 ) {
 
     companion object {
@@ -188,14 +200,42 @@ class PhaseEventStreamer(
         }
     }
 
-    private fun phaseEvent(phase: String, text: String, turnId: String, traceId: String) =
-        PhaseEvent(
-            phase     = phase,
-            text      = text,
-            turnId    = turnId,
-            traceId   = traceId,
-            timestamp = System.currentTimeMillis(),
+    private fun phaseEvent(phase: String, text: String, turnId: String, traceId: String): PhaseEvent {
+        val (renderStrategy, phraseHash) = vrpAnnotate(phase, text)
+        return PhaseEvent(
+            phase          = phase,
+            text           = text,
+            turnId         = turnId,
+            traceId        = traceId,
+            timestamp      = System.currentTimeMillis(),
+            renderStrategy = renderStrategy,
+            phraseHash     = phraseHash,
         )
+    }
+
+    /**
+     * Compute the [VoiceRenderPolicy] renderStrategy and optional phraseHash for a single
+     * phase emission.
+     *
+     * Bridge is only passed to this function when it has already fired (Reason tier was slow),
+     * so the `reasonLatencyMs >= threshold` condition is inherently satisfied — we bypass the
+     * latency check and go straight to the cache lookup for bridge phrases.
+     */
+    private fun vrpAnnotate(phase: String, text: String): Pair<String, String?> {
+        return when (phase) {
+            "acknowledge" -> {
+                val hash = VoiceRenderPolicy.phraseHash(text, voiceModelId)
+                if (hash in cachedAudioIndex) "cached" to hash else "live" to null
+            }
+            "bridge" -> {
+                // Bridge only reaches here when it fired (Reason was slow), so skip the
+                // threshold check and apply the cache lookup directly.
+                val hash = VoiceRenderPolicy.phraseHash(text, voiceModelId)
+                if (hash in cachedAudioIndex) "cached" to hash else "live" to null
+            }
+            else -> "live" to null  // synthesis, apology — always live
+        }
+    }
 
     private fun synthesisEvent(
         text: String,
@@ -205,14 +245,16 @@ class PhaseEventStreamer(
         sequence: Int,
         final: Boolean,
     ) = PhaseEvent(
-        phase     = "synthesis",
-        text      = text,
-        source    = source,
-        turnId    = turnId,
-        traceId   = traceId,
-        timestamp = System.currentTimeMillis(),
-        sequence  = sequence,
-        final     = final,
+        phase          = "synthesis",
+        text           = text,
+        source         = source,
+        turnId         = turnId,
+        traceId        = traceId,
+        timestamp      = System.currentTimeMillis(),
+        renderStrategy = "live",  // VRP: synthesis is always live (novel content)
+        phraseHash     = null,
+        sequence       = sequence,
+        final          = final,
     )
 
     /**
