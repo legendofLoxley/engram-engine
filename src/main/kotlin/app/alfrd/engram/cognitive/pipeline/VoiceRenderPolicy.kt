@@ -67,7 +67,7 @@ object VoiceRenderPolicy {
         voiceModelId: String,
         reasonLatencyMs: Long,
     ): AnnotatedPhase = when (raw.phase) {
-        ExpressionPhase.ACKNOWLEDGE -> {
+        ExpressionPhase.FIRST_RESPONSE -> {
             val hash = phraseHash(raw.text, voiceModelId)
             if (hash in cachedIndex) AnnotatedPhase(raw.phase, raw.text, "cached", hash)
             else                     AnnotatedPhase(raw.phase, raw.text, "live",   null)

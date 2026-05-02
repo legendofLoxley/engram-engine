@@ -74,7 +74,7 @@ class DebugSelectionTraceTest {
         assertTrue(sel.selectionLatencyMs >= 0, "selectionLatencyMs should be non-negative")
     }
 
-    // ── SOCIAL thanks → responseSelection with ACKNOWLEDGMENT phrase ──────────
+    // ── SOCIAL thanks → responseSelection with RECEIPT phrase ──────────────────
 
     @Test
     fun `responseSelection populated for SOCIAL thanks interaction`() = runTest {

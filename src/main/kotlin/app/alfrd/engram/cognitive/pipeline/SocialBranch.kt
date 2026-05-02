@@ -31,15 +31,15 @@ class SocialBranch(
             )
             isThanks(lower) -> selectOrFallback(
                 ctx = ctx,
-                category = ResponseCategory.ACKNOWLEDGMENT,
-                expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+                category = ResponseCategory.RECEIPT,
+                expressionPhase = ExpressionPhase.FIRST_RESPONSE,
                 fallback = "Of course.",
             )
             isModalityCheck(lower) -> pickModalityConfirmation()
             else -> selectOrFallback(
                 ctx = ctx,
                 category = ResponseCategory.GREETING,
-                expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+                expressionPhase = ExpressionPhase.FIRST_RESPONSE,
                 fallback = timeBasedGreeting(),
             )
         }

@@ -24,6 +24,16 @@ If a source file is edited via a tool but the task shows `UP-TO-DATE`, tests run
 
 ---
 
+## ArcadeDB Interop
+
+### `assertNotNull` ambiguity with ArcadeDB schema API
+
+`schema.getType(x).getProperty(y)` returns a Java platform type (`Property!`), which causes Kotlin overload resolution ambiguity between JUnit 5's `assertNotNull(actual: Any?, message: String)` and its static Java overload. The compiler refuses to compile.
+
+**Fix:** Always use `assertTrue(x != null, message)` when asserting on values returned from ArcadeDB schema API calls (`getProperty`, `getIndex`, etc.).
+
+---
+
 ## Discovery Discipline
 
 Token budget and wall-clock both matter. Most discovery waste comes from over-searching, not under-searching.

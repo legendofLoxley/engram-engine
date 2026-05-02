@@ -208,7 +208,7 @@ open class CognitivePipeline(
 
         val query = ResponseSelectionQuery(
             branch          = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
             category        = ResponseCategory.GREETING,
             context         = ctx,
             limit           = 1,

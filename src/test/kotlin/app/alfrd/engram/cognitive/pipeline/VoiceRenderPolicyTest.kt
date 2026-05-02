@@ -38,24 +38,24 @@ class VoiceRenderPolicyTest {
         assertEquals(64, hash.length, "SHA-256 hex must be 64 chars, got length ${hash.length}")
     }
 
-    // ── ACKNOWLEDGE rules ─────────────────────────────────────────────────────
+    // ── FIRST_RESPONSE rules ─────────────────────────────────────────────────────
 
     @Test
-    fun `ACKNOWLEDGE with cache hit returns cached strategy and phraseHash`() {
+    fun `FIRST_RESPONSE with cache hit returns cached strategy and phraseHash`() {
         val text = "Understood."
         val hash = VoiceRenderPolicy.phraseHash(text, voiceModelId)
         val cachedIndex = setOf(hash)
 
-        val result = applyOne(ExpressionPhase.ACKNOWLEDGE, text, cachedIndex, reasonLatencyMs = 0L)
+        val result = applyOne(ExpressionPhase.FIRST_RESPONSE, text, cachedIndex, reasonLatencyMs = 0L)
 
         assertEquals("cached", result.renderStrategy)
         assertEquals(hash, result.phraseHash)
     }
 
     @Test
-    fun `ACKNOWLEDGE with cache miss returns live strategy and null phraseHash`() {
+    fun `FIRST_RESPONSE with cache miss returns live strategy and null phraseHash`() {
         val text = "Understood."
-        val result = applyOne(ExpressionPhase.ACKNOWLEDGE, text, cachedIndex = emptySet(), reasonLatencyMs = 0L)
+        val result = applyOne(ExpressionPhase.FIRST_RESPONSE, text, cachedIndex = emptySet(), reasonLatencyMs = 0L)
 
         assertEquals("live", result.renderStrategy)
         assertNull(result.phraseHash)
@@ -184,7 +184,7 @@ class VoiceRenderPolicyTest {
         val bridgeHash = VoiceRenderPolicy.phraseHash(bridgeText, voiceModelId)
 
         val phases = listOf(
-            RawPhase(ExpressionPhase.ACKNOWLEDGE, ackText),
+            RawPhase(ExpressionPhase.FIRST_RESPONSE, ackText),
             RawPhase(ExpressionPhase.BRIDGE,      bridgeText),
             RawPhase(ExpressionPhase.SYNTHESIS,   synthText),
         )
@@ -197,7 +197,7 @@ class VoiceRenderPolicyTest {
         )
 
         assertEquals(3, results.size)
-        assertEquals(ExpressionPhase.ACKNOWLEDGE, results[0].phase)
+        assertEquals(ExpressionPhase.FIRST_RESPONSE, results[0].phase)
         assertEquals(ExpressionPhase.BRIDGE,      results[1].phase)
         assertEquals(ExpressionPhase.SYNTHESIS,   results[2].phase)
         assertEquals("cached", results[0].renderStrategy)
@@ -220,7 +220,7 @@ class VoiceRenderPolicyTest {
 
     @Test
     fun `annotated phase has null phraseHash when renderStrategy is live`() {
-        val result = applyOne(ExpressionPhase.ACKNOWLEDGE, "Got it.", emptySet(), reasonLatencyMs = 0L)
+        val result = applyOne(ExpressionPhase.FIRST_RESPONSE, "Got it.", emptySet(), reasonLatencyMs = 0L)
         assertEquals("live", result.renderStrategy)
         assertNull(result.phraseHash, "phraseHash must be null when strategy is live")
     }

@@ -72,6 +72,8 @@ object SchemaBootstrap {
                 vt.createProperty("phaseAffinity", Type.STRING)     // JSON array
                 vt.createProperty("expressionPhase", Type.STRING)
                 vt.createProperty("category", Type.STRING)
+                vt.createProperty("moveType", Type.STRING)          // PostureMoveType name; null for non-posture phrases
+                vt.createProperty("postureAffinity", Type.STRING)   // JSON PostureAffinity; null for non-posture phrases
                 vt.createProperty("variants", Type.STRING)          // JSON array, nullable
                 vt.createProperty("requiresInterpolation", Type.BOOLEAN)
                 vt.createProperty("interpolationKeys", Type.STRING) // JSON array, nullable
@@ -129,6 +131,7 @@ object SchemaBootstrap {
                 et.createProperty("userId", Type.STRING)
                 et.createProperty("turnIndex", Type.INTEGER)
                 et.createProperty("branch", Type.STRING)
+                et.createProperty("moveType", Type.STRING)          // null for post-comprehension; non-null for first-response
                 et.createProperty("compositeScore", Type.DOUBLE)
                 et.createProperty("scoreBreakdown", Type.STRING)  // JSON map
                 et.createProperty("timestamp", Type.LONG)
@@ -156,7 +159,11 @@ object SchemaBootstrap {
             ensureIndex(schema, "Scope",       "uid")
             ensureIndex(schema, "ResponsePhrase", "uid")
             ensureIndex(schema, "ResponsePhrase", "hash")
+            ensureIndex(schema, "ResponsePhrase", "moveType")
             ensureIndex(schema, "UserScaffoldState", "userId")
+            // SELECTED edge indexes — freshness queries (phraseUid+userId) and session analytics (sessionId)
+            ensureIndex(schema, "SELECTED", "sessionId")
+            ensureCompositeIndex(schema, "SELECTED", "phraseUid", "userId")
         }
     }
 
@@ -188,6 +195,16 @@ object SchemaBootstrap {
                 Schema.INDEX_TYPE.LSM_TREE,
                 false,
                 property
+            )
+        }
+    }
+
+    private fun ensureCompositeIndex(schema: Schema, typeName: String, vararg properties: String) {
+        if (schema.existsType(typeName)) {
+            schema.getType(typeName).getOrCreateTypeIndex(
+                Schema.INDEX_TYPE.LSM_TREE,
+                false,
+                *properties
             )
         }
     }

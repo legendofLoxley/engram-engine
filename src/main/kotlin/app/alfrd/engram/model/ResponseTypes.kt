@@ -6,11 +6,40 @@ enum class BranchType { SOCIAL, ONBOARDING, QUESTION, TASK, CORRECTION, META, CL
 
 enum class TrustPhase { ORIENTATION, WORKING_RHYTHM, CONTEXT, UNDERSTANDING }
 
-enum class ExpressionPhase { ACKNOWLEDGE, BRIDGE, PARTIAL, INTERIM, SYNTHESIS }
+enum class ExpressionPhase { FIRST_RESPONSE, BRIDGE, PARTIAL, INTERIM, SYNTHESIS }
 
-enum class ResponseCategory { GREETING, ACKNOWLEDGMENT, BRIDGE, SCAFFOLD_QUESTION, SIGN_OFF, FILLER, CLARIFICATION, DECLINE }
+/** Move-type for first-response pool phrases (RECEIPT … MULTI_UTTERANCE_HOLD). Null for all other pools. */
+enum class PostureMoveType {
+    RECEIPT, ORIENT, HOLD, REPAIR, PROBE, COMMIT, WAIT, MISREAD_RECOVERY, YIELD, MULTI_UTTERANCE_HOLD
+}
+
+/** 18 response categories — first-response posture pool (10) + session/post-comprehension pools (8). */
+enum class ResponseCategory {
+    // First-response posture pool
+    RECEIPT, ORIENT, HOLD, REPAIR, PROBE, COMMIT, WAIT, MISREAD_RECOVERY, YIELD, MULTI_UTTERANCE_HOLD,
+    // Session-level & post-comprehension pools
+    GREETING, SIGN_OFF, BRIDGE, SCAFFOLD_QUESTION, FILLER, CLARIFICATION, DECLINE, ACKNOWLEDGMENT
+}
 
 enum class OutcomeSignal { ENGAGED, EXPANDED, CORRECTED, DISENGAGED, NEUTRAL }
+
+/** Inclusive energy/pressure range used in [PostureAffinity] (values 0.0–1.0). */
+@Serializable
+data class EnergyRange(val min: Double, val max: Double)
+
+/**
+ * Posture-selection constraints for first-response pool phrases.
+ *
+ * @property turnShapes             Set of turn-shape labels this phrase fits (e.g. SHORT_TURN, QUESTION).
+ * @property surfaceEnergyRange     Conversation energy window (0.0 = inert, 1.0 = high intensity).
+ * @property responsePressureRange  Response-pressure window (0.0 = none, 1.0 = urgent).
+ */
+@Serializable
+data class PostureAffinity(
+    val turnShapes: Set<String>,
+    val surfaceEnergyRange: EnergyRange,
+    val responsePressureRange: EnergyRange,
+)
 
 @Serializable
 data class ResponsePhrase(
@@ -24,6 +53,8 @@ data class ResponsePhrase(
     val phaseAffinity: Set<String>,
     val expressionPhase: String,
     val category: String,
+    val moveType: String? = null,           // non-null for first-response posture pool only
+    val postureAffinity: String? = null,    // JSON-serialized PostureAffinity; non-null for first-response pool
     val variants: List<String>? = null,
     val requiresInterpolation: Boolean = false,
     val interpolationKeys: Set<String>? = null,
@@ -35,7 +66,8 @@ data class SelectedEdge(
     val sessionId: String,
     val userId: String,
     val turnIndex: Int,
-    val branch: String,
+    val branch: String? = null,     // null for first-response selection; non-null for post-comprehension
+    val moveType: String? = null,   // null for post-comprehension selection; non-null for first-response
     val compositeScore: Double,
     val scoreBreakdown: Map<String, Double>,
     val timestamp: Long,

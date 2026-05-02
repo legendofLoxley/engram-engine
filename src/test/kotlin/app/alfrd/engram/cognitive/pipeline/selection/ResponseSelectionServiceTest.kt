@@ -51,7 +51,7 @@ class ResponseSelectionServiceTest {
         )
         val query = ResponseSelectionQuery(
             branch = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
             category = ResponseCategory.GREETING,
             context = ctx,
             limit = 1,
@@ -96,7 +96,7 @@ class ResponseSelectionServiceTest {
     }
 
     @Test
-    fun `selects acknowledgment phrases`() {
+    fun `selects receipt phrases for thanks`() {
         val ctx = CognitiveContext(
             utterance = "thanks",
             sessionId = "s1",
@@ -105,13 +105,13 @@ class ResponseSelectionServiceTest {
         )
         val query = ResponseSelectionQuery(
             branch = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
-            category = ResponseCategory.ACKNOWLEDGMENT,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
+            category = ResponseCategory.RECEIPT,
             context = ctx,
             limit = 5,
         )
         val results = service.select(query)
-        assertTrue(results.isNotEmpty(), "Expected at least one acknowledgment phrase")
+        assertTrue(results.isNotEmpty(), "Expected at least one receipt phrase")
     }
 
     @Test
@@ -124,7 +124,7 @@ class ResponseSelectionServiceTest {
         )
         val query = ResponseSelectionQuery(
             branch = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
             category = ResponseCategory.DECLINE,
             context = ctx,
             limit = 1,
@@ -145,7 +145,7 @@ class ResponseSelectionServiceTest {
         // First, get all greeting phrases
         val allQuery = ResponseSelectionQuery(
             branch = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
             category = ResponseCategory.GREETING,
             context = ctx,
             limit = 10,
@@ -173,7 +173,7 @@ class ResponseSelectionServiceTest {
         )
         val query = ResponseSelectionQuery(
             branch = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
             category = ResponseCategory.GREETING,
             context = ctx,
             limit = 10,
@@ -201,7 +201,7 @@ class ResponseSelectionServiceTest {
         )
         val query = ResponseSelectionQuery(
             branch = BranchType.SOCIAL,
-            expressionPhase = ExpressionPhase.ACKNOWLEDGE,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
             category = ResponseCategory.GREETING,
             context = ctx,
             limit = 25, // large enough to include all greeting phrases regardless of pool size
