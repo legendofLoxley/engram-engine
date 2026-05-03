@@ -8,6 +8,11 @@ enum class TrustPhase { ORIENTATION, WORKING_RHYTHM, CONTEXT, UNDERSTANDING }
 
 enum class ExpressionPhase { FIRST_RESPONSE, BRIDGE, PARTIAL, INTERIM, SYNTHESIS }
 
+enum class TurnShape {
+    QUESTION, CORRECTION, TOPIC_OPENER, DISCLOSURE, FYI, CONTINUATION,
+    FRAGMENTED, BARGE_IN, TASK_REQUEST, COLLABORATIVE
+}
+
 /** Move-type for first-response pool phrases (RECEIPT … MULTI_UTTERANCE_HOLD). Null for all other pools. */
 enum class PostureMoveType {
     RECEIPT, ORIENT, HOLD, REPAIR, PROBE, COMMIT, WAIT, MISREAD_RECOVERY, YIELD, MULTI_UTTERANCE_HOLD
@@ -18,7 +23,7 @@ enum class ResponseCategory {
     // First-response posture pool
     RECEIPT, ORIENT, HOLD, REPAIR, PROBE, COMMIT, WAIT, MISREAD_RECOVERY, YIELD, MULTI_UTTERANCE_HOLD,
     // Session-level & post-comprehension pools
-    GREETING, SIGN_OFF, BRIDGE, SCAFFOLD_QUESTION, FILLER, CLARIFICATION, DECLINE, ACKNOWLEDGMENT
+    GREETING, SIGN_OFF, BRIDGE, SCAFFOLD_QUESTION, FILLER, CLARIFICATION, DECLINE, SYNTHESIS
 }
 
 enum class OutcomeSignal { ENGAGED, EXPANDED, CORRECTED, DISENGAGED, NEUTRAL }
@@ -30,15 +35,15 @@ data class EnergyRange(val min: Double, val max: Double)
 /**
  * Posture-selection constraints for first-response pool phrases.
  *
- * @property turnShapes             Set of turn-shape labels this phrase fits (e.g. SHORT_TURN, QUESTION).
- * @property surfaceEnergyRange     Conversation energy window (0.0 = inert, 1.0 = high intensity).
- * @property responsePressureRange  Response-pressure window (0.0 = none, 1.0 = urgent).
+ * @property turnShapes             Set of [TurnShape] labels this phrase fits; null for post-comprehension phrases.
+ * @property surfaceEnergyRange     Conversation energy window (0.0 = inert, 1.0 = high intensity); null if unconstrained.
+ * @property responsePressureRange  Response-pressure window (0.0 = none, 1.0 = urgent); null if unconstrained.
  */
 @Serializable
 data class PostureAffinity(
-    val turnShapes: Set<String>,
-    val surfaceEnergyRange: EnergyRange,
-    val responsePressureRange: EnergyRange,
+    val turnShapes: Set<TurnShape>?,
+    val surfaceEnergyRange: EnergyRange?,
+    val responsePressureRange: EnergyRange?,
 )
 
 @Serializable

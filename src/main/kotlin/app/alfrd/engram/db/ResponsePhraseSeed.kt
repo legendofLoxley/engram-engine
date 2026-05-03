@@ -1,5 +1,6 @@
 package app.alfrd.engram.db
 
+import app.alfrd.engram.model.TurnShape
 import com.arcadedb.database.Database
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
@@ -28,44 +29,58 @@ object ResponsePhraseSeed {
     // ── PostureAffinity JSON builders ─────────────────────────────────────────────
 
     private fun postureAffinity(
-        turnShapes: List<String>,
-        eMin: Double, eMax: Double,
-        pMin: Double, pMax: Double,
-    ): String = """{"turnShapes":${json.encodeToString(turnShapes)},"surfaceEnergyRange":{"min":$eMin,"max":$eMax},"responsePressureRange":{"min":$pMin,"max":$pMax}}"""
+        turnShapes: List<TurnShape>,
+        surfaceEnergy: Pair<Double, Double>? = null,
+        responsePressure: Pair<Double, Double>? = null,
+    ): String {
+        val eJson = if (surfaceEnergy != null)
+            """{"min":${surfaceEnergy.first},"max":${surfaceEnergy.second}}""" else "null"
+        val pJson = if (responsePressure != null)
+            """{"min":${responsePressure.first},"max":${responsePressure.second}}""" else "null"
+        return """{"turnShapes":${json.encodeToString(turnShapes.map { it.name })},"surfaceEnergyRange":$eJson,"responsePressureRange":$pJson}"""
+    }
 
     // ── Pre-built postureAffinity JSON per move type ──────────────────────────────
 
     private val receiptAffinity = postureAffinity(
-        listOf("SHORT_TURN", "STATEMENT", "FRAGMENT", "DIRECTIVE"),
-        eMin = 0.0, eMax = 1.0, pMin = 0.0, pMax = 0.4,
+        listOf(TurnShape.FYI, TurnShape.CONTINUATION, TurnShape.FRAGMENTED, TurnShape.TASK_REQUEST),
+        surfaceEnergy = 0.0 to 1.0, responsePressure = 0.0 to 0.4,
     )
     private val orientAffinity = postureAffinity(
-        listOf("STATEMENT", "TOPIC_REFERENCE", "DIRECTIVE", "QUESTION"),
-        eMin = 0.2, eMax = 0.8, pMin = 0.0, pMax = 0.6,
+        listOf(TurnShape.CONTINUATION, TurnShape.TOPIC_OPENER, TurnShape.TASK_REQUEST, TurnShape.QUESTION),
+        surfaceEnergy = 0.2 to 0.8, responsePressure = 0.0 to 0.6,
     )
     private val holdAffinity = postureAffinity(
-        listOf("VENT", "NARRATIVE", "STATEMENT"),
-        eMin = 0.4, eMax = 1.0, pMin = 0.3, pMax = 0.8,
+        listOf(TurnShape.DISCLOSURE, TurnShape.CONTINUATION),
+        surfaceEnergy = 0.4 to 1.0, responsePressure = 0.3 to 0.8,
     )
     private val repairAffinity = postureAffinity(
-        listOf("CORRECTION", "STATEMENT", "QUESTION"),
-        eMin = 0.0, eMax = 1.0, pMin = 0.3, pMax = 0.8,
+        listOf(TurnShape.CORRECTION, TurnShape.CONTINUATION, TurnShape.QUESTION),
+        surfaceEnergy = 0.0 to 1.0, responsePressure = 0.3 to 0.8,
     )
     private val probeAffinity = postureAffinity(
-        listOf("QUESTION", "FRAGMENT", "AMBIGUOUS"),
-        eMin = 0.2, eMax = 0.8, pMin = 0.3, pMax = 0.7,
+        listOf(TurnShape.QUESTION, TurnShape.FRAGMENTED),
+        surfaceEnergy = 0.2 to 0.8, responsePressure = 0.3 to 0.7,
     )
     private val commitAffinity = postureAffinity(
-        listOf("DIRECTIVE", "QUESTION", "STATEMENT"),
-        eMin = 0.4, eMax = 1.0, pMin = 0.5, pMax = 1.0,
+        listOf(TurnShape.TASK_REQUEST, TurnShape.QUESTION, TurnShape.CONTINUATION),
+        surfaceEnergy = 0.4 to 1.0, responsePressure = 0.5 to 1.0,
     )
     private val misreadRecoveryAffinity = postureAffinity(
-        listOf("QUESTION", "STATEMENT", "CORRECTION"),
-        eMin = 0.0, eMax = 1.0, pMin = 0.4, pMax = 0.9,
+        listOf(TurnShape.QUESTION, TurnShape.CONTINUATION, TurnShape.CORRECTION),
+        surfaceEnergy = 0.0 to 1.0, responsePressure = 0.4 to 0.9,
     )
     private val multiUtteranceHoldAffinity = postureAffinity(
-        listOf("STATEMENT", "NARRATIVE", "FRAGMENT"),
-        eMin = 0.2, eMax = 0.8, pMin = 0.1, pMax = 0.5,
+        listOf(TurnShape.CONTINUATION, TurnShape.FRAGMENTED, TurnShape.COLLABORATIVE),
+        surfaceEnergy = 0.2 to 0.8, responsePressure = 0.1 to 0.5,
+    )
+    private val waitAffinity = postureAffinity(
+        listOf(TurnShape.FYI, TurnShape.CONTINUATION),
+        surfaceEnergy = null, responsePressure = 0.0 to 0.2,
+    )
+    private val yieldAffinity = postureAffinity(
+        listOf(TurnShape.BARGE_IN),
+        surfaceEnergy = null, responsePressure = null,
     )
 
     private val seedPhrases = listOf(
@@ -169,6 +184,14 @@ object ResponsePhraseSeed {
             moveType = "MULTI_UTTERANCE_HOLD", postureAffinityJson = multiUtteranceHoldAffinity),
         SeedPhrase("Mm-hmm.", "MULTI_UTTERANCE_HOLD", "FIRST_RESPONSE", allBranches, allPhases,
             moveType = "MULTI_UTTERANCE_HOLD", postureAffinityJson = multiUtteranceHoldAffinity),
+
+        // ── First Response: WAIT (1) ──────────────────────────────────────────────────
+        SeedPhrase("[silence]", "WAIT", "FIRST_RESPONSE", allBranches, allPhases,
+            moveType = "WAIT", postureAffinityJson = waitAffinity),
+
+        // ── First Response: YIELD (1) ─────────────────────────────────────────────────
+        SeedPhrase("[yield]", "YIELD", "FIRST_RESPONSE", allBranches, allPhases,
+            moveType = "YIELD", postureAffinityJson = yieldAffinity),
 
         // ── Greetings ─────────────────────────────────────────────────────
         SeedPhrase("Good morning.", "GREETING", "FIRST_RESPONSE", listOf("SOCIAL"), allPhases),
