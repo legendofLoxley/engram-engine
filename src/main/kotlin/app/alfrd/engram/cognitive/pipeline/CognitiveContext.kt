@@ -1,6 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
+import app.alfrd.engram.cognitive.providers.TranscriptionResult
 import app.alfrd.engram.model.ResponsePhrase
 import java.time.Instant
 
@@ -16,6 +18,12 @@ data class CognitiveContext(
     val userId: String,
     val timestamp: Instant = Instant.now(),
     val zoneId: java.time.ZoneId? = null,
+
+    // ── STT / Flux events (pre-comprehension posture signals) ─────────────────
+    /** STT transcription results for the current turn (used for speech_final detection). */
+    val transcriptionResults: List<TranscriptionResult> = emptyList(),
+    /** Deepgram Flux VAD event for the current turn; null when no Flux signal is available. */
+    val fluxEvent: FluxEvent? = null,
 
     // ── Attention ─────────────────────────────────────────────────────────────
     var attentionAction: AttentionAction = AttentionAction.PROCESS,

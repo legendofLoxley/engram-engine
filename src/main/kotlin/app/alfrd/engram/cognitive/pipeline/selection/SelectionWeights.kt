@@ -5,6 +5,9 @@ import app.alfrd.engram.model.BranchType
 /**
  * Configurable composite scoring weights per branch.
  * Each map entry: dimension name → weight. Weights should sum to 1.0.
+ *
+ * A null [BranchType] resolves to [FIRST_RESPONSE] — the spec's default formula weights
+ * used for posture-governed first-response selection (branch-agnostic path).
  */
 object SelectionWeights {
 
@@ -24,6 +27,13 @@ object SelectionWeights {
         )
     }
 
+    /**
+     * Default weights for the first-response (posture-governed) path, matching
+     * the spec's composite formula: freshness×0.20 + contextual×0.25 + comms×0.20 +
+     * phase×0.15 + effectiveness×0.20.
+     */
+    val FIRST_RESPONSE = WeightConfig(0.20, 0.25, 0.20, 0.15, 0.20)
+
     private val weights: Map<BranchType, WeightConfig> = mapOf(
         BranchType.SOCIAL to WeightConfig(0.25, 0.20, 0.20, 0.15, 0.20),
         BranchType.ONBOARDING to WeightConfig(0.15, 0.20, 0.15, 0.30, 0.20),
@@ -34,6 +44,8 @@ object SelectionWeights {
         BranchType.CLARIFICATION to WeightConfig(0.15, 0.20, 0.15, 0.30, 0.20),
     )
 
-    fun forBranch(branch: BranchType): WeightConfig =
-        weights[branch] ?: weights[BranchType.SOCIAL]!!
+    /** Returns weights for [branch], or [FIRST_RESPONSE] when [branch] is null. */
+    fun forBranch(branch: BranchType?): WeightConfig =
+        if (branch == null) FIRST_RESPONSE else weights[branch] ?: weights[BranchType.SOCIAL]!!
 }
+

@@ -1,5 +1,9 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
+import app.alfrd.engram.cognitive.pipeline.posture.FluxSpeechState
+import app.alfrd.engram.cognitive.providers.TranscriptionResult
+import app.alfrd.engram.model.PostureMoveType
 import app.alfrd.engram.model.ExpressionPhase
 import app.alfrd.engram.model.PhaseEvent
 import kotlinx.coroutines.*
@@ -55,6 +59,78 @@ class PhaseEventStreamer(
     companion object {
         private const val APOLOGY_TEXT =
             "I'm sorry, I wasn't able to work through that in time. Could you try again?"
+        private const val INPUT_SPEECH_STARTED = "input.speech.started"
+        private const val INPUT_SPEECH_STOPPED = "input.speech.stopped"
+    }
+
+    /**
+     * First-response path for streaming turn-finalization events.
+     *
+     * Flow:
+     *   AssemblyAI turn event -> posture -> move type -> first-response selection -> VRP tags -> SSE.
+     *
+     * Barge-in fast path:
+     *   input.speech.started + audioPlaying=true -> immediate YIELD/stop event.
+     */
+    fun streamFirstResponse(
+        utterance: String,
+        sessionId: String,
+        userId: String,
+        inputEvent: String = INPUT_SPEECH_STOPPED,
+        audioPlaying: Boolean = false,
+        transcriptionResults: List<TranscriptionResult> = emptyList(),
+        fluxEvent: FluxEvent? = null,
+        priorMoveType: PostureMoveType? = null,
+        turnId: String = UUID.randomUUID().toString(),
+        traceId: String = UUID.randomUUID().toString(),
+    ): Flow<PhaseEvent> = flow {
+        // Barge-in short-circuit: no posture computation, no selection, just stop audio.
+        if (inputEvent == INPUT_SPEECH_STARTED && audioPlaying) {
+            emit(
+                firstResponseEvent(
+                    text = "",
+                    moveType = PostureMoveType.YIELD,
+                    renderStrategy = "stop",
+                    phraseHash = null,
+                    turnId = turnId,
+                    traceId = traceId,
+                ),
+            )
+            return@flow
+        }
+
+        val effectiveFlux = fluxEvent ?: when (inputEvent) {
+            INPUT_SPEECH_STARTED -> FluxEvent(FluxSpeechState.StartOfTurn, 1.0)
+            INPUT_SPEECH_STOPPED -> FluxEvent(FluxSpeechState.EndOfTurn, 1.0)
+            else -> FluxEvent(FluxSpeechState.Unknown, 0.0)
+        }
+
+        val firstResponse = pipeline.processFirstResponseForStream(
+            utterance = utterance,
+            sessionId = sessionId,
+            userId = userId,
+            transcriptionResults = transcriptionResults,
+            fluxEvent = effectiveFlux,
+            priorMoveType = priorMoveType,
+        )
+
+        val (renderStrategy, phraseHash) = VoiceRenderPolicy.firstResponseRender(
+            moveType = firstResponse.moveType,
+            text = firstResponse.text,
+            cachedIndex = cachedAudioIndex,
+            voiceModelId = voiceModelId,
+        )
+
+        emit(
+            firstResponseEvent(
+                text = firstResponse.text,
+                moveType = firstResponse.moveType,
+                renderStrategy = renderStrategy,
+                phraseHash = phraseHash,
+                turnId = turnId,
+                traceId = traceId,
+            ),
+        )
     }
 
     /**
@@ -212,6 +288,25 @@ class PhaseEventStreamer(
             phraseHash     = phraseHash,
         )
     }
+
+    private fun firstResponseEvent(
+        text: String,
+        moveType: PostureMoveType,
+        renderStrategy: String,
+        phraseHash: String?,
+        turnId: String,
+        traceId: String,
+    ): PhaseEvent = PhaseEvent(
+        phase = "first-response",
+        text = text,
+        turnId = turnId,
+        traceId = traceId,
+        timestamp = System.currentTimeMillis(),
+        renderStrategy = renderStrategy,
+        phraseHash = phraseHash,
+        moveType = moveType.name,
+        source = "pool",
+    )
 
     /**
      * Compute the [VoiceRenderPolicy] renderStrategy and optional phraseHash for a single

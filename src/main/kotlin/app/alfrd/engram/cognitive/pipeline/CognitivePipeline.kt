@@ -1,5 +1,9 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
+import app.alfrd.engram.cognitive.pipeline.posture.PostureSignals
+import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
+import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
@@ -9,11 +13,13 @@ import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
+import app.alfrd.engram.cognitive.providers.TranscriptionResult
 import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
 import app.alfrd.engram.model.BranchType
 import app.alfrd.engram.model.ExpressionPhase
+import app.alfrd.engram.model.PostureMoveType
 import app.alfrd.engram.model.ResponseCategory
 
 /**
@@ -79,6 +85,14 @@ open class CognitivePipeline(
     /** The synthesis text and its origin, for SSE streaming. */
     data class SynthesisResult(val text: String, val source: String)
 
+    /** Result of the first-response posture -> selection pipeline for SSE streaming. */
+    data class FirstResponseResult(
+        val moveType: PostureMoveType,
+        val text: String,
+        val postureSignals: PostureSignals,
+        val phraseId: String? = null,
+    )
+
     /** Result of an INIT signal — the selected greeting for a new session. */
     data class InitResponse(
         val greeting: String,
@@ -104,6 +118,81 @@ open class CognitivePipeline(
     open suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
         val (chatResult, _) = processInternal(utterance, sessionId, userId, debug = false)
         return SynthesisResult(chatResult.responseText, chatResult.synthesisSource)
+    }
+
+    /**
+     * Fast first-response path for turn-finalization streaming:
+     * AssemblyAI/Flux turn event -> posture signals -> move type -> scored first-response phrase.
+     *
+     * No LLM calls. Selection writes SELECTED edges asynchronously via [ResponseSelectionService].
+     */
+    open suspend fun processFirstResponseForStream(
+        utterance: String,
+        sessionId: String,
+        userId: String,
+        transcriptionResults: List<TranscriptionResult> = emptyList(),
+        fluxEvent: FluxEvent? = null,
+        priorMoveType: PostureMoveType? = null,
+        timestamp: java.time.Instant = java.time.Instant.now(),
+    ): FirstResponseResult {
+        val scaffoldState = try {
+            engramClient.getScaffoldState(userId)
+        } catch (_: Exception) {
+            null
+        }
+
+        val trustPhaseString = when (scaffoldState?.trustPhase) {
+            1 -> "ORIENTATION"
+            2 -> "WORKING_RHYTHM"
+            3 -> "CONTEXT"
+            4 -> "UNDERSTANDING"
+            else -> null
+        }
+
+        val ctx = CognitiveContext(
+            utterance = utterance,
+            sessionId = sessionId,
+            userId = userId,
+            timestamp = timestamp,
+            transcriptionResults = transcriptionResults,
+            fluxEvent = fluxEvent,
+            trustPhase = trustPhaseString,
+            sessionCount = scaffoldState?.sessionCount ?: 0,
+            lastInteractionAt = scaffoldState?.lastInteractionAt,
+        )
+
+        val postureSignals = computePostureSignals(ctx)
+        val moveType = selectMoveType(postureSignals, priorMoveType)
+
+        if (selectionService == null) {
+            return FirstResponseResult(
+                moveType = moveType,
+                text = fallbackFirstResponseText(moveType),
+                postureSignals = postureSignals,
+                phraseId = "fallback",
+            )
+        }
+
+        val query = ResponseSelectionQuery(
+            branch = null,
+            moveType = moveType,
+            expressionPhase = ExpressionPhase.FIRST_RESPONSE,
+            context = ctx,
+            limit = 1,
+        )
+
+        val selected = try {
+            selectionService.select(query).firstOrNull()
+        } catch (_: Exception) {
+            null
+        }
+
+        return FirstResponseResult(
+            moveType = moveType,
+            text = selected?.interpolated ?: fallbackFirstResponseText(moveType),
+            postureSignals = postureSignals,
+            phraseId = selected?.phrase?.uid,
+        )
     }
 
     /**
@@ -399,6 +488,19 @@ open class CognitivePipeline(
     private fun tier2ModelName(): String? {
         val model = selectTier2Model(llmClient) ?: return null
         return model.name.lowercase().replace('_', '-')
+    }
+
+    private fun fallbackFirstResponseText(moveType: PostureMoveType): String = when (moveType) {
+        PostureMoveType.RECEIPT -> "Got it."
+        PostureMoveType.ORIENT -> "Okay, let's orient."
+        PostureMoveType.HOLD -> "I hear you."
+        PostureMoveType.REPAIR -> "Let me repair that."
+        PostureMoveType.PROBE -> "Can you say a bit more?"
+        PostureMoveType.COMMIT -> "On it."
+        PostureMoveType.WAIT -> ""
+        PostureMoveType.MISREAD_RECOVERY -> "You're right, I misread that."
+        PostureMoveType.YIELD -> ""
+        PostureMoveType.MULTI_UTTERANCE_HOLD -> "I'm with you."
     }
 
     private fun routeNameFor(intent: IntentType): String = when (intent) {

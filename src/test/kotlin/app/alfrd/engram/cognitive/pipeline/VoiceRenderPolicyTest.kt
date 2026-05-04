@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.model.ExpressionPhase
+import app.alfrd.engram.model.PostureMoveType
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
@@ -235,6 +236,50 @@ class VoiceRenderPolicyTest {
         )
         assertEquals("skip", result.renderStrategy)
         assertNull(result.phraseHash, "phraseHash must be null when strategy is skip")
+    }
+
+    // ── firstResponseRender rules ───────────────────────────────────────────
+
+    @Test
+    fun `firstResponseRender maps WAIT to skip`() {
+        val (strategy, hash) = VoiceRenderPolicy.firstResponseRender(
+            moveType = PostureMoveType.WAIT,
+            text = "",
+            cachedIndex = emptySet(),
+            voiceModelId = voiceModelId,
+        )
+
+        assertEquals("skip", strategy)
+        assertNull(hash)
+    }
+
+    @Test
+    fun `firstResponseRender maps YIELD to stop`() {
+        val (strategy, hash) = VoiceRenderPolicy.firstResponseRender(
+            moveType = PostureMoveType.YIELD,
+            text = "",
+            cachedIndex = emptySet(),
+            voiceModelId = voiceModelId,
+        )
+
+        assertEquals("stop", strategy)
+        assertNull(hash)
+    }
+
+    @Test
+    fun `firstResponseRender maps RECEIPT cache hit to cached with phraseHash`() {
+        val text = "Understood."
+        val hash = VoiceRenderPolicy.phraseHash(text, voiceModelId)
+
+        val (strategy, resultHash) = VoiceRenderPolicy.firstResponseRender(
+            moveType = PostureMoveType.RECEIPT,
+            text = text,
+            cachedIndex = setOf(hash),
+            voiceModelId = voiceModelId,
+        )
+
+        assertEquals("cached", strategy)
+        assertEquals(hash, resultHash)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

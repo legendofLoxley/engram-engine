@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.model.ExpressionPhase
+import app.alfrd.engram.model.PostureMoveType
 import java.security.MessageDigest
 
 /**
@@ -28,6 +29,20 @@ object VoiceRenderPolicy {
     /** Time after acknowledge before bridge is considered eligible to fire. */
     const val BRIDGE_THRESHOLD_MS = 1_500L
 
+    private val ALWAYS_CACHED_MOVES = setOf(
+        PostureMoveType.RECEIPT,
+        PostureMoveType.REPAIR,
+        PostureMoveType.COMMIT,
+        PostureMoveType.MISREAD_RECOVERY,
+        PostureMoveType.MULTI_UTTERANCE_HOLD,
+    )
+
+    private val CACHED_WITH_FALLBACK_MOVES = setOf(
+        PostureMoveType.ORIENT,
+        PostureMoveType.PROBE,
+        PostureMoveType.HOLD,
+    )
+
     /**
      * Compute a stable hash for a phrase + voice model pair.
      *
@@ -42,6 +57,32 @@ object VoiceRenderPolicy {
         val bytes = MessageDigest.getInstance("SHA-256")
             .digest("$text|$voiceModelId".toByteArray(Charsets.UTF_8))
         return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * First-response render strategy by move type.
+     *
+     * Rules:
+     * - WAIT  -> skip (no audio)
+     * - YIELD -> stop (halt current audio immediately)
+     * - RECEIPT/REPAIR/COMMIT/MISREAD_RECOVERY/MULTI_UTTERANCE_HOLD -> cached-preferred
+     * - ORIENT/PROBE/HOLD -> cached with live fallback
+     */
+    fun firstResponseRender(
+        moveType: PostureMoveType,
+        text: String,
+        cachedIndex: Set<String>,
+        voiceModelId: String,
+    ): Pair<String, String?> {
+        if (moveType == PostureMoveType.WAIT) return "skip" to null
+        if (moveType == PostureMoveType.YIELD) return "stop" to null
+
+        if (moveType in ALWAYS_CACHED_MOVES || moveType in CACHED_WITH_FALLBACK_MOVES) {
+            val hash = phraseHash(text, voiceModelId)
+            return if (hash in cachedIndex) "cached" to hash else "live" to null
+        }
+
+        return "live" to null
     }
 
     /**

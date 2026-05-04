@@ -90,23 +90,50 @@ class ResponseSelectionService(
 
     // ── Stage 1: Filter ─────────────────────────────────────────────────────
 
+    /**
+     * Two filter paths share the same SQL plumbing:
+     *
+     * **First-response** (query.moveType != null, branch-agnostic):
+     *   SQL gates on `moveType` and `expressionPhase`. No branchAffinity or phaseAffinity gate.
+     *
+     * **Post-comprehension** (query.branch != null):
+     *   SQL gates on `expressionPhase` (and optional `category`), then post-filters on:
+     *   1. branchAffinity contains query.branch.name
+     *   2. phaseAffinity gate — exclude phrases whose phaseAffinity is entirely outside the
+     *      current trust phase and its direct neighbours (would score 0.0 on phaseAppropriateness).
+     */
     private fun filterCandidates(query: ResponseSelectionQuery): List<ResponsePhrase> {
+        val ctx = query.context!!
         val results = mutableListOf<ResponsePhrase>()
 
-        val sql = buildString {
-            append("SELECT FROM ResponsePhrase WHERE 1=1")
-            if (query.category != null) {
-                append(" AND category = :category")
+        // Derive adjacent trust phases for the phaseAffinity gate (post-comprehension only).
+        val trustPhaseAllowed: Set<String>? = if (query.moveType == null && ctx.trustPhase != null) {
+            val current: String = ctx.trustPhase!!  // non-null guaranteed by outer if
+            val phases = listOf("ORIENTATION", "WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")
+            val idx = phases.indexOf(current)
+            if (idx >= 0) buildSet {
+                add(current)
+                if (idx > 0) add(phases[idx - 1])
+                if (idx < phases.lastIndex) add(phases[idx + 1])
+            } else setOf(current)
+        } else null
+
+        val sql = if (query.moveType != null) {
+            // First-response path: filter directly by moveType
+            "SELECT FROM ResponsePhrase WHERE moveType = :moveType AND expressionPhase = :expressionPhase"
+        } else {
+            buildString {
+                append("SELECT FROM ResponsePhrase WHERE 1=1")
+                if (query.category != null) append(" AND category = :category")
+                append(" AND expressionPhase = :expressionPhase")
             }
-            append(" AND expressionPhase = :expressionPhase")
         }
 
         val params = mutableMapOf<String, Any>(
             "expressionPhase" to query.expressionPhase.name,
         )
-        if (query.category != null) {
-            params["category"] = query.category.name
-        }
+        if (query.moveType != null) params["moveType"] = query.moveType.name
+        if (query.category != null) params["category"] = query.category.name
 
         db.query("sql", sql, params).use { rs ->
             while (rs.hasNext()) {
@@ -121,12 +148,25 @@ class ResponseSelectionService(
                     json.decodeFromString<List<String>>(branchAffinityJson).toSet()
                 } catch (_: Exception) { emptySet() }
 
-                if (query.branch.name !in branchAffinity) continue
+                // Post-comprehension branchAffinity gate
+                if (query.moveType == null) {
+                    val branch = query.branch ?: continue   // branch required for post-comprehension
+                    if (branch.name !in branchAffinity) continue
+                }
 
                 val phaseAffinityJson = doc["phaseAffinity"] as? String ?: "[]"
                 val phaseAffinity: Set<String> = try {
                     json.decodeFromString<List<String>>(phaseAffinityJson).toSet()
                 } catch (_: Exception) { emptySet() }
+
+                // Post-comprehension phaseAffinity gate: exclude phrases entirely outside
+                // the current trust phase and its neighbours (phaseAppropriateness = 0.0).
+                if (trustPhaseAllowed != null && phaseAffinity.isNotEmpty() &&
+                    phaseAffinity.none { it in trustPhaseAllowed }
+                ) continue
+
+                val moveTypeStr = doc["moveType"] as? String
+                val postureAffinityStr = doc["postureAffinity"] as? String
 
                 val interpolationKeysJson = doc["interpolationKeys"] as? String
                 val interpolationKeys: Set<String>? = interpolationKeysJson?.let {
@@ -151,6 +191,8 @@ class ResponseSelectionService(
                     phaseAffinity = phaseAffinity,
                     expressionPhase = doc["expressionPhase"] as? String ?: "",
                     category = doc["category"] as? String ?: "",
+                    moveType = moveTypeStr,
+                    postureAffinity = postureAffinityStr,
                     variants = variants,
                     requiresInterpolation = doc["requiresInterpolation"] as? Boolean ?: false,
                     interpolationKeys = interpolationKeys,
@@ -178,7 +220,8 @@ class ResponseSelectionService(
                         sessionId = doc["sessionId"] as? String ?: "",
                         userId = doc["userId"] as? String ?: "",
                         turnIndex = (doc["turnIndex"] as? Number)?.toInt() ?: 0,
-                        branch = doc["branch"] as? String ?: "",
+                        branch = doc["branch"] as? String,
+                        moveType = doc["moveType"] as? String,
                         compositeScore = (doc["compositeScore"] as? Number)?.toDouble() ?: 0.0,
                         scoreBreakdown = try {
                             val jsonStr = doc["scoreBreakdown"] as? String ?: "{}"
@@ -250,10 +293,18 @@ class ResponseSelectionService(
     // ── Stage 5: Record ─────────────────────────────────────────────────────
 
     private fun recordSelected(result: ResponseSelectionResult, ctx: CognitiveContext, turnIndex: Int) {
+        // Determine path: first-response phrases have a non-null moveType stored on the phrase.
+        // - First-response: moveType = phrase.moveType, branch = null
+        // - Post-comprehension: branch = branchResult.responseStrategy or derived label, moveType = null
+        val isFirstResponse = result.phrase.moveType != null
+        val edgeMoveType = if (isFirstResponse) result.phrase.moveType else null
+        val edgeBranch = if (!isFirstResponse)
+            ctx.branchResult?.responseStrategy?.name ?: "SOCIAL"
+        else null
+
         fireAndForgetScope.launch {
             try {
                 db.transaction {
-                    // Find the ResponsePhrase vertex and a User vertex (or any vertex) to connect
                     val phraseVertex = db.query(
                         "sql",
                         "SELECT FROM ResponsePhrase WHERE uid = :uid",
@@ -261,7 +312,6 @@ class ResponseSelectionService(
                     ).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
                         ?: return@transaction
 
-                    // Find or create User vertex
                     val userVertex = db.query(
                         "sql",
                         "SELECT FROM User WHERE uid = :uid",
@@ -282,7 +332,8 @@ class ResponseSelectionService(
                         set("sessionId", ctx.sessionId)
                         set("userId", ctx.userId)
                         set("turnIndex", turnIndex)
-                        set("branch", ctx.branchResult?.responseStrategy?.name ?: "SOCIAL")
+                        set("branch", edgeBranch as String?)
+                        set("moveType", edgeMoveType as String?)
                         set("compositeScore", result.compositeScore)
                         set("scoreBreakdown", json.encodeToString(result.scoreBreakdown))
                         set("timestamp", System.currentTimeMillis())
@@ -290,7 +341,6 @@ class ResponseSelectionService(
                     }
                 }
             } catch (e: Exception) {
-                // Fire-and-forget: log but don't propagate
                 System.err.println("Failed to record SELECTED edge: ${e.message}")
             }
         }

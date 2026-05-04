@@ -2,12 +2,16 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
+import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
+import app.alfrd.engram.cognitive.pipeline.posture.FluxSpeechState
 import app.alfrd.engram.model.PhaseEvent
+import app.alfrd.engram.model.PostureMoveType
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import kotlin.system.measureTimeMillis
 
 class PhaseEventStreamerTest {
 
@@ -434,6 +438,166 @@ class PhaseEventStreamerTest {
         assertNotNull(synthesis, "SIMPLE path must emit a synthesis event")
         assertEquals("live", synthesis!!.renderStrategy)
         assertNull(synthesis.phraseHash)
+    }
+
+    // ── First-response path ───────────────────────────────────────────────
+
+    @Test
+    fun `first-response barge-in emits stop yield immediately without pipeline call`() = runTest {
+        var called = false
+        val pipeline = object : CognitivePipeline() {
+            override suspend fun processFirstResponseForStream(
+                utterance: String,
+                sessionId: String,
+                userId: String,
+                transcriptionResults: List<app.alfrd.engram.cognitive.providers.TranscriptionResult>,
+                fluxEvent: FluxEvent?,
+                priorMoveType: PostureMoveType?,
+                timestamp: java.time.Instant,
+            ): FirstResponseResult {
+                called = true
+                return FirstResponseResult(PostureMoveType.RECEIPT, "Got it.",
+                    app.alfrd.engram.cognitive.pipeline.posture.PostureSignals(
+                        app.alfrd.engram.cognitive.pipeline.posture.TurnShape.FYI,
+                        0.1,
+                        0.8,
+                    ))
+            }
+        }
+        val streamer = buildStreamer(pipeline = pipeline)
+
+        val events = streamer.streamFirstResponse(
+            utterance = "",
+            sessionId = "s1",
+            userId = "u1",
+            inputEvent = "input.speech.started",
+            audioPlaying = true,
+        ).toList()
+
+        assertFalse(called, "Pipeline must not be called on barge-in stop path")
+        assertEquals(1, events.size)
+        assertEquals("first-response", events[0].phase)
+        assertEquals("YIELD", events[0].moveType)
+        assertEquals("stop", events[0].renderStrategy)
+    }
+
+    @Test
+    fun `first-response stopped event emits cached receipt when phrase is pre-cached`() = runTest {
+        val text = "Right."
+        val hash = VoiceRenderPolicy.phraseHash(text, "alfrd-v1")
+
+        val pipeline = object : CognitivePipeline() {
+            override suspend fun processFirstResponseForStream(
+                utterance: String,
+                sessionId: String,
+                userId: String,
+                transcriptionResults: List<app.alfrd.engram.cognitive.providers.TranscriptionResult>,
+                fluxEvent: FluxEvent?,
+                priorMoveType: PostureMoveType?,
+                timestamp: java.time.Instant,
+            ) = FirstResponseResult(
+                moveType = PostureMoveType.RECEIPT,
+                text = text,
+                postureSignals = app.alfrd.engram.cognitive.pipeline.posture.PostureSignals(
+                    app.alfrd.engram.cognitive.pipeline.posture.TurnShape.FYI,
+                    0.1,
+                    0.8,
+                ),
+            )
+        }
+
+        val streamer = buildStreamer(pipeline = pipeline, cachedAudioIndex = setOf(hash))
+        val events = streamer.streamFirstResponse(
+            utterance = "Okay",
+            sessionId = "s1",
+            userId = "u1",
+            inputEvent = "input.speech.stopped",
+            fluxEvent = FluxEvent(FluxSpeechState.EndOfTurn, 0.9),
+        ).toList()
+
+        assertEquals(1, events.size)
+        assertEquals("first-response", events[0].phase)
+        assertEquals("RECEIPT", events[0].moveType)
+        assertEquals("cached", events[0].renderStrategy)
+        assertEquals(hash, events[0].phraseHash)
+    }
+
+    @Test
+    fun `first-response WAIT move emits skip render strategy`() = runTest {
+        val pipeline = object : CognitivePipeline() {
+            override suspend fun processFirstResponseForStream(
+                utterance: String,
+                sessionId: String,
+                userId: String,
+                transcriptionResults: List<app.alfrd.engram.cognitive.providers.TranscriptionResult>,
+                fluxEvent: FluxEvent?,
+                priorMoveType: PostureMoveType?,
+                timestamp: java.time.Instant,
+            ) = FirstResponseResult(
+                moveType = PostureMoveType.WAIT,
+                text = "",
+                postureSignals = app.alfrd.engram.cognitive.pipeline.posture.PostureSignals(
+                    app.alfrd.engram.cognitive.pipeline.posture.TurnShape.Fragmented,
+                    0.0,
+                    0.2,
+                ),
+            )
+        }
+
+        val streamer = buildStreamer(pipeline = pipeline)
+        val events = streamer.streamFirstResponse(
+            utterance = "um",
+            sessionId = "s1",
+            userId = "u1",
+            inputEvent = "input.speech.stopped",
+        ).toList()
+
+        assertEquals(1, events.size)
+        assertEquals("WAIT", events[0].moveType)
+        assertEquals("skip", events[0].renderStrategy)
+        assertNull(events[0].phraseHash)
+    }
+
+    @Test
+    fun `first-response cached path emits in under 200ms`() = runTest {
+        val text = "Right."
+        val hash = VoiceRenderPolicy.phraseHash(text, "alfrd-v1")
+
+        val pipeline = object : CognitivePipeline() {
+            override suspend fun processFirstResponseForStream(
+                utterance: String,
+                sessionId: String,
+                userId: String,
+                transcriptionResults: List<app.alfrd.engram.cognitive.providers.TranscriptionResult>,
+                fluxEvent: FluxEvent?,
+                priorMoveType: PostureMoveType?,
+                timestamp: java.time.Instant,
+            ) = FirstResponseResult(
+                moveType = PostureMoveType.RECEIPT,
+                text = text,
+                postureSignals = app.alfrd.engram.cognitive.pipeline.posture.PostureSignals(
+                    app.alfrd.engram.cognitive.pipeline.posture.TurnShape.FYI,
+                    0.1,
+                    0.9,
+                ),
+            )
+        }
+
+        val streamer = buildStreamer(pipeline = pipeline, cachedAudioIndex = setOf(hash))
+
+        var events: List<PhaseEvent> = emptyList()
+        val elapsedMs = measureTimeMillis {
+            events = streamer.streamFirstResponse(
+                utterance = "Can you check this?",
+                sessionId = "s1",
+                userId = "u1",
+                inputEvent = "input.speech.stopped",
+            ).toList()
+        }
+
+        assertEquals(1, events.size)
+        assertEquals("cached", events[0].renderStrategy)
+        assertTrue(elapsedMs < 200, "Expected first-response event in <200ms, got ${elapsedMs}ms")
     }
 }
 
