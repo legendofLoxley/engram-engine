@@ -32,8 +32,10 @@ data class Source(
 data class User(
     val uid: String,
     val username: String,
+    val email: String = "",
     val tier: Int,
-    val createdAt: Long
+    val createdAt: Long,
+    val updatedAt: Long = 0L,
 )
 
 @Serializable

@@ -42,8 +42,10 @@ object SchemaBootstrap {
             ensureVertex(schema, "User") { vt ->
                 vt.createProperty("uid", Type.STRING)
                 vt.createProperty("username", Type.STRING)
+                vt.createProperty("email", Type.STRING)
                 vt.createProperty("tier", Type.INTEGER)
                 vt.createProperty("createdAt", Type.LONG)
+                vt.createProperty("updatedAt", Type.LONG)
             }
 
             ensureVertex(schema, "ScoreType") { vt ->
@@ -104,6 +106,7 @@ object SchemaBootstrap {
             ensureEdge(schema, "ASSERTS") { et ->
                 et.createProperty("context", Type.STRING)
                 et.createProperty("timestamp", Type.LONG)
+                et.createProperty("scores", Type.STRING)        // JSON array
             }
 
             ensureEdge(schema, "RELATED_TO") { et ->
@@ -118,6 +121,10 @@ object SchemaBootstrap {
             ensureEdge(schema, "INVITED") { et ->
                 et.createProperty("timestamp", Type.LONG)
                 et.createProperty("resultingTier", Type.INTEGER)
+                et.createProperty("relationshipContext", Type.STRING)
+                et.createProperty("trustPhase", Type.STRING)
+                et.createProperty("engagementIntent", Type.STRING)
+                et.createProperty("tier", Type.INTEGER)
             }
 
             ensureEdge(schema, "QUOTES") { et ->
@@ -147,6 +154,15 @@ object SchemaBootstrap {
                 et.createProperty("timestamp", Type.LONG)
             }
 
+            // ── Additive migrations — safe to run on pre-existing types ──
+            ensureProperty(schema, "User",    "email",               Type.STRING)
+            ensureProperty(schema, "User",    "updatedAt",           Type.LONG)
+            ensureProperty(schema, "ASSERTS", "scores",              Type.STRING)
+            ensureProperty(schema, "INVITED", "relationshipContext", Type.STRING)
+            ensureProperty(schema, "INVITED", "trustPhase",          Type.STRING)
+            ensureProperty(schema, "INVITED", "engagementIntent",    Type.STRING)
+            ensureProperty(schema, "INVITED", "tier",                Type.INTEGER)
+
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
@@ -155,6 +171,7 @@ object SchemaBootstrap {
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Source",      "uid")
             ensureIndex(schema, "User",        "uid")
+            ensureIndex(schema, "User",        "email")
             ensureIndex(schema, "ScoreType",   "uid")
             ensureIndex(schema, "Scope",       "uid")
             ensureIndex(schema, "ResponsePhrase", "uid")
@@ -176,6 +193,19 @@ object SchemaBootstrap {
     ) {
         if (!schema.existsType(name)) {
             configure(schema.createVertexType(name))
+        }
+    }
+
+    /**
+     * Adds a property to an existing type if it is not already present.
+     * Safe to call on types created before the property was added to the schema definition.
+     */
+    private fun ensureProperty(schema: Schema, typeName: String, propName: String, propType: Type) {
+        if (schema.existsType(typeName)) {
+            val t = schema.getType(typeName)
+            if (t.getProperty(propName) == null) {
+                t.createProperty(propName, propType)
+            }
         }
     }
 

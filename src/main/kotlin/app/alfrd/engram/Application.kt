@@ -1,6 +1,7 @@
 package app.alfrd.engram
 
 import app.alfrd.engram.api.configureCognitiveRoutes
+import app.alfrd.engram.api.configureOnboardingRoutes
 import app.alfrd.engram.api.configurePhrasesRoutes
 import app.alfrd.engram.api.configureRoutes
 import app.alfrd.engram.api.configureScaffoldRoutes
@@ -50,6 +51,7 @@ fun main() {
         configureSelectionRoutes(ResponseSelectionService(db))
         configureScaffoldRoutes(db)
         configurePhrasesRoutes(db)
+        configureOnboardingRoutes(db)
     }.start(wait = true)
 
     Runtime.getRuntime().addShutdownHook(Thread {
