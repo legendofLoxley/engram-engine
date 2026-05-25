@@ -7,6 +7,7 @@ import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
+import app.alfrd.engram.cognitive.pipeline.selection.OutcomeSignalClassifier
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.LlmClient
@@ -14,6 +15,7 @@ import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
 import app.alfrd.engram.model.BranchType
 import app.alfrd.engram.model.ExpressionPhase
+import app.alfrd.engram.model.OutcomeSignal
 import app.alfrd.engram.model.ResponseCategory
 
 /**
@@ -51,6 +53,14 @@ open class CognitivePipeline(
     private val expression    = Expression()
 
     private val stages: List<CognitiveStage> = listOf(attention, comprehension, expression)
+
+    /**
+     * Outcome state from the most recently completed turn.
+     * Set after phrase selection; consumed and cleared at the start of the next turn.
+     * Volatile so [SessionManager] can read it from the eviction thread safely.
+     */
+    @Volatile var pendingOutcome: PendingOutcome? = null
+        internal set
 
     companion object {
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
@@ -282,6 +292,22 @@ open class CognitivePipeline(
         var reasonNs = 0L
         var expressionNs = 0L
 
+        // Classify + write the OUTCOME for the previous turn before processing the new one.
+        // The new utterance is the user's reaction to the phrase selected last turn.
+        val priorPending = pendingOutcome
+        if (priorPending != null) {
+            pendingOutcome = null
+            val classification = OutcomeSignalClassifier.classify(utterance, priorPending.priorContext)
+            selectionService?.recordOutcome(
+                phraseUid       = priorPending.phraseUid,
+                sessionId       = priorPending.sessionId,
+                userId          = priorPending.userId,
+                turnIndex       = priorPending.turnIndex,
+                signal          = classification.signal,
+                contextSnapshot = buildContextSnapshot(utterance, classification.confidence, null),
+            )
+        }
+
         // Load scaffold state before Comprehension so Rule 0 fires correctly on subsequent turns.
         // An active scaffold question means the user is mid-onboarding and any utterance is an answer.
         val memoryStartNs = if (debug) System.nanoTime() else 0L
@@ -340,6 +366,20 @@ open class CognitivePipeline(
         // ── Reason (Branch execution) ────────────────────────────────────────
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
+        // Record pending outcome for the *next* turn's classification.
+        // Only set when a phrase was actually selected — pure-reason branches leave this null.
+        ctx.selectionResult?.let { result ->
+            pendingOutcome = PendingOutcome(
+                phraseUid    = result.phrase.uid,
+                sessionId    = sessionId,
+                userId       = userId,
+                turnIndex    = ctx.priorUtterances.size + 1,
+                priorContext = OutcomeSignalClassifier.PriorTurnContext(
+                    utterance  = utterance,
+                    phraseText = result.phrase.text,
+                ),
+            )
+        }
         if (debug) {
             reasonNs = System.nanoTime() - reasonStartNs
             trace!!.latencyBreakdown.reasonMs =
@@ -417,4 +457,45 @@ open class CognitivePipeline(
         is OnboardingBranch  -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
         else                 -> null to null
     }
+
+    /**
+     * Called by [app.alfrd.engram.cognitive.SessionManager] when a session expires.
+     * If a phrase selection is pending outcome classification, writes a DISENGAGED edge
+     * and clears the pending state. Fire-and-forget — never throws.
+     */
+    fun recordDisengagedOutcome() {
+        val pending = pendingOutcome ?: return
+        pendingOutcome = null
+        selectionService?.recordOutcome(
+            phraseUid       = pending.phraseUid,
+            sessionId       = pending.sessionId,
+            userId          = pending.userId,
+            turnIndex       = pending.turnIndex,
+            signal          = OutcomeSignal.DISENGAGED,
+            contextSnapshot = buildContextSnapshot(pending.priorContext.utterance, 0.0, "session_timeout"),
+        )
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────────
+
+    private fun buildContextSnapshot(utterance: String, confidence: Double, reason: String?): String {
+        val escaped = utterance.replace("\\", "\\\\").replace("\"", "\\\"")
+        return if (reason != null) {
+            """{"utterance":"$escaped","reason":"$reason"}"""
+        } else {
+            """{"utterance":"$escaped","confidence":$confidence}"""
+        }
+    }
+
+    /**
+     * Holds the outcome context from the last phrase-selected turn so the *next*
+     * utterance can classify the signal and write the OUTCOME edge.
+     */
+    data class PendingOutcome(
+        val phraseUid: String,
+        val sessionId: String,
+        val userId: String,
+        val turnIndex: Int,
+        val priorContext: OutcomeSignalClassifier.PriorTurnContext,
+    )
 }

@@ -249,6 +249,63 @@ class ResponseSelectionService(
 
     // ── Stage 5: Record ─────────────────────────────────────────────────────
 
+    /**
+     * Writes an OUTCOME edge linking User → ResponsePhrase. Fire-and-forget — exceptions
+     * are swallowed so write failures never surface to the user or caller.
+     *
+     * Mirrors [recordSelected] exactly: same vertex resolution, same scope, same error handling.
+     */
+    internal fun recordOutcome(
+        phraseUid: String,
+        sessionId: String,
+        userId: String,
+        turnIndex: Int,
+        signal: OutcomeSignal,
+        contextSnapshot: String,
+    ) {
+        fireAndForgetScope.launch {
+            try {
+                db.transaction {
+                    val phraseVertex = db.query(
+                        "sql",
+                        "SELECT FROM ResponsePhrase WHERE uid = :uid",
+                        mapOf("uid" to phraseUid),
+                    ).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+                        ?: return@transaction
+
+                    val userVertex = db.query(
+                        "sql",
+                        "SELECT FROM User WHERE uid = :uid",
+                        mapOf("uid" to userId),
+                    ).use { rs ->
+                        if (rs.hasNext()) rs.next().toElement().asVertex()
+                        else null
+                    } ?: db.newVertex("User").apply {
+                        set("uid", userId)
+                        set("username", userId)
+                        set("tier", 0)
+                        set("createdAt", System.currentTimeMillis())
+                        save()
+                    }
+
+                    userVertex.newEdge("OUTCOME", phraseVertex, false).apply {
+                        set("phraseUid", phraseUid)
+                        set("sessionId", sessionId)
+                        set("userId", userId)
+                        set("turnIndex", turnIndex)
+                        set("signal", signal.name)
+                        set("contextSnapshot", contextSnapshot)
+                        set("timestamp", System.currentTimeMillis())
+                        save()
+                    }
+                }
+            } catch (e: Exception) {
+                // Fire-and-forget: log but don't propagate
+                System.err.println("Failed to record OUTCOME edge: ${e.message}")
+            }
+        }
+    }
+
     private fun recordSelected(result: ResponseSelectionResult, ctx: CognitiveContext, turnIndex: Int) {
         fireAndForgetScope.launch {
             try {

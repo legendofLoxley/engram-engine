@@ -42,7 +42,15 @@ class SessionManager(
     }
 
     private fun evictExpired() {
-        sessions.entries.removeIf { (_, entry) -> isExpired(entry) }
+        sessions.entries.removeIf { (_, entry) ->
+            if (isExpired(entry)) {
+                // If a phrase was selected last turn, write DISENGAGED before dropping the session.
+                entry.pipeline.recordDisengagedOutcome()
+                true
+            } else {
+                false
+            }
+        }
     }
 
     private fun isExpired(entry: Entry): Boolean =
