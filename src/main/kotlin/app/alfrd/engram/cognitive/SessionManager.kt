@@ -23,7 +23,18 @@ class SessionManager(
         val createdAt: Long = System.currentTimeMillis(),
     )
 
-    private val sessions = ConcurrentHashMap<String, Entry>()
+    private val sessions    = ConcurrentHashMap<String, Entry>()
+    private val seenUserIds = ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * Returns true if [userId] has not been seen by this [SessionManager] instance before —
+     * i.e. this is the first known session for that user. Marks the user as seen atomically.
+     *
+     * Used by [app.alfrd.engram.cognitive.pipeline.FirstSessionHandler] as the fast-path check
+     * before the authoritative graph query.
+     */
+    fun isFirstKnownSession(userId: String): Boolean =
+        seenUserIds.putIfAbsent(userId, true) == null
 
     suspend fun getOrCreate(sessionId: String): CognitivePipeline {
         evictExpired()

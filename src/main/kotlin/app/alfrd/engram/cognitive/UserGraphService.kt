@@ -1,0 +1,148 @@
+package app.alfrd.engram.cognitive
+
+import app.alfrd.engram.api.OnboardingService
+import com.arcadedb.database.Database
+import java.util.logging.Logger
+
+/**
+ * Read/write graph operations needed by the first-session identity verification flow.
+ *
+ * All methods run synchronously — callers must dispatch to [kotlinx.coroutines.Dispatchers.IO].
+ */
+open class UserGraphService(private val db: Database?) {
+
+    private val logger = Logger.getLogger(UserGraphService::class.java.name)
+
+    companion object {
+        val JACOB_EMAIL: String = OnboardingService.JACOB_EMAIL
+    }
+
+    data class UserRecord(val uid: String, val email: String, val username: String)
+
+    data class InvitedEdgeRecord(
+        val relationshipContext: String,
+        val trustPhase: String,
+        val engagementIntent: String,
+        val timestamp: Long,
+    )
+
+    /**
+     * Looks up a User vertex by [email]. Returns null if not found.
+     */
+    open fun findUserByEmail(email: String): UserRecord? {
+        return try {
+            db!!.query(
+                "sql",
+                "SELECT uid, email, username FROM User WHERE email = :email",
+                mapOf("email" to email),
+            ).use { rs ->
+                if (rs.hasNext()) {
+                    val el = rs.next().toElement()
+                    UserRecord(
+                        uid      = el.get("uid") as? String ?: return null,
+                        email    = el.get("email") as? String ?: email,
+                        username = el.get("username") as? String ?: "",
+                    )
+                } else null
+            }
+        } catch (e: Exception) {
+            logger.warning("findUserByEmail failed for email=$email: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Returns the most recent INVITED edge from Jacob → [userId].
+     * Per spec: if multiple exist, use the most recent by timestamp.
+     * Returns null if no such edge exists.
+     */
+    open fun findInvitedEdgeFromJacob(userId: String): InvitedEdgeRecord? {
+        return try {
+            db!!.query(
+                "sql",
+                """SELECT e.relationshipContext, e.trustPhase, e.engagementIntent, e.timestamp
+                   FROM INVITED e
+                   WHERE e.@out.email = :jacobEmail AND e.@in.uid = :userId
+                   ORDER BY e.timestamp DESC
+                   LIMIT 1""",
+                mapOf("jacobEmail" to JACOB_EMAIL, "userId" to userId),
+            ).use { rs ->
+                if (rs.hasNext()) {
+                    val el = rs.next().toElement()
+                    InvitedEdgeRecord(
+                        relationshipContext = el.get("relationshipContext") as? String ?: "",
+                        trustPhase          = el.get("trustPhase") as? String ?: "Acquaintance",
+                        engagementIntent    = el.get("engagementIntent") as? String ?: "",
+                        timestamp           = el.get("timestamp") as? Long ?: 0L,
+                    )
+                } else null
+            }
+        } catch (e: Exception) {
+            logger.warning("findInvitedEdgeFromJacob failed for userId=$userId: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Returns true if [userId] has any outbound SELECTED edges — i.e. prior phrase interactions.
+     */
+    open fun hasSelectedEdges(userId: String): Boolean {
+        return try {
+            db!!.query(
+                "sql",
+                "SELECT count(*) as cnt FROM SELECTED WHERE userId = :userId LIMIT 1",
+                mapOf("userId" to userId),
+            ).use { rs ->
+                if (rs.hasNext()) {
+                    val count = rs.next().toElement().get("cnt")
+                    when (count) {
+                        is Number -> count.toLong() > 0
+                        else      -> false
+                    }
+                } else false
+            }
+        } catch (e: Exception) {
+            logger.warning("hasSelectedEdges failed for userId=$userId: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Writes a VERIFIED edge from the invited [userId]'s User vertex to Jacob's User vertex.
+     * Records the [timestamp] of successful identity verification for audit.
+     */
+    open fun writeVerifiedEdge(userId: String, timestamp: Long) {
+        try {
+            db!!.transaction {
+                val jacobVertex = db!!.query(
+                    "sql",
+                    "SELECT FROM User WHERE email = :email",
+                    mapOf("email" to JACOB_EMAIL),
+                ).use { rs ->
+                    if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null
+                } ?: run {
+                    logger.warning("writeVerifiedEdge: Jacob's User vertex not found")
+                    return@transaction
+                }
+
+                val userVertex = db!!.query(
+                    "sql",
+                    "SELECT FROM User WHERE uid = :uid",
+                    mapOf("uid" to userId),
+                ).use { rs ->
+                    if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null
+                } ?: run {
+                    logger.warning("writeVerifiedEdge: User vertex not found for uid=$userId")
+                    return@transaction
+                }
+
+                userVertex.newEdge("VERIFIED", jacobVertex, false).apply {
+                    set("timestamp", timestamp)
+                    save()
+                }
+            }
+        } catch (e: Exception) {
+            logger.warning("writeVerifiedEdge failed for userId=$userId: ${e.message}")
+        }
+    }
+}

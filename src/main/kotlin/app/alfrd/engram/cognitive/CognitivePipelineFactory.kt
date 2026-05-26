@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive
 
 import app.alfrd.engram.cognitive.pipeline.CognitivePipeline
+import app.alfrd.engram.cognitive.pipeline.FirstSessionHandler
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
@@ -13,13 +14,14 @@ import com.arcadedb.database.Database
  * - [InMemoryEngramClient] for memory (ArcadeDB-backed client is a future task)
  * - [CloudLlmClient] wired to Anthropic and Google AI when API keys are present
  * - [ResponseSelectionService] when a database instance is provided
+ * - [FirstSessionHandler] when a database instance is provided (enables identity verification)
  *
  * If both API keys are absent the pipeline is created without an LLM client and
  * all branches degrade gracefully to their rule-based fallbacks.
  */
 object CognitivePipelineFactory {
 
-    fun create(db: Database? = null): CognitivePipeline {
+    fun create(db: Database? = null, sessionManager: SessionManager? = null): CognitivePipeline {
         val anthropicKey = System.getenv("ANTHROPIC_API_KEY") ?: ""
         val googleKey    = System.getenv("GOOGLE_AI_API_KEY") ?: ""
 
@@ -30,16 +32,25 @@ object CognitivePipelineFactory {
             )
         } else null
 
-        val selectionService = db?.let { ResponseSelectionService(it) }
-        val engramClient     = InMemoryEngramClient()
+        val selectionService  = db?.let { ResponseSelectionService(it) }
+        val engramClient      = InMemoryEngramClient()
         val transitionService = TrustPhaseTransitionService(engramClient)
 
+        val firstSessionHandler = if (db != null && sessionManager != null) {
+            FirstSessionHandler(
+                userGraphService = UserGraphService(db),
+                sessionManager   = sessionManager,
+                llmClient        = llmClient,
+            )
+        } else null
+
         return CognitivePipeline(
-            engramClient       = engramClient,
-            llmClient          = llmClient,
-            selectionService   = selectionService,
-            memoryWriteService = MemoryWriteService(engramClient, transitionService = transitionService),
-            transitionService  = transitionService,
+            engramClient        = engramClient,
+            llmClient           = llmClient,
+            selectionService    = selectionService,
+            memoryWriteService  = MemoryWriteService(engramClient, transitionService = transitionService),
+            transitionService   = transitionService,
+            firstSessionHandler = firstSessionHandler,
         )
     }
 }

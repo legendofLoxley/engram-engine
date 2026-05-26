@@ -154,6 +154,10 @@ object SchemaBootstrap {
                 et.createProperty("timestamp", Type.LONG)
             }
 
+            ensureEdge(schema, "VERIFIED") { et ->
+                et.createProperty("timestamp", Type.LONG)
+            }
+
             // ── Additive migrations — safe to run on pre-existing types ──
             ensureProperty(schema, "User",    "email",               Type.STRING)
             ensureProperty(schema, "User",    "updatedAt",           Type.LONG)

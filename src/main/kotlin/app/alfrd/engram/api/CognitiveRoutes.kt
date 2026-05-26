@@ -41,6 +41,8 @@ data class InitSessionRequest(
     val sessionId: String,
     val userId: String,
     val context: Map<String, String>? = null,
+    /** Authenticated user's email (from OAuth). Required for first-session identity verification. */
+    val userEmail: String = "",
 )
 
 @Serializable
@@ -119,7 +121,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 val req = call.receive<InitSessionRequest>()
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val result   = pipeline.initSession(req.sessionId, req.userId, req.context)
+                val result   = pipeline.initSession(req.sessionId, req.userId, req.context, userEmail = req.userEmail)
 
                 call.respond(
                     HttpStatusCode.OK,

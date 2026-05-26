@@ -41,6 +41,7 @@ open class CognitivePipeline(
     private val selectionService: ResponseSelectionService? = null,
     private val memoryWriteService: MemoryWriteService? = null,
     private val transitionService: TrustPhaseTransitionService? = null,
+    private val firstSessionHandler: FirstSessionHandler? = null,
 ) {
 
     // Wrap with voice identity so every LLM call includes the base voice-modality prompt.
@@ -60,6 +61,14 @@ open class CognitivePipeline(
      * Volatile so [SessionManager] can read it from the eviction thread safely.
      */
     @Volatile var pendingOutcome: PendingOutcome? = null
+        internal set
+
+    /**
+     * First-session identity verification state.
+     * Set during [initSession] when both detection checks pass; updated through Turn 2.
+     * Null when first-session handling is disabled or not triggered.
+     */
+    @Volatile var firstSessionState: FirstSessionState? = null
         internal set
 
     companion object {
@@ -152,6 +161,7 @@ open class CognitivePipeline(
         userId: String,
         context: Map<String, String>? = null,
         timestamp: java.time.Instant = java.time.Instant.now(),
+        userEmail: String = "",
     ): InitResponse {
         val zoneId = context?.get("timezone")?.let {
             try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
@@ -163,6 +173,36 @@ open class CognitivePipeline(
                 hour < 12 -> "Good morning."
                 hour < 17 -> "Good afternoon."
                 else -> "Good evening."
+            }
+        }
+
+        // ── First-session detection ──────────────────────────────────────────
+        if (firstSessionHandler != null && userEmail.isNotBlank()) {
+            val detection = firstSessionHandler.detectFirstSession(userId, userEmail)
+            if (detection.isFirstSession) {
+                val turn1 = firstSessionHandler.handleTurn1(detection)
+                if (turn1.rejected) {
+                    // No INVITED edge — closed-beta rejection; no state to track.
+                    return InitResponse(
+                        greeting  = turn1.response,
+                        phraseId  = "first-session-rejected",
+                        sessionId = sessionId,
+                    )
+                }
+                // Valid invitee — store state and return Turn 1 greeting.
+                val edge = turn1.invitedEdge!!
+                firstSessionState = FirstSessionState(
+                    isFirstSession               = true,
+                    awaitingIdentityVerification = true,
+                    trustPhase                   = edge.trustPhase,
+                    engagementIntent             = edge.engagementIntent,
+                    relationshipContext          = edge.relationshipContext,
+                )
+                return InitResponse(
+                    greeting  = turn1.response,
+                    phraseId  = "first-session-turn1",
+                    sessionId = sessionId,
+                )
             }
         }
 
@@ -283,6 +323,33 @@ open class CognitivePipeline(
     private suspend fun processInternal(
         utterance: String, sessionId: String, userId: String, debug: Boolean,
     ): Pair<ChatResult, PipelineTrace?> {
+
+        // ── First-session Turn 2 interception ────────────────────────────────
+        // When the user is mid-verification, bypass the normal cognitive pipeline
+        // and route directly to the identity verification handler.
+        val fss = firstSessionState
+        if (fss != null && fss.awaitingIdentityVerification && firstSessionHandler != null) {
+            val turn2 = firstSessionHandler.handleTurn2(userId, utterance, fss)
+            firstSessionState = turn2.newState
+            // On successful verification, seed the scaffold state with the trust phase from
+            // the INVITED edge so subsequent sessions start at the correct onboarding phase.
+            if (turn2.newState.identityVerified) {
+                val trustPhaseInt = when (turn2.newState.trustPhase?.trim()?.lowercase()) {
+                    "colleague"  -> 2
+                    "confidant"  -> 3
+                    else         -> 1  // Acquaintance / default → ORIENTATION
+                }
+                try {
+                    val current = engramClient.getScaffoldState(userId)
+                    engramClient.updateScaffoldState(
+                        userId,
+                        current.copy(trustPhase = trustPhaseInt),
+                    )
+                } catch (_: Exception) { /* non-fatal */ }
+            }
+            return Pair(ChatResult(turn2.response, IntentType.SOCIAL, 1, "first-session"), null)
+        }
+
         val trace = if (debug) PipelineTrace() else null
         // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
         // the breakdown always adds up correctly regardless of sub-millisecond rounding.
