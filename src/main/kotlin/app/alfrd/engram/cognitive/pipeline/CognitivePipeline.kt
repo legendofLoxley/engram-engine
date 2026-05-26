@@ -11,6 +11,7 @@ import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
+import app.alfrd.engram.cognitive.pipeline.selection.OutcomeSignalClassifier
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.TranscriptionResult
@@ -20,6 +21,7 @@ import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
 import app.alfrd.engram.model.BranchType
 import app.alfrd.engram.model.ExpressionPhase
 import app.alfrd.engram.model.PostureMoveType
+import app.alfrd.engram.model.OutcomeSignal
 import app.alfrd.engram.model.ResponseCategory
 
 /**
@@ -45,6 +47,7 @@ open class CognitivePipeline(
     private val selectionService: ResponseSelectionService? = null,
     private val memoryWriteService: MemoryWriteService? = null,
     private val transitionService: TrustPhaseTransitionService? = null,
+    private val firstSessionHandler: FirstSessionHandler? = null,
 ) {
 
     // Wrap with voice identity so every LLM call includes the base voice-modality prompt.
@@ -57,6 +60,22 @@ open class CognitivePipeline(
     private val expression    = Expression()
 
     private val stages: List<CognitiveStage> = listOf(attention, comprehension, expression)
+
+    /**
+     * Outcome state from the most recently completed turn.
+     * Set after phrase selection; consumed and cleared at the start of the next turn.
+     * Volatile so [SessionManager] can read it from the eviction thread safely.
+     */
+    @Volatile var pendingOutcome: PendingOutcome? = null
+        internal set
+
+    /**
+     * First-session identity verification state.
+     * Set during [initSession] when both detection checks pass; updated through Turn 2.
+     * Null when first-session handling is disabled or not triggered.
+     */
+    @Volatile var firstSessionState: FirstSessionState? = null
+        internal set
 
     companion object {
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
@@ -231,6 +250,7 @@ open class CognitivePipeline(
         userId: String,
         context: Map<String, String>? = null,
         timestamp: java.time.Instant = java.time.Instant.now(),
+        userEmail: String = "",
     ): InitResponse {
         val zoneId = context?.get("timezone")?.let {
             try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
@@ -242,6 +262,36 @@ open class CognitivePipeline(
                 hour < 12 -> "Good morning."
                 hour < 17 -> "Good afternoon."
                 else -> "Good evening."
+            }
+        }
+
+        // ── First-session detection ──────────────────────────────────────────
+        if (firstSessionHandler != null && userEmail.isNotBlank()) {
+            val detection = firstSessionHandler.detectFirstSession(userId, userEmail)
+            if (detection.isFirstSession) {
+                val turn1 = firstSessionHandler.handleTurn1(detection)
+                if (turn1.rejected) {
+                    // No INVITED edge — closed-beta rejection; no state to track.
+                    return InitResponse(
+                        greeting  = turn1.response,
+                        phraseId  = "first-session-rejected",
+                        sessionId = sessionId,
+                    )
+                }
+                // Valid invitee — store state and return Turn 1 greeting.
+                val edge = turn1.invitedEdge!!
+                firstSessionState = FirstSessionState(
+                    isFirstSession               = true,
+                    awaitingIdentityVerification = true,
+                    trustPhase                   = edge.trustPhase,
+                    engagementIntent             = edge.engagementIntent,
+                    relationshipContext          = edge.relationshipContext,
+                )
+                return InitResponse(
+                    greeting  = turn1.response,
+                    phraseId  = "first-session-turn1",
+                    sessionId = sessionId,
+                )
             }
         }
 
@@ -362,6 +412,33 @@ open class CognitivePipeline(
     private suspend fun processInternal(
         utterance: String, sessionId: String, userId: String, debug: Boolean,
     ): Pair<ChatResult, PipelineTrace?> {
+
+        // ── First-session Turn 2 interception ────────────────────────────────
+        // When the user is mid-verification, bypass the normal cognitive pipeline
+        // and route directly to the identity verification handler.
+        val fss = firstSessionState
+        if (fss != null && fss.awaitingIdentityVerification && firstSessionHandler != null) {
+            val turn2 = firstSessionHandler.handleTurn2(userId, utterance, fss)
+            firstSessionState = turn2.newState
+            // On successful verification, seed the scaffold state with the trust phase from
+            // the INVITED edge so subsequent sessions start at the correct onboarding phase.
+            if (turn2.newState.identityVerified) {
+                val trustPhaseInt = when (turn2.newState.trustPhase?.trim()?.lowercase()) {
+                    "colleague"  -> 2
+                    "confidant"  -> 3
+                    else         -> 1  // Acquaintance / default → ORIENTATION
+                }
+                try {
+                    val current = engramClient.getScaffoldState(userId)
+                    engramClient.updateScaffoldState(
+                        userId,
+                        current.copy(trustPhase = trustPhaseInt),
+                    )
+                } catch (_: Exception) { /* non-fatal */ }
+            }
+            return Pair(ChatResult(turn2.response, IntentType.SOCIAL, 1, "first-session"), null)
+        }
+
         val trace = if (debug) PipelineTrace() else null
         // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
         // the breakdown always adds up correctly regardless of sub-millisecond rounding.
@@ -370,6 +447,22 @@ open class CognitivePipeline(
         var routingNs = 0L
         var reasonNs = 0L
         var expressionNs = 0L
+
+        // Classify + write the OUTCOME for the previous turn before processing the new one.
+        // The new utterance is the user's reaction to the phrase selected last turn.
+        val priorPending = pendingOutcome
+        if (priorPending != null) {
+            pendingOutcome = null
+            val classification = OutcomeSignalClassifier.classify(utterance, priorPending.priorContext)
+            selectionService?.recordOutcome(
+                phraseUid       = priorPending.phraseUid,
+                sessionId       = priorPending.sessionId,
+                userId          = priorPending.userId,
+                turnIndex       = priorPending.turnIndex,
+                signal          = classification.signal,
+                contextSnapshot = buildContextSnapshot(utterance, classification.confidence, null),
+            )
+        }
 
         // Load scaffold state before Comprehension so Rule 0 fires correctly on subsequent turns.
         // An active scaffold question means the user is mid-onboarding and any utterance is an answer.
@@ -429,6 +522,20 @@ open class CognitivePipeline(
         // ── Reason (Branch execution) ────────────────────────────────────────
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
+        // Record pending outcome for the *next* turn's classification.
+        // Only set when a phrase was actually selected — pure-reason branches leave this null.
+        ctx.selectionResult?.let { result ->
+            pendingOutcome = PendingOutcome(
+                phraseUid    = result.phrase.uid,
+                sessionId    = sessionId,
+                userId       = userId,
+                turnIndex    = ctx.priorUtterances.size + 1,
+                priorContext = OutcomeSignalClassifier.PriorTurnContext(
+                    utterance  = utterance,
+                    phraseText = result.phrase.text,
+                ),
+            )
+        }
         if (debug) {
             reasonNs = System.nanoTime() - reasonStartNs
             trace!!.latencyBreakdown.reasonMs =
@@ -519,4 +626,45 @@ open class CognitivePipeline(
         is OnboardingBranch  -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
         else                 -> null to null
     }
+
+    /**
+     * Called by [app.alfrd.engram.cognitive.SessionManager] when a session expires.
+     * If a phrase selection is pending outcome classification, writes a DISENGAGED edge
+     * and clears the pending state. Fire-and-forget — never throws.
+     */
+    fun recordDisengagedOutcome() {
+        val pending = pendingOutcome ?: return
+        pendingOutcome = null
+        selectionService?.recordOutcome(
+            phraseUid       = pending.phraseUid,
+            sessionId       = pending.sessionId,
+            userId          = pending.userId,
+            turnIndex       = pending.turnIndex,
+            signal          = OutcomeSignal.DISENGAGED,
+            contextSnapshot = buildContextSnapshot(pending.priorContext.utterance, 0.0, "session_timeout"),
+        )
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────────
+
+    private fun buildContextSnapshot(utterance: String, confidence: Double, reason: String?): String {
+        val escaped = utterance.replace("\\", "\\\\").replace("\"", "\\\"")
+        return if (reason != null) {
+            """{"utterance":"$escaped","reason":"$reason"}"""
+        } else {
+            """{"utterance":"$escaped","confidence":$confidence}"""
+        }
+    }
+
+    /**
+     * Holds the outcome context from the last phrase-selected turn so the *next*
+     * utterance can classify the signal and write the OUTCOME edge.
+     */
+    data class PendingOutcome(
+        val phraseUid: String,
+        val sessionId: String,
+        val userId: String,
+        val turnIndex: Int,
+        val priorContext: OutcomeSignalClassifier.PriorTurnContext,
+    )
 }

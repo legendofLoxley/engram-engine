@@ -96,3 +96,30 @@ tasks.shadowJar {
 tasks.withType<AbstractArchiveTask>().configureEach {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+
+// ── Voice Cache Seed ──────────────────────────────────────────────────────────
+// Pre-renders first-response + bridge phrases via Deepgram Aura-2 TTS and
+// stores PCM blobs + manifest in Supabase Storage.
+//
+// Required env vars:
+//   DEEPGRAM_API_KEY      — Deepgram API key
+//   SUPABASE_URL          — e.g. https://xxxx.supabase.co
+//   SUPABASE_SERVICE_KEY  — service-role key (bypasses RLS)
+//
+// Optional env vars:
+//   VOICE_MODEL_ID        — TTS model (default: aura-2-butler)
+//   DB_PATH               — ArcadeDB path   (default: ./data/engram-db)
+tasks.register<JavaExec>("voiceCacheSeed") {
+    group       = "scripts"
+    description = "Pre-render first-response and bridge phrases to Supabase Storage"
+    mainClass.set("app.alfrd.engram.scripts.VoiceCacheSeedKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs(
+        "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+        "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED",
+        "--add-opens", "java.base/java.nio.channels.spi=ALL-UNNAMED",
+        "-Dpolyglot.engine.WarnInterpreterOnly=false"
+    )
+}

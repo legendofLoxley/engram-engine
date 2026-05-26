@@ -17,7 +17,8 @@ data class ContainsEdge(
 @Serializable
 data class AssertsEdge(
     val context: String,
-    val timestamp: Long
+    val timestamp: Long,
+    val scores: String = "[]",
 )
 
 @Serializable
@@ -34,7 +35,11 @@ data class TrustsEdge(
 @Serializable
 data class InvitedEdge(
     val timestamp: Long,
-    val resultingTier: Int
+    val resultingTier: Int,
+    val relationshipContext: String = "",
+    val trustPhase: String = "",
+    val engagementIntent: String = "",
+    val tier: Int = 1,
 )
 
 @Serializable
