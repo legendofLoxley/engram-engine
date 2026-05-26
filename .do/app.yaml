@@ -5,7 +5,7 @@ services:
   - name: engram-engine
     # Replace OWNER/REPO with your GitHub repository slug, e.g. alfrd/engram-engine
     github:
-      branch: main
+      branch: master
       deploy_on_push: true
       repo: legendofLoxley/engram-engine
     dockerfile_path: Dockerfile
