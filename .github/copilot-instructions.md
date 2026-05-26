@@ -74,3 +74,35 @@ Token budget and wall-clock both matter. Most discovery waste comes from over-se
 
 - When summarizing completed work, lead with the headline number (`206 tests, 0 failures`) then list implementation points 1..N matching the task spec.
 - Do not restate the task spec in the output — the user has it. Say what changed and why it works, not what was requested.
+
+---
+
+## Testable Service Classes
+
+Kotlin classes are `final` by default. Any class that needs a test double (fake subclass) must be declared `open` with `open` methods. Do this at authoring time — retrofitting it later breaks compilation mid-test run.
+
+**Pattern for database-backed services:** make the constructor parameter nullable (`val db: Database?`) so tests can pass `null` without hitting Kotlin's null-safety cast. All real call sites pass a real `Database`; the fake subclass overrides every method before any `db` usage is reached.
+
+```kotlin
+open class UserGraphService(private val db: Database?) {
+    open fun findUserByEmail(email: String): UserRecord? { db!!.query(...) }
+    // ...
+}
+
+// In tests:
+class FakeUserGraphService(...) : UserGraphService(null) {
+    override fun findUserByEmail(email: String) = fixedRecord
+}
+```
+
+---
+
+## Git: Multiple GitHub Orgs
+
+This repo has two GitHub org remotes (`legendofLoxley` = canonical, `primarykey-solutions` = old). Always verify `git remote -v` before pushing. If origin points to the wrong org:
+
+```bash
+git remote set-url origin https://github.com/legendofLoxley/engram-engine.git
+```
+
+If the remote has diverged (force-pushed), `git pull --rebase` can silently drop local commits when the remote history wins. Always confirm the files you expect are still present after a rebase with divergent history (`git log --oneline -5` and spot-check key files).
