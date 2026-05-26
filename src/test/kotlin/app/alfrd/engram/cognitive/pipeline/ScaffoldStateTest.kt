@@ -241,7 +241,7 @@ class HttpEngramClientScaffoldTest {
     }
 
     @Test
-    fun `queryPhrases includes userId in request URL`() = runTest {
+    fun `queryPhrases includes userEmail in request URL`() = runTest {
         mockServer.enqueue(
             MockResponse()
                 .setResponseCode(200)
@@ -249,12 +249,11 @@ class HttpEngramClientScaffoldTest {
                 .setHeader("Content-Type", "application/json"),
         )
 
-        client().queryPhrases("Kotlin developer", "user-abc")
+        client().queryPhrases("user@example.com", "Kotlin developer")
 
         val request = mockServer.takeRequest()
-        assertTrue(request.path?.contains("q=") == true, "Expected q= param in URL")
-        assertTrue(request.path?.contains("userId=user-abc") == true,
-            "Expected userId=user-abc in URL, got: ${request.path}")
+        assertTrue(request.path?.contains("userEmail=user%40example.com") == true,
+            "Expected userEmail=user%40example.com in URL, got: ${request.path}")
     }
 
     @Test
@@ -262,7 +261,7 @@ class HttpEngramClientScaffoldTest {
         mockServer.shutdown()
         val unreachableClient = HttpEngramClient("http://localhost:${mockServer.port}")
 
-        val phrases = unreachableClient.queryPhrases("kotlin", "user-1")
+        val phrases = unreachableClient.queryPhrases("user@example.com", "kotlin")
 
         assertTrue(phrases.isEmpty(), "Expected empty list when unreachable")
     }

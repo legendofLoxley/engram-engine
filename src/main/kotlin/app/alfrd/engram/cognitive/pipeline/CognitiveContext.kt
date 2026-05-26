@@ -16,6 +16,7 @@ data class CognitiveContext(
     val sessionId: String,
     val roomId: String = "foyer",
     val userId: String,
+    val userEmail: String = "",
     val timestamp: Instant = Instant.now(),
     val zoneId: java.time.ZoneId? = null,
 

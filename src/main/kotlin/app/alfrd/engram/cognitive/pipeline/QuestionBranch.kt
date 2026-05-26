@@ -32,7 +32,7 @@ class QuestionBranch(
         }
 
         val phrases = try {
-            engramClient.queryPhrases(ctx.memoryQueryHint ?: ctx.utterance, ctx.userId)
+            engramClient.queryPhrases(ctx.userEmail, ctx.memoryQueryHint ?: ctx.utterance)
         } catch (_: Exception) {
             emptyList()
         }
@@ -40,8 +40,8 @@ class QuestionBranch(
         try {
             val systemPrompt = if (phrases.isNotEmpty()) {
                 val context = phrases.take(5).joinToString("\n") { phrase ->
-                    val confidence = "%.0f".format(phrase.score * 100)
-                    "- ${phrase.content} [source: ${phrase.source}, confidence: $confidence%]"
+                    val confidence = "%.0f".format((phrase.scores["trust"] ?: 0.5) * 100)
+                    "- ${phrase.text} [source: ${phrase.sourceTypes.firstOrNull() ?: "unknown"}, confidence: $confidence%]"
                 }
                 """
                     You are a composed, warm assistant. Answer the user's question using what you know about them.

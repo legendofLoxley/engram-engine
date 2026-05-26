@@ -259,7 +259,7 @@ class CognitiveInitTest {
         val brokenClient = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
             override suspend fun decompose(text: String, context: List<String>) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate>()
             override suspend fun ingest(candidates: List<app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate>) {}
-            override suspend fun queryPhrases(concept: String, userId: String) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.Phrase>()
+            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.ScoredPhrase>()
             override suspend fun getScaffoldState(userId: String): ScaffoldState = error("scaffold unavailable")
             override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) {}
             override suspend fun amendPhrase(phraseId: String, newContent: String) {}

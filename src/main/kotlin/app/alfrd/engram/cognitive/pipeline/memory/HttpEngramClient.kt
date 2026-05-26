@@ -2,7 +2,6 @@ package app.alfrd.engram.cognitive.pipeline.memory
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -17,8 +16,8 @@ import java.util.logging.Logger
  * HTTP implementation of [EngramClient] targeting the engram-engine REST API at [baseUrl].
  *
  * Endpoint availability:
- * - `POST /ingest/text`              — available
- * - `GET  /phrases?q=…&userId=…`    — available
+ * - `POST /ingest/text`                           — available
+ * - `GET  /phrases?q=…&userEmail=…&limit=…`       — available
  * - `PATCH /phrases/:id`             — available
  * - `GET  /scaffold/state/{userId}`  — available
  * - `PUT  /scaffold/state/{userId}`  — available
@@ -61,18 +60,17 @@ class HttpEngramClient(
 
     // ── Query phrases ─────────────────────────────────────────────────────────
 
-    override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> = withContext(Dispatchers.IO) {
+    override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> = withContext(Dispatchers.IO) {
         try {
-            val encoded = URLEncoder.encode(concept, "UTF-8")
-            val userParam = if (userId.isNotBlank()) "&userId=${URLEncoder.encode(userId, "UTF-8")}" else ""
+            val qParam = if (!concept.isNullOrBlank()) "q=${URLEncoder.encode(concept, "UTF-8")}&" else ""
+            val emailParam = "userEmail=${URLEncoder.encode(userEmail, "UTF-8")}"
             val req = HttpRequest.newBuilder()
-                .uri(URI.create("$baseUrl/phrases?q=$encoded$userParam"))
+                .uri(URI.create("$baseUrl/phrases?$qParam$emailParam&limit=$limit"))
                 .GET()
                 .build()
             val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
             if (resp.statusCode() in 200..299) {
-                val dtos = json.decodeFromString<List<PhraseDto>>(resp.body())
-                dtos.map { it.toPhrase() }
+                json.decodeFromString<List<ScoredPhrase>>(resp.body())
             } else {
                 logger.warning("queryPhrases returned HTTP ${resp.statusCode()}")
                 emptyList()
@@ -150,23 +148,6 @@ class HttpEngramClient(
 
     @Serializable
     private data class AmendRequest(val content: String)
-
-    @Serializable
-    private data class PhraseDto(
-        val id: String,
-        val content: String,
-        val source: String = "unknown",
-        @SerialName("trust_phase") val trustPhase: Int = 1,
-        val score: Double = 0.5,
-    ) {
-        fun toPhrase() = Phrase(
-            id = id,
-            content = content,
-            source = source,
-            trustPhase = trustPhase,
-            score = score,
-        )
-    }
 
     /**
      * DTO for GET /scaffold/state/{userId} response.

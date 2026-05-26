@@ -95,12 +95,21 @@ class InMemoryEngramClient : EngramClient {
 
     // ── Query ─────────────────────────────────────────────────────────────────
 
-    // userId filtering is enforced server-side; InMemory returns all matching phrases regardless of userId.
-    override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> {
-        val words = concept.lowercase().split(Regex("\\s+")).filter { it.length > 2 }
+    // In-memory: no real graph traversal — concept filtering applied, email ignored.
+    override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
+        val words = concept?.lowercase()?.split(Regex("\\s+"))?.filter { it.length > 2 } ?: emptyList()
         return phrases.filter { phrase ->
-            val lower = phrase.content.lowercase()
-            words.any { lower.contains(it) }
+            words.isEmpty() || words.any { phrase.content.lowercase().contains(it) }
+        }.take(limit).map { phrase ->
+            ScoredPhrase(
+                uid = phrase.id,
+                text = phrase.content,
+                createdAt = 0L,
+                updatedAt = 0L,
+                scores = mapOf("trust" to phrase.score),
+                sourceCount = 1,
+                sourceTypes = listOf(phrase.source),
+            )
         }
     }
 

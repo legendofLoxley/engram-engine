@@ -1,5 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline.memory
 
+import kotlinx.serialization.Serializable
+
 /** Scaffold categories in priority order for onboarding. */
 enum class PhraseCategory {
     IDENTITY, EXPERTISE, PREFERENCE, ROUTINE, RELATIONSHIP, CONTEXT
@@ -15,7 +17,7 @@ data class PhraseCandidate(
 )
 
 /**
- * A stored phrase retrieved from the memory graph.
+ * A stored phrase retrieved from the memory graph (legacy in-memory model).
  */
 data class Phrase(
     val id: String,
@@ -23,6 +25,28 @@ data class Phrase(
     val source: String,
     val trustPhase: Int,
     val score: Double,
+)
+
+/**
+ * A phrase retrieved via perspective-scoped graph traversal (User → TRUSTS → Source → ASSERTS → Phrase).
+ *
+ * @param uid         Stable vertex identifier.
+ * @param text        The phrase text.
+ * @param createdAt   Epoch-millis when the vertex was created.
+ * @param updatedAt   Epoch-millis of most recent update.
+ * @param scores      Score type → max value, aggregated across all ASSERTS paths that reached this phrase.
+ * @param sourceCount Number of distinct Source→ASSERTS paths that reached this phrase (corroboration signal).
+ * @param sourceTypes Deduplicated list of Source.type values from all paths.
+ */
+@Serializable
+data class ScoredPhrase(
+    val uid: String,
+    val text: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val scores: Map<String, Double>,
+    val sourceCount: Int,
+    val sourceTypes: List<String>,
 )
 
 /**
@@ -68,10 +92,18 @@ interface EngramClient {
     suspend fun ingest(candidates: List<PhraseCandidate>)
 
     /**
-     * Retrieve relevant phrases by concept or keyword.
-     * [userId] filters results to phrases owned by that user; blank means no filter (dev/test only).
+     * Retrieve phrases visible to [userEmail] via perspective-scoped graph traversal:
+     *   User(email) → TRUSTS → Source → ASSERTS → Phrase
+     *
+     * Phrases from multiple Sources reaching the same vertex are deduplicated; scores are
+     * aggregated by taking the max value per score type across all ASSERTS paths.
+     *
+     * [concept] optionally filters by case-insensitive substring match on Phrase.text.
+     * [limit] caps the result set (default 50). Results are ordered: max trust ↓, max salience ↓, sourceCount ↓.
+     *
+     * Returns an empty list — never throws — when [userEmail] is blank or no User vertex is found.
      */
-    suspend fun queryPhrases(concept: String, userId: String = ""): List<Phrase>
+    suspend fun queryPhrases(userEmail: String, concept: String? = null, limit: Int = 50): List<ScoredPhrase>
 
     /** Get onboarding progress for [userId], initialising a fresh state if none exists. */
     suspend fun getScaffoldState(userId: String): ScaffoldState

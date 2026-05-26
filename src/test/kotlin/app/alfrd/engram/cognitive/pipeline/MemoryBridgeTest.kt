@@ -1,10 +1,10 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.Phrase
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
+import app.alfrd.engram.cognitive.pipeline.memory.ScoredPhrase
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.LlmTimeoutError
@@ -239,7 +239,7 @@ class MemoryBridgeIntegrationTest {
                 throw RuntimeException("db down")
             override suspend fun ingest(candidates: List<PhraseCandidate>) =
                 throw RuntimeException("db down")
-            override suspend fun queryPhrases(concept: String, userId: String): List<Phrase> =
+            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> =
                 throw RuntimeException("db down")
             override suspend fun getScaffoldState(userId: String): ScaffoldState =
                 throw RuntimeException("db down")
@@ -272,9 +272,9 @@ class InMemoryEngramClientTest {
             )
         )
 
-        val results = client.queryPhrases("Kotlin")
+        val results = client.queryPhrases(userEmail = "", concept = "Kotlin")
         assertEquals(1, results.size)
-        assertTrue(results.first().content.contains("Kotlin"))
+        assertTrue(results.first().text.contains("Kotlin"))
     }
 
     @Test
