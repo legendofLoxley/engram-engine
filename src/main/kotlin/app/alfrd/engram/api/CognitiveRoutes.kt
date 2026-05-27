@@ -9,6 +9,7 @@ import app.alfrd.engram.cognitive.providers.TranscriptionResult
 import app.alfrd.engram.model.PostureMoveType
 import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -86,6 +87,7 @@ data class FirstResponseStreamRequest(
 
 fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
     routing {
+        authenticate("supabase") {
         route("/cognitive") {
             post("/chat") {
                 val req = call.receive<ChatRequest>()
@@ -198,9 +200,10 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
 
             post("/init") {
                 val req = call.receive<InitSessionRequest>()
+                val userEmail = call.userEmail() ?: req.userEmail
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val result   = pipeline.initSession(req.sessionId, req.userId, req.context, userEmail = req.userEmail)
+                val result   = pipeline.initSession(req.sessionId, req.userId, req.context, userEmail = userEmail)
 
                 call.respond(
                     HttpStatusCode.OK,
@@ -213,5 +216,6 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 )
             }
         }
+        } // authenticate("supabase")
     }
 }

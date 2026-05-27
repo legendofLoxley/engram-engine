@@ -1,6 +1,7 @@
 package app.alfrd.engram
 
 import app.alfrd.engram.api.configureCognitiveRoutes
+import app.alfrd.engram.api.configureAuth
 import app.alfrd.engram.api.configureOnboardingRoutes
 import app.alfrd.engram.api.configurePhrasesRoutes
 import app.alfrd.engram.api.configureRoutes
@@ -19,6 +20,8 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.plugins.cors.routing.*
+import io.ktor.server.routing.*
+import io.ktor.server.http.content.*
 import kotlinx.serialization.json.Json
 
 fun main() {
@@ -49,12 +52,18 @@ fun main() {
             allowHeader(HttpHeaders.ContentType)
             allowHeader(HttpHeaders.Authorization)
         }
+        configureAuth()
         configureRoutes(db)
         configureCognitiveRoutes(sessionManager)
         configureSelectionRoutes(ResponseSelectionService(db))
         configureScaffoldRoutes(db)
         configurePhrasesRoutes(db)
         configureOnboardingRoutes(db)
+        routing {
+            staticResources("/", "static") {
+                default("index.html")
+            }
+        }
     }.start(wait = true)
 
     Runtime.getRuntime().addShutdownHook(Thread {

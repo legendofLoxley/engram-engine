@@ -1,3 +1,12 @@
+# ─── Stage 0: Frontend build ──────────────────────────────────────────────────
+FROM node:20-alpine AS frontend
+
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 # ─── Stage 1: Build ───────────────────────────────────────────────────────────
 # eclipse-temurin:25 matches jvmToolchain(25) in build.gradle.kts.
 # The Kotlin compiler targets JVM 21 bytecode, so the runtime stage can use JRE 21.
@@ -12,8 +21,9 @@ COPY gradle/ gradle/
 # Resolve dependencies (cached unless build files change)
 RUN chmod +x gradlew && ./gradlew dependencies --no-daemon --quiet || true
 
-# Copy source and build fat jar
+# Copy source and build fat jar (include frontend static output)
 COPY src/ src/
+COPY --from=frontend /src/main/resources/static src/main/resources/static
 RUN ./gradlew shadowJar --no-daemon
 
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
