@@ -2,6 +2,7 @@ package app.alfrd.engram.cognitive
 
 import app.alfrd.engram.cognitive.pipeline.CognitivePipeline
 import app.alfrd.engram.cognitive.pipeline.FirstSessionHandler
+import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
@@ -33,7 +34,7 @@ object CognitivePipelineFactory {
         } else null
 
         val selectionService  = db?.let { ResponseSelectionService(it) }
-        val engramClient      = InMemoryEngramClient()
+        val engramClient      = if (db != null) DatabaseEngramClient(db) else InMemoryEngramClient()
         val transitionService = TrustPhaseTransitionService(engramClient)
 
         val firstSessionHandler = if (db != null && sessionManager != null) {

@@ -41,9 +41,9 @@ class HttpEngramClient(
 
     // ── Ingest ────────────────────────────────────────────────────────────────
 
-    override suspend fun ingest(candidates: List<PhraseCandidate>) = withContext(Dispatchers.IO) {
+    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = withContext(Dispatchers.IO) {
         try {
-            val body = json.encodeToString(IngestRequest(texts = candidates.map { it.content }))
+            val body = json.encodeToString(IngestRequest(userEmail = userEmail, texts = candidates.map { it.content }))
             val req = HttpRequest.newBuilder()
                 .uri(URI.create("$baseUrl/ingest/text"))
                 .header("Content-Type", "application/json")
@@ -144,7 +144,7 @@ class HttpEngramClient(
     }
 
     @Serializable
-    private data class IngestRequest(val texts: List<String>)
+    private data class IngestRequest(val userEmail: String, val texts: List<String>)
 
     @Serializable
     private data class AmendRequest(val content: String)

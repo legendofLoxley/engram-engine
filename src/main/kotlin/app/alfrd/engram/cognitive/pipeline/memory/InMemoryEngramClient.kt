@@ -79,7 +79,7 @@ class InMemoryEngramClient : EngramClient {
 
     // ── Ingest ────────────────────────────────────────────────────────────────
 
-    override suspend fun ingest(candidates: List<PhraseCandidate>) {
+    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) {
         for (c in candidates) {
             phrases.add(
                 Phrase(

@@ -89,7 +89,7 @@ class OnboardingBranch(
                 emptyList()
             }
             try {
-                if (candidates.isNotEmpty()) engramClient.ingest(candidates)
+                if (candidates.isNotEmpty()) engramClient.ingest(candidates, ctx.userId)
             } catch (_: Exception) {}
             updatedAnswered = state.answeredCategories + candidates.map { it.category }.toSet()
             recentContent   = candidates.take(3).map { it.content }

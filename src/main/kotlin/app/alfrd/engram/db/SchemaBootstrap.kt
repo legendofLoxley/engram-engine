@@ -174,6 +174,7 @@ object SchemaBootstrap {
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Source",      "uid")
+            ensureIndex(schema, "Source",      "name")
             ensureIndex(schema, "User",        "uid")
             ensureIndex(schema, "User",        "email")
             ensureIndex(schema, "ScoreType",   "uid")

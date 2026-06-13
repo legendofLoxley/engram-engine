@@ -237,7 +237,7 @@ class MemoryBridgeIntegrationTest {
         var capturedEmail: String? = null
         val trackingEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
             override suspend fun decompose(text: String, context: List<String>) = emptyList<PhraseCandidate>()
-            override suspend fun ingest(candidates: List<PhraseCandidate>) = Unit
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = Unit
             override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
                 capturedEmail = userEmail
                 return emptyList()
@@ -262,7 +262,7 @@ class MemoryBridgeIntegrationTest {
         val capturedEmails = mutableListOf<String>()
         val trackingEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
             override suspend fun decompose(text: String, context: List<String>) = emptyList<PhraseCandidate>()
-            override suspend fun ingest(candidates: List<PhraseCandidate>) = Unit
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = Unit
             override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
                 capturedEmails.add(userEmail)
                 return emptyList()
@@ -288,7 +288,7 @@ class MemoryBridgeIntegrationTest {
         val brokenEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
             override suspend fun decompose(text: String, context: List<String>) =
                 throw RuntimeException("db down")
-            override suspend fun ingest(candidates: List<PhraseCandidate>) =
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) =
                 throw RuntimeException("db down")
             override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> =
                 throw RuntimeException("db down")

@@ -94,7 +94,7 @@ class MemoryWriteServiceTest {
     fun `ingest failure does not propagate to caller`() = runTest {
         val delegate2 = InMemoryEngramClient()
         val throwingEngram = object : EngramClient by delegate2 {
-            override suspend fun ingest(candidates: List<PhraseCandidate>): Unit =
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): Unit =
                 throw RuntimeException("simulated ingest failure")
         }
         val service = MemoryWriteService(throwingEngram, this)

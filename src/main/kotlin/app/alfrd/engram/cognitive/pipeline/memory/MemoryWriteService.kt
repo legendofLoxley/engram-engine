@@ -63,7 +63,7 @@ class MemoryWriteService(
             try {
                 val candidates = engramClient.decompose(utterance, emptyList())
                 if (candidates.isNotEmpty()) {
-                    engramClient.ingest(candidates)
+                    engramClient.ingest(candidates, userId)
                 }
 
                 // After successful ingestion, persist the answered scaffold category so

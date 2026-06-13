@@ -88,8 +88,14 @@ interface EngramClient {
     /** Break [text] into atomic phrase candidates. [context] is prior utterances for disambiguation. */
     suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate>
 
-    /** Write phrase candidates to the memory graph. */
-    suspend fun ingest(candidates: List<PhraseCandidate>)
+    /**
+     * Write phrase candidates to the memory graph, attributed to [userEmail]'s personal Source.
+     *
+     * Implementations that write to the real graph (e.g. [DatabaseEngramClient]) use [userEmail]
+     * to locate the correct User vertex and wire Source → ASSERTS → Phrase. Implementations that
+     * do not track per-user state (e.g. [InMemoryEngramClient]) may ignore [userEmail].
+     */
+    suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String = "")
 
     /**
      * Retrieve phrases visible to [userEmail] via perspective-scoped graph traversal:
