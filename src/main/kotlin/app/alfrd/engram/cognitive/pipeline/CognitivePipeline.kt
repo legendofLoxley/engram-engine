@@ -4,6 +4,8 @@ import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
 import app.alfrd.engram.cognitive.pipeline.posture.PostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
@@ -259,6 +261,13 @@ open class CognitivePipeline(
             try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
         }
         sessionZoneId = zoneId
+
+        // Ensure a User vertex exists for Supabase-direct signups (no-op for seeded users).
+        if (userEmail.isNotBlank()) {
+            firstSessionHandler?.userGraphService?.let { ugs ->
+                withContext(Dispatchers.IO) { ugs.findOrCreateUser(userEmail) }
+            }
+        }
 
         val fallbackGreeting: () -> String = {
             val hour = java.time.LocalTime.now(zoneId ?: java.time.ZoneId.systemDefault()).hour

@@ -26,7 +26,7 @@ import java.util.logging.Logger
  * all graph I/O goes through [UserGraphService], all LLM calls go through [llmClient].
  */
 class FirstSessionHandler(
-    private val userGraphService: UserGraphService,
+    internal val userGraphService: UserGraphService,
     private val sessionManager: SessionManager,
     private val llmClient: LlmClient?,
 ) {

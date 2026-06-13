@@ -2,6 +2,7 @@ package app.alfrd.engram.cognitive
 
 import app.alfrd.engram.api.OnboardingService
 import com.arcadedb.database.Database
+import java.util.UUID
 import java.util.logging.Logger
 
 /**
@@ -15,6 +16,8 @@ open class UserGraphService(private val db: Database?) {
 
     companion object {
         val JACOB_EMAIL: String = OnboardingService.JACOB_EMAIL
+        /** Tier assigned to users who signed up directly via Supabase (no INVITED edge). */
+        const val SELF_SIGNUP_TIER = 0
     }
 
     data class UserRecord(val uid: String, val email: String, val username: String)
@@ -47,6 +50,55 @@ open class UserGraphService(private val db: Database?) {
             }
         } catch (e: Exception) {
             logger.warning("findUserByEmail failed for email=$email: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Returns the existing User vertex for [email], or creates one with [SELF_SIGNUP_TIER]
+     * if none exists. Used to bootstrap graph presence for Supabase-direct signups before
+     * phrase ingestion runs.
+     */
+    open fun findOrCreateUser(email: String): UserRecord? {
+        return try {
+            db!!.let { database ->
+                var result: UserRecord? = null
+                database.transaction {
+                    val existing = database.query(
+                        "sql",
+                        "SELECT FROM User WHERE email = :email",
+                        mapOf("email" to email),
+                    ).use { rs ->
+                        if (rs.hasNext()) {
+                            val v = rs.next().toElement().asVertex()
+                            UserRecord(
+                                uid      = v.get("uid") as? String ?: return@transaction,
+                                email    = v.get("email") as? String ?: email,
+                                username = v.get("username") as? String ?: "",
+                            )
+                        } else null
+                    }
+                    if (existing != null) {
+                        result = existing
+                        return@transaction
+                    }
+                    val now = System.currentTimeMillis()
+                    val uid = UUID.randomUUID().toString()
+                    database.newVertex("User").apply {
+                        set("uid", uid)
+                        set("username", email.substringBefore("@"))
+                        set("email", email)
+                        set("tier", SELF_SIGNUP_TIER)
+                        set("createdAt", now)
+                        set("updatedAt", now)
+                        save()
+                    }
+                    result = UserRecord(uid = uid, email = email, username = email.substringBefore("@"))
+                }
+                result
+            }
+        } catch (e: Exception) {
+            logger.warning("findOrCreateUser failed for email=$email: ${e.message}")
             null
         }
     }

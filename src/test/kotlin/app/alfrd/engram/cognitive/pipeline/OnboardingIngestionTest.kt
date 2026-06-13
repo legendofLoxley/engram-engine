@@ -2,11 +2,13 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.api.InviteeManifest
 import app.alfrd.engram.api.OnboardingService
+import app.alfrd.engram.cognitive.UserGraphService
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.SchemaBootstrap
+import com.arcadedb.graph.Vertex
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.*
@@ -144,5 +146,50 @@ class OnboardingIngestionTest {
         val trustScore = phrases.first().scores["trust"]
         assertNotNull(trustScore, "Expected trust score to be present")
         assertTrue(trustScore!! > 0.0, "Expected positive trust score, got: $trustScore")
+    }
+
+    // ── §5.2 acceptance: Supabase-direct signup (no /onboard/seed, no INVITED edge) ─
+
+    @Test
+    fun `Supabase-direct signup gets User+TRUSTS+Source wired and queryPhrases returns results via full traversal`() = runTest {
+        val selfEmail = "self-signup-${System.currentTimeMillis()}@example.com"
+        val db = dbManager.getDatabase()
+        val ugs = UserGraphService(db)
+
+        // Simulate initSession() creating the User vertex for a brand-new Supabase-direct user
+        val created = ugs.findOrCreateUser(selfEmail)
+        assertNotNull(created, "findOrCreateUser must return a UserRecord for a new email")
+        val storedTier = db.query(
+            "sql", "SELECT FROM User WHERE email = :email", mapOf("email" to selfEmail),
+        ).use { rs ->
+            if (rs.hasNext()) (rs.next().toElement().asVertex().get("tier") as? Number)?.toInt() else null
+        }
+        assertEquals(UserGraphService.SELF_SIGNUP_TIER, storedTier,
+            "Self-signup user must have SELF_SIGNUP_TIER, not the founder-invited tier",
+        )
+
+        // Calling findOrCreateUser again must be idempotent
+        val second = ugs.findOrCreateUser(selfEmail)
+        assertNotNull(second)
+        assertEquals(created!!.uid, second!!.uid, "Repeated findOrCreateUser must return the same User vertex")
+
+        // Simulate OnboardingBranch ingesting the user's first utterance
+        val candidates = engramClient.decompose("I work on distributed systems", emptyList())
+        assertTrue(candidates.isNotEmpty(), "Decomposition must produce at least one candidate")
+        engramClient.ingest(candidates, selfEmail)
+
+        // Verify ingest() wired User → TRUSTS → Source(onboarding_conversation) — not just Source + ASSERTS
+        val userVertex = db.query(
+            "sql", "SELECT FROM User WHERE email = :email", mapOf("email" to selfEmail),
+        ).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+        assertNotNull(userVertex, "User vertex must exist after findOrCreateUser")
+        val trustsEdges = userVertex!!.getEdges(Vertex.DIRECTION.OUT, "TRUSTS").toList()
+        assertTrue(trustsEdges.isNotEmpty(),
+            "ingest() must create a TRUSTS edge from User to the onboarding_conversation Source")
+
+        // Verify queryPhrases returns results via the full User → TRUSTS → Source → ASSERTS → Phrase traversal
+        val phrases = engramClient.queryPhrases(selfEmail, null, 50)
+        assertTrue(phrases.isNotEmpty(),
+            "queryPhrases must return results for a Supabase-direct signup via graph traversal, got: $phrases")
     }
 }
