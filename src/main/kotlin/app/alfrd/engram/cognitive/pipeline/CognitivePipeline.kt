@@ -25,6 +25,7 @@ import app.alfrd.engram.model.ExpressionPhase
 import app.alfrd.engram.model.PostureMoveType
 import app.alfrd.engram.model.OutcomeSignal
 import app.alfrd.engram.model.ResponseCategory
+import java.util.logging.Logger
 
 /**
  * Top-level orchestrator for the cognitive processing cycle.
@@ -51,6 +52,8 @@ open class CognitivePipeline(
     private val transitionService: TrustPhaseTransitionService? = null,
     private val firstSessionHandler: FirstSessionHandler? = null,
 ) {
+
+    private val logger = Logger.getLogger(CognitivePipeline::class.java.name)
 
     // Wrap with voice identity so every LLM call includes the base voice-modality prompt.
     // The original llmClient is kept separately for the CloudLlmClient type check in selectTier2Model.
@@ -279,6 +282,9 @@ open class CognitivePipeline(
         }
 
         // ── First-session detection ──────────────────────────────────────────
+        // For returning verified users (not first session), capture the INVITED edge so
+        // we can produce a warm intro from opening_context below.
+        var warmIntroText: String? = null
         if (firstSessionHandler != null && userEmail.isNotBlank()) {
             val detection = firstSessionHandler.detectFirstSession(userId, userEmail)
             if (detection.isFirstSession) {
@@ -293,6 +299,10 @@ open class CognitivePipeline(
                         engagementIntent             = edge.engagementIntent,
                         relationshipContext          = edge.relationshipContext,
                     )
+                    logger.info(
+                        "initSession userId=$userId email=$userEmail path=first-session-turn1 " +
+                        "trustPhase=${edge.trustPhase}"
+                    )
                     return InitResponse(
                         greeting  = turn1.response,
                         phraseId  = "first-session-turn1",
@@ -301,6 +311,10 @@ open class CognitivePipeline(
                 }
                 // No INVITED edge — user reached this endpoint authenticated, so the
                 // beta gate is already cleared. Fall through to normal greeting selection.
+                logger.info("initSession userId=$userId email=$userEmail path=closed-beta-rejection")
+            } else {
+                // Not first session — capture opening_context for warm intro if present.
+                warmIntroText = detection.invitedEdge?.openingContext?.takeIf { it.isNotBlank() }
             }
         }
 
@@ -335,6 +349,20 @@ open class CognitivePipeline(
             }
         }
 
+        // ── Warm intro for returning invited user ────────────────────────────
+        if (warmIntroText != null) {
+            logger.info(
+                "initSession userId=$userId email=$userEmail path=warm-intro " +
+                "scaffoldTrustPhase=${scaffoldState?.trustPhase} firstSessionState=$firstSessionState"
+            )
+            return InitResponse(
+                greeting         = warmIntroText,
+                phraseId         = "invited-warm-intro",
+                sessionId        = sessionId,
+                scaffoldQuestion = resolveScaffoldQuestion(scaffoldState),
+            )
+        }
+
         val trustPhaseString = when (scaffoldState?.trustPhase) {
             1 -> "ORIENTATION"
             2 -> "WORKING_RHYTHM"
@@ -367,6 +395,11 @@ open class CognitivePipeline(
             val greeting = result?.interpolated ?: fallbackGreeting()
             val phraseId = result?.phrase?.uid ?: "fallback"
 
+            logger.info(
+                "initSession userId=$userId email=$userEmail path=selection " +
+                "phraseId=$phraseId scaffoldTrustPhase=${scaffoldState?.trustPhase} " +
+                "firstSessionState=$firstSessionState"
+            )
             InitResponse(
                 greeting         = greeting,
                 phraseId         = phraseId,

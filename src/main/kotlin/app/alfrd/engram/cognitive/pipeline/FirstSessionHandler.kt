@@ -85,15 +85,33 @@ class FirstSessionHandler(
         }
 
         if (hasSelectedEdges) {
+            logger.info("detectFirstSession: userId=$userId has SELECTED edges — returning user")
             return DetectionResult(isFirstSession = false)
         }
 
-        // Both checks pass — pre-load the INVITED edge so we only hit the DB once.
-        val invitedEdge = withContext(Dispatchers.IO) {
-            val user = userGraphService.findUserByEmail(userEmail)
-            if (user != null) userGraphService.findInvitedEdgeFromJacob(user.uid) else null
+        // Look up the user vertex and INVITED edge once (needed for VERIFIED check and Turn 1).
+        val user = withContext(Dispatchers.IO) { userGraphService.findUserByEmail(userEmail) }
+        val invitedEdge = if (user != null) {
+            withContext(Dispatchers.IO) { userGraphService.findInvitedEdgeFromJacob(user.uid) }
+        } else null
+
+        // VERIFIED edge → identity verification was completed in a prior session.
+        // Skip Turn 1 even if there are no SELECTED edges yet (e.g. user verified then left).
+        val isVerified = withContext(Dispatchers.IO) {
+            userGraphService.hasVerifiedEdge(userEmail)
+        }
+        if (isVerified) {
+            logger.info(
+                "detectFirstSession: userId=$userId userVertexId=${user?.uid} " +
+                "is VERIFIED with no SELECTED edges — returning verified user, skipping Turn 1"
+            )
+            return DetectionResult(isFirstSession = false, invitedEdge = invitedEdge)
         }
 
+        logger.info(
+            "detectFirstSession: userId=$userId userVertexId=${user?.uid} — " +
+            "first session (no SELECTED edges, not VERIFIED, invitedEdge=${invitedEdge != null})"
+        )
         return DetectionResult(isFirstSession = true, invitedEdge = invitedEdge)
     }
 

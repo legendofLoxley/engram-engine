@@ -27,6 +27,7 @@ open class UserGraphService(private val db: Database?) {
         val trustPhase: String,
         val engagementIntent: String,
         val timestamp: Long,
+        val openingContext: String? = null,
     )
 
     /**
@@ -112,7 +113,7 @@ open class UserGraphService(private val db: Database?) {
         return try {
             db!!.query(
                 "sql",
-                """SELECT e.relationshipContext, e.trustPhase, e.engagementIntent, e.timestamp
+                """SELECT e.relationshipContext, e.trustPhase, e.engagementIntent, e.timestamp, e.openingContext
                    FROM INVITED e
                    WHERE e.@out.email = :jacobEmail AND e.@in.uid = :userId
                    ORDER BY e.timestamp DESC
@@ -126,6 +127,7 @@ open class UserGraphService(private val db: Database?) {
                         trustPhase          = el.get("trustPhase") as? String ?: "Acquaintance",
                         engagementIntent    = el.get("engagementIntent") as? String ?: "",
                         timestamp           = el.get("timestamp") as? Long ?: 0L,
+                        openingContext      = el.get("openingContext") as? String,
                     )
                 } else null
             }
@@ -155,6 +157,31 @@ open class UserGraphService(private val db: Database?) {
             }
         } catch (e: Exception) {
             logger.warning("hasSelectedEdges failed for userId=$userId: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Returns true if [userEmail] has an outbound VERIFIED edge to Jacob — i.e. identity
+     * verification was completed in a prior session.
+     */
+    open fun hasVerifiedEdge(userEmail: String): Boolean {
+        return try {
+            db!!.query(
+                "sql",
+                "SELECT count(*) as cnt FROM VERIFIED WHERE @out.email = :userEmail LIMIT 1",
+                mapOf("userEmail" to userEmail),
+            ).use { rs ->
+                if (rs.hasNext()) {
+                    val count = rs.next().toElement().get("cnt")
+                    when (count) {
+                        is Number -> count.toLong() > 0
+                        else      -> false
+                    }
+                } else false
+            }
+        } catch (e: Exception) {
+            logger.warning("hasVerifiedEdge failed for userEmail=$userEmail: ${e.message}")
             false
         }
     }
