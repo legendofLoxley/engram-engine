@@ -488,6 +488,7 @@ open class CognitivePipeline(
             sessionId     = sessionId,
             roomId        = "foyer",
             userId        = userId,
+            userEmail     = userId,
             timestamp     = java.time.Instant.now(),
             zoneId        = sessionZoneId,
             scaffoldState = scaffoldState,

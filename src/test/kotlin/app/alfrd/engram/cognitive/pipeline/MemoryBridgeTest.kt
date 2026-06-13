@@ -233,6 +233,57 @@ class MemoryBridgeIntegrationTest {
     }
 
     @Test
+    fun `pipeline propagates JWT userId as userEmail to queryPhrases`() = runTest {
+        var capturedEmail: String? = null
+        val trackingEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
+            override suspend fun decompose(text: String, context: List<String>) = emptyList<PhraseCandidate>()
+            override suspend fun ingest(candidates: List<PhraseCandidate>) = Unit
+            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
+                capturedEmail = userEmail
+                return emptyList()
+            }
+            override suspend fun getScaffoldState(userId: String) = ScaffoldState()
+            override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = Unit
+            override suspend fun amendPhrase(phraseId: String, newContent: String) = Unit
+        }
+        val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
+        val pipeline = CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
+
+        pipeline.process("What do I work on?", "s1", "alice@example.com")
+
+        assertEquals(
+            "alice@example.com", capturedEmail,
+            "Pipeline must pass the userId (JWT email) as userEmail to queryPhrases"
+        )
+    }
+
+    @Test
+    fun `queryPhrases receives different emails for different users`() = runTest {
+        val capturedEmails = mutableListOf<String>()
+        val trackingEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
+            override suspend fun decompose(text: String, context: List<String>) = emptyList<PhraseCandidate>()
+            override suspend fun ingest(candidates: List<PhraseCandidate>) = Unit
+            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
+                capturedEmails.add(userEmail)
+                return emptyList()
+            }
+            override suspend fun getScaffoldState(userId: String) = ScaffoldState()
+            override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = Unit
+            override suspend fun amendPhrase(phraseId: String, newContent: String) = Unit
+        }
+        val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
+
+        CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
+            .process("What do I work on?", "s1", "alice@example.com")
+        CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
+            .process("What do I work on?", "s2", "bob@example.com")
+
+        assertTrue(capturedEmails.contains("alice@example.com"), "alice's email must reach queryPhrases")
+        assertTrue(capturedEmails.contains("bob@example.com"), "bob's email must reach queryPhrases")
+        assertNotEquals(capturedEmails[0], capturedEmails[1], "Different users must produce different emails")
+    }
+
+    @Test
     fun `branches still respond when EngramClient operations fail`() = runTest {
         val brokenEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
             override suspend fun decompose(text: String, context: List<String>) =
