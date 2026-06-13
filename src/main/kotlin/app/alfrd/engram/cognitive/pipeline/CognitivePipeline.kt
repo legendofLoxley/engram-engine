@@ -274,28 +274,24 @@ open class CognitivePipeline(
             val detection = firstSessionHandler.detectFirstSession(userId, userEmail)
             if (detection.isFirstSession) {
                 val turn1 = firstSessionHandler.handleTurn1(detection)
-                if (turn1.rejected) {
-                    // No INVITED edge — closed-beta rejection; no state to track.
+                if (!turn1.rejected) {
+                    // Valid invitee — store state and return Turn 1 greeting.
+                    val edge = turn1.invitedEdge!!
+                    firstSessionState = FirstSessionState(
+                        isFirstSession               = true,
+                        awaitingIdentityVerification = true,
+                        trustPhase                   = edge.trustPhase,
+                        engagementIntent             = edge.engagementIntent,
+                        relationshipContext          = edge.relationshipContext,
+                    )
                     return InitResponse(
                         greeting  = turn1.response,
-                        phraseId  = "first-session-rejected",
+                        phraseId  = "first-session-turn1",
                         sessionId = sessionId,
                     )
                 }
-                // Valid invitee — store state and return Turn 1 greeting.
-                val edge = turn1.invitedEdge!!
-                firstSessionState = FirstSessionState(
-                    isFirstSession               = true,
-                    awaitingIdentityVerification = true,
-                    trustPhase                   = edge.trustPhase,
-                    engagementIntent             = edge.engagementIntent,
-                    relationshipContext          = edge.relationshipContext,
-                )
-                return InitResponse(
-                    greeting  = turn1.response,
-                    phraseId  = "first-session-turn1",
-                    sessionId = sessionId,
-                )
+                // No INVITED edge — user reached this endpoint authenticated, so the
+                // beta gate is already cleared. Fall through to normal greeting selection.
             }
         }
 

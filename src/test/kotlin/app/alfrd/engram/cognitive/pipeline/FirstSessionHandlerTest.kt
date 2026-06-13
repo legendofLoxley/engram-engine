@@ -367,7 +367,9 @@ class FirstSessionHandlerTest {
     }
 
     @Test
-    fun `pipeline returns rejection at initSession when no INVITED edge`() = runTest {
+    fun `pipeline falls through to normal greeting at initSession when no INVITED edge`() = runTest {
+        // Authenticated users (any call reaching initSession has passed JWT auth) must never
+        // see the closed-beta rejection, even if they have no INVITED edge in the graph.
         val graphService = FakeUserGraphService(invitedEdge = null)
         val sm      = buildSessionManager()
         val handler = FirstSessionHandler(
@@ -380,8 +382,8 @@ class FirstSessionHandlerTest {
 
         val response = pipeline.initSession("session-2", "user-uninvited", userEmail = "stranger@example.com")
 
-        assertTrue(response.phraseId == "first-session-rejected")
-        assertEquals(FirstSessionHandler.CLOSED_BETA_REJECTION, response.greeting)
+        assertNotEquals(FirstSessionHandler.CLOSED_BETA_REJECTION, response.greeting)
+        assertNotEquals("first-session-rejected", response.phraseId)
         assertNull(pipeline.firstSessionState)
     }
 
