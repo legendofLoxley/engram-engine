@@ -318,17 +318,14 @@ class ResponseSelectionService(
 
                     val userVertex = db.query(
                         "sql",
-                        "SELECT FROM User WHERE uid = :uid",
-                        mapOf("uid" to userId),
+                        "SELECT FROM User WHERE email = :email",
+                        mapOf("email" to userId),
                     ).use { rs ->
                         if (rs.hasNext()) rs.next().toElement().asVertex()
                         else null
-                    } ?: db.newVertex("User").apply {
-                        set("uid", userId)
-                        set("username", userId)
-                        set("tier", 0)
-                        set("createdAt", System.currentTimeMillis())
-                        save()
+                    } ?: run {
+                        System.err.println("OUTCOME: no User vertex for email=$userId — skipping")
+                        return@transaction
                     }
 
                     userVertex.newEdge("OUTCOME", phraseVertex, false).apply {
@@ -371,17 +368,14 @@ class ResponseSelectionService(
 
                     val userVertex = db.query(
                         "sql",
-                        "SELECT FROM User WHERE uid = :uid",
-                        mapOf("uid" to ctx.userId),
+                        "SELECT FROM User WHERE email = :email",
+                        mapOf("email" to ctx.userId),
                     ).use { rs ->
                         if (rs.hasNext()) rs.next().toElement().asVertex()
                         else null
-                    } ?: db.newVertex("User").apply {
-                        set("uid", ctx.userId)
-                        set("username", ctx.userId)
-                        set("tier", 0)
-                        set("createdAt", System.currentTimeMillis())
-                        save()
+                    } ?: run {
+                        System.err.println("SELECTED: no User vertex for email=${ctx.userId} — skipping")
+                        return@transaction
                     }
 
                     userVertex.newEdge("SELECTED", phraseVertex, false).apply {

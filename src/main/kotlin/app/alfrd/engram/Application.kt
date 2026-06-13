@@ -11,6 +11,7 @@ import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.CognitivePipelineFactory
 import app.alfrd.engram.cognitive.SessionManager
 import app.alfrd.engram.db.DatabaseManager
+import app.alfrd.engram.db.PhantomUserCleanup
 import app.alfrd.engram.db.ResponsePhraseSeed
 import app.alfrd.engram.db.SchemaBootstrap
 import io.ktor.http.*
@@ -30,6 +31,7 @@ fun main() {
 
     SchemaBootstrap.bootstrap(db)
     ResponsePhraseSeed.seed(db)
+    PhantomUserCleanup.run(db)
 
     // SessionManager is forward-declared so CognitivePipelineFactory can pass it to
     // FirstSessionHandler (the handler needs SessionManager.isFirstKnownSession).

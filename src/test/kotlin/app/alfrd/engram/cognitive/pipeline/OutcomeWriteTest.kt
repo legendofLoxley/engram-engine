@@ -52,6 +52,18 @@ class OutcomeEdgeWriteTest {
     fun `recordOutcome writes OUTCOME edge with all required fields`() {
         val db = dbManager.getDatabase()
 
+        // Seed a real User vertex so the email-based lookup in recordOutcome finds it.
+        db.transaction {
+            db.newVertex("User").apply {
+                set("uid", java.util.UUID.randomUUID().toString())
+                set("username", "u-outcome-1")
+                set("email", "u-outcome-1")
+                set("tier", 1)
+                set("createdAt", System.currentTimeMillis())
+                save()
+            }
+        }
+
         // Select a phrase so we have a valid uid
         val ctx = app.alfrd.engram.cognitive.pipeline.CognitiveContext(
             utterance = "hello",

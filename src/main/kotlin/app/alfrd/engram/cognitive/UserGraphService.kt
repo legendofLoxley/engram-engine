@@ -179,12 +179,12 @@ open class UserGraphService(private val db: Database?) {
 
                 val userVertex = db!!.query(
                     "sql",
-                    "SELECT FROM User WHERE uid = :uid",
-                    mapOf("uid" to userId),
+                    "SELECT FROM User WHERE email = :email",
+                    mapOf("email" to userId),
                 ).use { rs ->
                     if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null
                 } ?: run {
-                    logger.warning("writeVerifiedEdge: User vertex not found for uid=$userId")
+                    logger.warning("writeVerifiedEdge: User vertex not found for email=$userId")
                     return@transaction
                 }
 

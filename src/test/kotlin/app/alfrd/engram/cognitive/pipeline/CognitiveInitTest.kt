@@ -93,6 +93,20 @@ class CognitiveInitTest {
 
     @Test
     fun `INIT consecutive calls in same session return different greetings`() = runTest {
+        // Seed a real User vertex so recordSelected (fire-and-forget, Unconfined) can write
+        // SELECTED edges that feed freshness scoring on the second call.
+        val db = dbManager.getDatabase()
+        db.transaction {
+            db.newVertex("User").apply {
+                set("uid", java.util.UUID.randomUUID().toString())
+                set("username", "user-repeat")
+                set("email", "user-repeat")
+                set("tier", 1)
+                set("createdAt", System.currentTimeMillis())
+                save()
+            }
+        }
+
         val result1 = pipeline.initSession(
             sessionId = "s-repeat",
             userId    = "user-repeat",
