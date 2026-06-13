@@ -40,7 +40,7 @@ class SocialBranch(
                 ctx = ctx,
                 category = ResponseCategory.GREETING,
                 expressionPhase = ExpressionPhase.FIRST_RESPONSE,
-                fallback = timeBasedGreeting(),
+                fallback = timeBasedGreeting(ctx.zoneId),
             )
         }
 
@@ -76,8 +76,8 @@ class SocialBranch(
         }
     }
 
-    private fun timeBasedGreeting(): String {
-        val hour = LocalTime.now().hour
+    private fun timeBasedGreeting(zoneId: java.time.ZoneId? = null): String {
+        val hour = LocalTime.now(zoneId ?: java.time.ZoneId.systemDefault()).hour
         return when {
             hour < 12 -> "Good morning."
             hour < 17 -> "Good afternoon."

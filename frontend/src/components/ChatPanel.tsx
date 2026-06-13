@@ -5,12 +5,13 @@ import { MessageBubble } from './MessageBubble'
 interface ChatPanelProps {
   messages: Message[]
   loading: boolean
+  initializing: boolean
   onSend: (content: string) => void
   userName: string | undefined
   onSignOut: () => void
 }
 
-export function ChatPanel({ messages, loading, onSend, userName, onSignOut }: ChatPanelProps) {
+export function ChatPanel({ messages, loading, initializing, onSend, userName, onSignOut }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -45,7 +46,7 @@ export function ChatPanel({ messages, loading, onSend, userName, onSignOut }: Ch
       </div>
 
       <div className="chat-messages">
-        {messages.length === 0 && (
+        {!initializing && messages.length === 0 && (
           <div className="chat-empty">
             <p>Start a conversation with alfrd.</p>
           </div>

@@ -77,6 +77,8 @@ open class CognitivePipeline(
     @Volatile var firstSessionState: FirstSessionState? = null
         internal set
 
+    @Volatile private var sessionZoneId: java.time.ZoneId? = null
+
     companion object {
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
             if (llmClient == null) return null
@@ -173,6 +175,7 @@ open class CognitivePipeline(
             sessionId = sessionId,
             userId = userId,
             timestamp = timestamp,
+            zoneId = sessionZoneId,
             transcriptionResults = transcriptionResults,
             fluxEvent = fluxEvent,
             trustPhase = trustPhaseString,
@@ -255,6 +258,7 @@ open class CognitivePipeline(
         val zoneId = context?.get("timezone")?.let {
             try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
         }
+        sessionZoneId = zoneId
 
         val fallbackGreeting: () -> String = {
             val hour = java.time.LocalTime.now(zoneId ?: java.time.ZoneId.systemDefault()).hour
@@ -485,6 +489,7 @@ open class CognitivePipeline(
             roomId        = "foyer",
             userId        = userId,
             timestamp     = java.time.Instant.now(),
+            zoneId        = sessionZoneId,
             scaffoldState = scaffoldState,
             trace         = trace,
         )

@@ -91,10 +91,12 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
         route("/cognitive") {
             post("/chat") {
                 val req = call.receive<ChatRequest>()
+                val userId = call.userEmail()
+                    ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Missing identity"))
                 val startMs = System.currentTimeMillis()
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val result   = pipeline.processForChat(req.utterance, req.sessionId, req.userId)
+                val result   = pipeline.processForChat(req.utterance, req.sessionId, userId)
 
                 val latencyMs = System.currentTimeMillis() - startMs
 
@@ -111,10 +113,12 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
 
             post("/chat/debug") {
                 val req = call.receive<ChatRequest>()
+                val userId = call.userEmail()
+                    ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Missing identity"))
                 val startMs = System.currentTimeMillis()
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val debugResult = pipeline.processForDebug(req.utterance, req.sessionId, req.userId)
+                val debugResult = pipeline.processForDebug(req.utterance, req.sessionId, userId)
 
                 val latencyMs = System.currentTimeMillis() - startMs
 
@@ -132,6 +136,8 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
 
             post("/chat/stream") {
                 val req = call.receive<ChatRequest>()
+                val userId = call.userEmail()
+                    ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Missing identity"))
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
                 val streamer = PhaseEventStreamer(pipeline)
 
@@ -141,7 +147,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 call.response.headers.append("X-Accel-Buffering", "no")
 
                 call.respondBytesWriter(contentType = ContentType.parse("text/event-stream; charset=utf-8")) {
-                    streamer.stream(req.utterance, req.sessionId, req.userId).collect { event ->
+                    streamer.stream(req.utterance, req.sessionId, userId).collect { event ->
                         val line = "data: ${Json.encodeToString(event)}\n\n"
                         writeFully(line.encodeToByteArray())
                         flush()
@@ -151,6 +157,8 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
 
             post("/chat/stream/first-response") {
                 val req = call.receive<FirstResponseStreamRequest>()
+                val userId = call.userEmail()
+                    ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Missing identity"))
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
                 val streamer = PhaseEventStreamer(pipeline)
 
@@ -184,7 +192,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                     streamer.streamFirstResponse(
                         utterance = req.utterance,
                         sessionId = req.sessionId,
-                        userId = req.userId,
+                        userId = userId,
                         inputEvent = req.inputEvent,
                         audioPlaying = req.audioPlaying,
                         transcriptionResults = parsedTranscription,
@@ -201,9 +209,10 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
             post("/init") {
                 val req = call.receive<InitSessionRequest>()
                 val userEmail = call.userEmail() ?: req.userEmail
+                val userId = userEmail.takeIf { it.isNotBlank() } ?: req.userId
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val result   = pipeline.initSession(req.sessionId, req.userId, req.context, userEmail = userEmail)
+                val result   = pipeline.initSession(req.sessionId, userId, req.context, userEmail = userEmail)
 
                 call.respond(
                     HttpStatusCode.OK,
