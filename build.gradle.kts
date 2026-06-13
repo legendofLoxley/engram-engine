@@ -24,6 +24,7 @@ dependencies {
     implementation("io.ktor:ktor-server-cors:3.1.1")
     implementation("io.ktor:ktor-server-auth:3.1.1")
     implementation("io.ktor:ktor-server-auth-jwt:3.1.1")
+    implementation("com.auth0:jwks-rsa:0.22.1")
 
     // Kotlin serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
