@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
+import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
 import app.alfrd.engram.cognitive.providers.TranscriptionResult
 import app.alfrd.engram.model.ResponsePhrase
@@ -37,6 +38,8 @@ data class CognitiveContext(
     var requiresMemory: Boolean = false,
     var memoryQueryHint: String? = null,
     var secondaryIntent: IntentType? = null,
+    /** Text-path turn shape, null when no explicit signal was detected. */
+    var turnShape: TurnShape? = null,
 
     // ── Memory ────────────────────────────────────────────────────────────────
     var scaffoldState: Any? = null,

@@ -2,6 +2,7 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
 import app.alfrd.engram.cognitive.pipeline.posture.PostureSignals
+import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
 import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
@@ -494,7 +495,7 @@ open class CognitivePipeline(
 
         // ── Routing ──────────────────────────────────────────────────────────
         val routingStartNs = if (debug) System.nanoTime() else 0L
-        val branch = router.route(ctx.intent)
+        val branch = router.route(ctx.intent, ctx.turnShape)
         if (debug) {
             routingNs = System.nanoTime() - routingStartNs
             trace!!.latencyBreakdown.routingMs =
@@ -503,7 +504,7 @@ open class CognitivePipeline(
             trace.routing.confidence = ctx.intentConfidence
             trace.routing.secondaryIntent = ctx.secondaryIntent?.name
             trace.routing.branchSelected = branch::class.simpleName ?: "Unknown"
-            trace.routing.route = routeNameFor(ctx.intent)
+            trace.routing.route = routeNameFor(ctx.intent, ctx.turnShape)
         }
 
         // ── Reason (Branch execution) ────────────────────────────────────────
@@ -609,14 +610,24 @@ open class CognitivePipeline(
         PostureMoveType.MULTI_UTTERANCE_HOLD -> "I'm with you."
     }
 
-    private fun routeNameFor(intent: IntentType): String = when (intent) {
-        IntentType.SOCIAL                  -> "short_circuit_social"
-        IntentType.QUESTION                -> "graph_augmented_answer"
-        IntentType.TASK                    -> "task_accept"
-        IntentType.CORRECTION              -> "correction_branch"
-        IntentType.META                    -> "meta_branch"
-        IntentType.CLARIFICATION,
-        IntentType.AMBIGUOUS               -> "clarification_branch"
+    private fun routeNameFor(intent: IntentType, turnShape: TurnShape? = null): String {
+        when (turnShape) {
+            TurnShape.Disclosure,
+            TurnShape.FYI,
+            TurnShape.Continuation -> return "verbal_move"
+            TurnShape.TaskRequest  -> return "task_accept"
+            TurnShape.Correction   -> return "correction_branch"
+            else -> { /* fall through to intent-based name */ }
+        }
+        return when (intent) {
+            IntentType.SOCIAL                  -> "short_circuit_social"
+            IntentType.QUESTION                -> "graph_augmented_answer"
+            IntentType.TASK                    -> "task_accept"
+            IntentType.CORRECTION              -> "correction_branch"
+            IntentType.META                    -> "meta_branch"
+            IntentType.CLARIFICATION,
+            IntentType.AMBIGUOUS               -> "clarification_branch"
+        }
     }
 
     private fun reasonModelInfo(branch: Branch): Pair<String?, String?> = when (branch) {

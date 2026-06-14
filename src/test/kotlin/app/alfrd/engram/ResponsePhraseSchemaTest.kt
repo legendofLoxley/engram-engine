@@ -159,9 +159,9 @@ class ResponsePhraseSchemaTest {
 
     @Test
     @Order(9)
-    fun `RECEIPT moveType returns exactly 7 phrases`() {
+    fun `RECEIPT moveType returns exactly 8 phrases`() {
         val count = countByMoveType("RECEIPT")
-        assertEquals(7, count, "RECEIPT pool must have exactly 7 phrases")
+        assertEquals(8, count, "RECEIPT pool must have exactly 8 phrases")
     }
 
     @Test
@@ -261,7 +261,7 @@ class ResponsePhraseSchemaTest {
         ).use { rs ->
             if (rs.hasNext()) rs.next().toMap()["cnt"] as? Long ?: 0L else 0L
         }
-        assertEquals(7, count)
+        assertEquals(8, count)
     }
 
     // ── Phrase hashes ─────────────────────────────────────────────────────────
