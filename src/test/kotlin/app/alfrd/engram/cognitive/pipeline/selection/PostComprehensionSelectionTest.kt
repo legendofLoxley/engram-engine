@@ -113,10 +113,8 @@ class PostComprehensionSelectionTest {
 
     @Test
     fun `post-comprehension phaseAffinity gate excludes out-of-phase phrases`() {
-        // ONBOARDING branch has SCAFFOLD_QUESTION phrases that are locked to ORIENTATION phase.
-        // A user in UNDERSTANDING phase should NOT receive them (3+ phases away).
-        // Since there are no SCAFFOLD_QUESTION phrases seeded, we test indirectly via BRIDGE:
-        // all bridge phrases have allPhases affinity so they should always pass the gate.
+        // Test that phaseAffinity gating works: BRIDGE phrases have allPhases affinity so they
+        // should always pass the gate regardless of the user's current phase.
         val ctx = CognitiveContext(
             utterance = "what comes next?",
             sessionId = "s-gate",

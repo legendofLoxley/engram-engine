@@ -5,6 +5,7 @@ import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.LlmClient
 
+
 /** Maps an [IntentType] to the appropriate [Branch] instance. Pure function — no state. */
 class Router(
     private val engramClient: EngramClient,
@@ -14,7 +15,6 @@ class Router(
 ) {
 
     fun route(intent: IntentType): Branch = when (intent) {
-        IntentType.ONBOARDING            -> OnboardingBranch(engramClient, memoryWriteService)
         IntentType.SOCIAL                -> SocialBranch(selectionService)
         IntentType.QUESTION              -> QuestionBranch(engramClient, llmClient)
         IntentType.TASK                  -> TaskBranch(engramClient, memoryWriteService)

@@ -1,6 +1,5 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
@@ -48,12 +47,11 @@ class Comprehension(
         ctx.intent = intent
         ctx.intentConfidence = confidence
         ctx.comprehensionTier = tier
-        ctx.requiresMemory = intent in setOf(IntentType.ONBOARDING, IntentType.QUESTION, IntentType.META)
+        ctx.requiresMemory = intent in setOf(IntentType.QUESTION, IntentType.META)
         ctx.memoryQueryHint = when (intent) {
-            IntentType.QUESTION   -> "answer: ${ctx.utterance}"
-            IntentType.META       -> "profile: ${ctx.utterance}"
-            IntentType.ONBOARDING -> "onboarding context"
-            else                  -> null
+            IntentType.QUESTION -> "answer: ${ctx.utterance}"
+            IntentType.META     -> "profile: ${ctx.utterance}"
+            else                -> null
         }
     }
 
@@ -65,7 +63,6 @@ class Comprehension(
             Reply with ONLY the category name — no punctuation, no explanation.
             
             Categories:
-            - ONBOARDING  (user sharing personal info: identity, role, expertise, preferences, tools, routines)
             - TASK        (imperative request: do something, remind, schedule, create, find)
             - QUESTION    (asking for information or an answer)
             - SOCIAL      (greeting, farewell, small talk, thanks)
@@ -103,9 +100,6 @@ class Comprehension(
     private data class Tier1Result(val intent: IntentType, val confidence: Double, val ruleName: String)
 
     private fun classifyTier1(ctx: CognitiveContext, lower: String): Tier1Result {
-        // Rule 0 — Active scaffold question: treat utterance as onboarding answer
-        if ((ctx.scaffoldState as? ScaffoldState)?.activeScaffoldQuestion != null) return Tier1Result(IntentType.ONBOARDING, 0.95, "scaffold_context_default")
-
         // Rule 1 — Social / phatic
         if (isSocial(lower)) return Tier1Result(IntentType.SOCIAL, 0.90, "social_phatic")
 

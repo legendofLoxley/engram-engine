@@ -35,12 +35,11 @@ object SelectionWeights {
     val FIRST_RESPONSE = WeightConfig(0.20, 0.25, 0.20, 0.15, 0.20)
 
     private val weights: Map<BranchType, WeightConfig> = mapOf(
-        BranchType.SOCIAL to WeightConfig(0.25, 0.20, 0.20, 0.15, 0.20),
-        BranchType.ONBOARDING to WeightConfig(0.15, 0.20, 0.15, 0.30, 0.20),
-        BranchType.QUESTION to WeightConfig(0.20, 0.30, 0.20, 0.10, 0.20),
-        BranchType.TASK to WeightConfig(0.15, 0.20, 0.30, 0.15, 0.20),
-        BranchType.CORRECTION to WeightConfig(0.15, 0.25, 0.20, 0.15, 0.25),
-        BranchType.META to WeightConfig(0.20, 0.30, 0.20, 0.10, 0.20),
+        BranchType.SOCIAL       to WeightConfig(0.25, 0.20, 0.20, 0.15, 0.20),
+        BranchType.QUESTION     to WeightConfig(0.20, 0.30, 0.20, 0.10, 0.20),
+        BranchType.TASK         to WeightConfig(0.15, 0.20, 0.30, 0.15, 0.20),
+        BranchType.CORRECTION   to WeightConfig(0.15, 0.25, 0.20, 0.15, 0.25),
+        BranchType.META         to WeightConfig(0.20, 0.30, 0.20, 0.10, 0.20),
         BranchType.CLARIFICATION to WeightConfig(0.15, 0.20, 0.15, 0.30, 0.20),
     )
 

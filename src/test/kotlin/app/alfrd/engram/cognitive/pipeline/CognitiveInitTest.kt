@@ -156,14 +156,13 @@ class CognitiveInitTest {
     private fun scaffoldPipeline(scaffoldState: ScaffoldState): CognitivePipeline {
         val engram = InMemoryEngramClient()
         engram.apply {
-            // Pre-seed the scaffold state synchronously via a blocking call from a test helper
             kotlinx.coroutines.runBlocking { updateScaffoldState("scaffold-user", scaffoldState) }
         }
         return CognitivePipeline(engramClient = engram, selectionService = service)
     }
 
     @Test
-    fun `INIT first-ever user gets ORIENTATION greeting and scaffold question`() = runTest {
+    fun `INIT brand-new ORIENTATION user receives a greeting from the scored pool`() = runTest {
         val p = scaffoldPipeline(ScaffoldState(trustPhase = 1, answeredCategories = emptySet()))
         val result = p.initSession(
             sessionId = "s-first",
@@ -171,61 +170,11 @@ class CognitiveInitTest {
             timestamp = MORNING_UTC,
         )
         assertTrue(result.greeting.isNotBlank(), "Greeting should not be blank")
-        assertNotNull(result.scaffoldQuestion, "First-ever user should receive a scaffold question")
-        assertTrue(result.scaffoldQuestion!!.contains("?"),
-            "Scaffold question should be a question: ${result.scaffoldQuestion}")
-    }
-
-    @Test
-    fun `INIT returning ORIENTATION user with 2 answered categories gets scaffold question`() = runTest {
-        val state = ScaffoldState(
-            trustPhase = 1,
-            answeredCategories = setOf(PhraseCategory.IDENTITY, PhraseCategory.EXPERTISE),
-            activeScaffoldQuestion = "Is there a particular way you prefer to work?",
+        assertNotEquals(
+            "fallback",
+            result.phraseId,
+            "Brand-new user must receive a greeting from the pool, got phraseId=’${result.phraseId}’",
         )
-        val p = scaffoldPipeline(state)
-        val result = p.initSession(
-            sessionId = "s-returning-orient",
-            userId    = "scaffold-user",
-            timestamp = MORNING_UTC,
-        )
-        assertTrue(result.greeting.isNotBlank())
-        assertNotNull(result.scaffoldQuestion,
-            "Returning ORIENTATION user with < 3 answered categories should get scaffold question")
-        assertEquals("Is there a particular way you prefer to work?", result.scaffoldQuestion)
-    }
-
-    @Test
-    fun `INIT CONTEXT phase user gets no scaffold question`() = runTest {
-        val state = ScaffoldState(
-            trustPhase = 3,
-            answeredCategories = PhraseCategory.entries.toSet(),
-        )
-        val p = scaffoldPipeline(state)
-        val result = p.initSession(
-            sessionId = "s-context",
-            userId    = "scaffold-user",
-            timestamp = MORNING_UTC,
-        )
-        assertTrue(result.greeting.isNotBlank())
-        assertNull(result.scaffoldQuestion, "CONTEXT phase user should not receive scaffold question")
-    }
-
-    @Test
-    fun `INIT ORIENTATION user with 3+ answered categories gets no scaffold question`() = runTest {
-        val state = ScaffoldState(
-            trustPhase = 1,
-            answeredCategories = setOf(
-                PhraseCategory.IDENTITY, PhraseCategory.EXPERTISE, PhraseCategory.PREFERENCE
-            ),
-        )
-        val p = scaffoldPipeline(state)
-        val result = p.initSession(
-            sessionId = "s-orient-sufficient",
-            userId    = "scaffold-user",
-            timestamp = MORNING_UTC,
-        )
-        assertNull(result.scaffoldQuestion, "3+ answered categories should suppress scaffold question")
     }
 
     @Test
@@ -285,6 +234,5 @@ class CognitiveInitTest {
             timestamp = MORNING_UTC,
         )
         assertTrue(result.greeting.isNotBlank(), "Should return a greeting even when scaffold state is unavailable")
-        assertNull(result.scaffoldQuestion, "No scaffold question when scaffold state is unavailable")
     }
 }

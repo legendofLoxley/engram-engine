@@ -2,7 +2,7 @@ package app.alfrd.engram.model
 
 import kotlinx.serialization.Serializable
 
-enum class BranchType { SOCIAL, ONBOARDING, QUESTION, TASK, CORRECTION, META, CLARIFICATION }
+enum class BranchType { SOCIAL, QUESTION, TASK, CORRECTION, META, CLARIFICATION }
 
 enum class TrustPhase { ORIENTATION, WORKING_RHYTHM, CONTEXT, UNDERSTANDING }
 
@@ -18,7 +18,7 @@ enum class ResponseCategory {
     // First-response posture pool
     RECEIPT, ORIENT, HOLD, REPAIR, PROBE, COMMIT, WAIT, MISREAD_RECOVERY, YIELD, MULTI_UTTERANCE_HOLD,
     // Session-level & post-comprehension pools
-    GREETING, SIGN_OFF, BRIDGE, SCAFFOLD_QUESTION, FILLER, CLARIFICATION, DECLINE, ACKNOWLEDGMENT
+    GREETING, SIGN_OFF, BRIDGE, FILLER, CLARIFICATION, DECLINE, ACKNOWLEDGMENT
 }
 
 enum class OutcomeSignal { ENGAGED, EXPANDED, CORRECTED, DISENGAGED, NEUTRAL }
