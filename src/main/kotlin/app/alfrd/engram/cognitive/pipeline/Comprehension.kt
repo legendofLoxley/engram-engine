@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.posture.classifyTextPathTurnShape
 import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
@@ -53,6 +54,9 @@ class Comprehension(
             IntentType.META     -> "profile: ${ctx.utterance}"
             else                -> null
         }
+
+        // Text-path turn shape — heuristic classifier, null when no explicit signal.
+        ctx.turnShape = classifyTextPathTurnShape(ctx.utterance)
     }
 
     // ── Tier 2: LLM intent classification ────────────────────────────────────

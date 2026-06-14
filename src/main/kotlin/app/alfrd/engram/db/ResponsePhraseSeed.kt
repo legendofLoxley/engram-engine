@@ -70,7 +70,9 @@ object ResponsePhraseSeed {
 
     private val seedPhrases = listOf(
 
-        // ── First Response: RECEIPT (7) ─────────────────────────────────────────────
+        // ── First Response: RECEIPT (8) ─────────────────────────────────────────────
+        SeedPhrase("Noted.", "RECEIPT", "FIRST_RESPONSE", allBranches, allPhases,
+            moveType = "RECEIPT", postureAffinityJson = receiptAffinity),
         SeedPhrase("Right.", "RECEIPT", "FIRST_RESPONSE", allBranches, allPhases,
             moveType = "RECEIPT", postureAffinityJson = receiptAffinity),
         SeedPhrase("Okay.", "RECEIPT", "FIRST_RESPONSE", allBranches, allPhases,

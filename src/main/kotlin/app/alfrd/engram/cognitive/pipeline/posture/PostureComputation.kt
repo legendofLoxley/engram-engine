@@ -64,6 +64,52 @@ private val RESTART_PATTERN = Regex("""\b(\w+)\s+\1\b""", RegexOption.IGNORE_CAS
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
+ * Text-path TurnShape classifier — heuristic analysis without audio or Flux signals.
+ *
+ * Returns **null** when no explicit pattern is detected, so the caller can fall back
+ * to intent-based routing rather than applying a verbal move.  This is intentionally
+ * distinct from [computePostureSignals], whose default catch-all is [TurnShape.FYI] to
+ * support the voice/Flux path.
+ *
+ * Shapes detected: QUESTION, CORRECTION, TASK_REQUEST, CONTINUATION, DISCLOSURE, FYI.
+ * COLLABORATIVE, TOPIC_OPENER, BARGE_IN, and FRAGMENTED are deliberately excluded —
+ * they either fall through to intent routing or are voice-only concepts.
+ *
+ * **Pure logic — no I/O, no coroutines, < 1 ms.**
+ */
+fun classifyTextPathTurnShape(utterance: String): TurnShape? {
+    val transcript = utterance.trim()
+    val words = transcript.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val contentWords = words.filter { it.lowercase() !in FILLER_WORDS }
+
+    // Too few content words — no explicit signal to route on.
+    if (contentWords.size <= 2) return null
+
+    // Disfluency restart → Correction
+    if (RESTART_PATTERN.containsMatchIn(transcript)) return TurnShape.Correction
+
+    // Task request (checked before Question so "can you update X?" resolves correctly)
+    if (TASK_REQUEST_PATTERN.containsMatchIn(transcript)) return TurnShape.TaskRequest
+
+    // Question: ends with "?" or interrogative opener
+    val firstWord = words.firstOrNull()?.lowercase()?.trimEnd('?', ',', '.') ?: ""
+    if (transcript.endsWith("?") || firstWord in QUESTION_WORDS) return TurnShape.Question
+
+    // Heavy filler use → Continuation
+    val fillerCount = words.count { it.lowercase() in FILLER_WORDS }
+    if (fillerCount.toDouble() / words.size > 0.3) return TurnShape.Continuation
+
+    // Disclosure (explicit personal-sharing markers)
+    if (DISCLOSURE_PATTERN.containsMatchIn(transcript)) return TurnShape.Disclosure
+
+    // FYI (explicit informational markers only — not the default fallback)
+    if (FYI_PATTERN.containsMatchIn(transcript)) return TurnShape.FYI
+
+    // No explicit text-path signal detected.
+    return null
+}
+
+/**
  * Compute pre-comprehension [PostureSignals] from the STT events and Deepgram Flux event
  * stored in [ctx].
  *
