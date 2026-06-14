@@ -35,6 +35,11 @@ dependencies {
     // OkHttp (TTS streaming)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // Logging: SLF4J + Logback (routes JUL from ArcadeDB/Ktor through Logback too)
+    implementation("org.slf4j:slf4j-api:2.0.17")
+    implementation("ch.qos.logback:logback-classic:1.5.18")
+    implementation("org.slf4j:jul-to-slf4j:2.0.17")
+
     // Test
     testImplementation(platform("org.junit:junit-bom:5.12.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")

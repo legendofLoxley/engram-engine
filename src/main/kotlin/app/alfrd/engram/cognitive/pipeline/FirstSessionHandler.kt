@@ -12,7 +12,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import java.util.logging.Logger
+import org.slf4j.LoggerFactory
 
 /**
  * Handles identity verification for first-session users in the closed beta.
@@ -31,7 +31,7 @@ class FirstSessionHandler(
     private val llmClient: LlmClient?,
 ) {
 
-    private val logger = Logger.getLogger(FirstSessionHandler::class.java.name)
+    private val logger = LoggerFactory.getLogger(FirstSessionHandler::class.java)
     private val json   = Json { ignoreUnknownKeys = true }
 
     companion object {
@@ -173,7 +173,7 @@ class FirstSessionHandler(
 
         if (matchResult == null) {
             // LLM unavailable — be conservative: flag rather than silently verify.
-            logger.warning("Verification LLM unavailable for userId=$userId; flagging for Jacob review")
+            logger.warn("Verification LLM unavailable for userId=$userId; flagging for Jacob review")
             return flagUser(userId, userResponse, relationshipContext, 0.0,
                 "LLM unavailable", currentState)
         }
@@ -235,7 +235,7 @@ class FirstSessionHandler(
         reasoning: String,
         currentState: FirstSessionState,
     ): Turn2Result {
-        logger.warning(
+        logger.warn(
             "Identity verification mismatch — userId=$userId " +
             "confidence=$confidence reasoning=\"$reasoning\" " +
             "userResponse=\"$userResponse\" relationshipContext=\"$relationshipContext\""
@@ -272,7 +272,7 @@ class FirstSessionHandler(
             )
             parseMatchResult(response.text)
         } catch (e: Exception) {
-            logger.warning("Verification LLM call failed: ${e.message}")
+            logger.warn("Verification LLM call failed: ${e.message}")
             null
         }
     }
@@ -309,7 +309,7 @@ class FirstSessionHandler(
                 reasoning  = obj["reasoning"]?.jsonPrimitive?.content ?: "",
             )
         } catch (e: Exception) {
-            logger.warning("Failed to parse verification LLM response: ${e.message}")
+            logger.warn("Failed to parse verification LLM response: ${e.message}")
             null
         }
     }

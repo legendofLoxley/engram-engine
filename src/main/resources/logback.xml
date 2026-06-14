@@ -1,0 +1,31 @@
+<configuration>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%logger{30}] %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/app.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/app.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>7</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <!-- Full timestamp in the file so grep results are unambiguous -->
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%logger{36}] %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Quiet noisy third-party internals; raise to DEBUG when investigating ArcadeDB or Ktor -->
+    <logger name="com.arcadedb" level="WARN"/>
+    <logger name="io.netty"     level="WARN"/>
+    <logger name="io.ktor"      level="INFO"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+</configuration>

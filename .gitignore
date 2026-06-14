@@ -3,6 +3,7 @@ build/
 bin/
 data/
 log/
+logs/
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar

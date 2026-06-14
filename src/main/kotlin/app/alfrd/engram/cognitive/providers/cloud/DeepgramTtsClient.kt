@@ -24,7 +24,7 @@ import java.net.http.HttpClient
 import java.net.http.WebSocket
 import java.nio.ByteBuffer
 import java.util.concurrent.CompletionStage
-import java.util.logging.Logger
+import org.slf4j.LoggerFactory
 
 /**
  * Deepgram Aura-2 streaming TTS client.
@@ -80,7 +80,7 @@ class DeepgramTtsClient(
     private val charTimestamps  = ArrayDeque<Pair<Long, Int>>() // (epochMs, charCount)
 
     companion object {
-        private val log = Logger.getLogger(DeepgramTtsClient::class.java.name)
+        private val log = LoggerFactory.getLogger(DeepgramTtsClient::class.java)
 
         private const val DEEPGRAM_URL_BASE       = "wss://api.deepgram.com/v1/speak"
         internal const val KEEP_ALIVE_INTERVAL_MS = 8_000L
@@ -234,7 +234,7 @@ class DeepgramTtsClient(
                     msgAccumulator.clear()
                     when {
                         text.contains("\"Flushed\"") -> currentInbound.trySend(Flushed)
-                        text.contains("\"Error\"")   -> log.warning("DeepgramTTS server error: $text")
+                        text.contains("\"Error\"")   -> log.warn("DeepgramTTS server error: $text")
                     }
                 }
                 webSocket.request(1)
@@ -242,7 +242,7 @@ class DeepgramTtsClient(
             }
 
             override fun onError(webSocket: WebSocket, error: Throwable) {
-                log.warning("DeepgramTTS WS error: ${error.message}")
+                log.warn("DeepgramTTS WS error: ${error.message}")
                 currentInbound.close(error)
             }
 

@@ -25,7 +25,7 @@ import app.alfrd.engram.model.ExpressionPhase
 import app.alfrd.engram.model.PostureMoveType
 import app.alfrd.engram.model.OutcomeSignal
 import app.alfrd.engram.model.ResponseCategory
-import java.util.logging.Logger
+import org.slf4j.LoggerFactory
 
 /**
  * Top-level orchestrator for the cognitive processing cycle.
@@ -53,7 +53,7 @@ open class CognitivePipeline(
     private val firstSessionHandler: FirstSessionHandler? = null,
 ) {
 
-    private val logger = Logger.getLogger(CognitivePipeline::class.java.name)
+    private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
 
     // Wrap with voice identity so every LLM call includes the base voice-modality prompt.
     // The original llmClient is kept separately for the CloudLlmClient type check in selectTier2Model.
@@ -585,6 +585,12 @@ open class CognitivePipeline(
         }
 
         stages.forEach { it.onCycleEnd(ctx) }
+
+        logger.info(
+            "turn sessionId=$sessionId userId=$userId intent=${ctx.intent} " +
+            "branch=${branch::class.simpleName} source=${ctx.branchResult?.source ?: "pool"}"
+        )
+        // TODO: log comprehensionTier and selectionResult.phraseId at DEBUG level for phrase-level tracing
 
         return Pair(
             ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, ctx.branchResult?.source ?: "pool"),

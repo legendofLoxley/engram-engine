@@ -24,10 +24,19 @@ import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.routing.*
 import io.ktor.server.http.content.*
 import kotlinx.serialization.json.Json
+import org.slf4j.LoggerFactory
+import org.slf4j.bridge.SLF4JBridgeHandler
+
+private val log = LoggerFactory.getLogger("app.alfrd.engram.Application")
 
 fun main() {
+    // Route JUL (used by ArcadeDB and other deps) through Logback.
+    SLF4JBridgeHandler.removeHandlersForRootLogger()
+    SLF4JBridgeHandler.install()
+    log.info("engram-engine starting")
     val dbManager = DatabaseManager()
     val db = dbManager.getDatabase()
+    log.info("database ready")
 
     SchemaBootstrap.bootstrap(db)
     ResponsePhraseSeed.seed(db)
@@ -39,6 +48,9 @@ fun main() {
     sessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, sessionManager) })
 
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
+    log.info("listening on port $port")
+
+    // TODO: add Ktor CallLogging plugin here for HTTP request/response tracing when needed
 
     embeddedServer(Netty, port = port) {
         install(ContentNegotiation) {

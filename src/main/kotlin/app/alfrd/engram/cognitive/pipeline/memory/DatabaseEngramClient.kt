@@ -9,7 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.UUID
-import java.util.logging.Logger
+import org.slf4j.LoggerFactory
 
 /**
  * ArcadeDB-backed implementation of [EngramClient].
@@ -35,7 +35,7 @@ class DatabaseEngramClient(
 
     private val scaffoldStore = ScaffoldStateStore(db)
     private val heuristicDecompose = InMemoryEngramClient()
-    private val logger = Logger.getLogger(DatabaseEngramClient::class.java.name)
+    private val logger = LoggerFactory.getLogger(DatabaseEngramClient::class.java)
 
     companion object {
         const val SOURCE_TYPE = "onboarding_conversation"
@@ -70,7 +70,7 @@ class DatabaseEngramClient(
                     if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null
                 }
                 if (userVertex == null) {
-                    logger.warning("ingest: no User vertex for email=$userEmail — skipping")
+                    logger.warn("ingest: no User vertex for email=$userEmail — skipping")
                     return@transaction
                 }
 
@@ -118,7 +118,7 @@ class DatabaseEngramClient(
                 }
             }
         } catch (e: Exception) {
-            logger.warning("ingest failed for userEmail=$userEmail: ${e.message}")
+            logger.warn("ingest failed for userEmail=$userEmail: ${e.message}")
         }
     }
 
@@ -149,7 +149,7 @@ class DatabaseEngramClient(
                 }
             }
         } catch (e: Exception) {
-            logger.warning("amendPhrase failed for phraseId=$phraseId: ${e.message}")
+            logger.warn("amendPhrase failed for phraseId=$phraseId: ${e.message}")
         }
     }
 
