@@ -41,11 +41,11 @@ open class UserGraphService(private val db: Database?) {
                 mapOf("email" to email),
             ).use { rs ->
                 if (rs.hasNext()) {
-                    val el = rs.next().toElement()
+                    val row = rs.next().toMap()
                     UserRecord(
-                        uid      = el.get("uid") as? String ?: return null,
-                        email    = el.get("email") as? String ?: email,
-                        username = el.get("username") as? String ?: "",
+                        uid      = row["uid"] as? String ?: return null,
+                        email    = row["email"] as? String ?: email,
+                        username = row["username"] as? String ?: "",
                     )
                 } else null
             }
@@ -148,11 +148,8 @@ open class UserGraphService(private val db: Database?) {
                 mapOf("userId" to userId),
             ).use { rs ->
                 if (rs.hasNext()) {
-                    val count = rs.next().toElement().get("cnt")
-                    when (count) {
-                        is Number -> count.toLong() > 0
-                        else      -> false
-                    }
+                    val count = rs.next().toMap()["cnt"] as? Number
+                    count != null && count.toLong() > 0
                 } else false
             }
         } catch (e: Exception) {
@@ -173,11 +170,8 @@ open class UserGraphService(private val db: Database?) {
                 mapOf("userEmail" to userEmail),
             ).use { rs ->
                 if (rs.hasNext()) {
-                    val count = rs.next().toElement().get("cnt")
-                    when (count) {
-                        is Number -> count.toLong() > 0
-                        else      -> false
-                    }
+                    val count = rs.next().toMap()["cnt"] as? Number
+                    count != null && count.toLong() > 0
                 } else false
             }
         } catch (e: Exception) {
