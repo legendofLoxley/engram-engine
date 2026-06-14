@@ -4,34 +4,23 @@ import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
-import app.alfrd.engram.cognitive.providers.LlmClient
-import app.alfrd.engram.cognitive.providers.LlmModel
-import app.alfrd.engram.cognitive.providers.LlmRequest
 
 /**
- * Onboarding branch — drives the scaffold loop that orients the assistant to a new user.
+ * Onboarding branch — passive listener that silently ingests user utterances into the
+ * memory graph without driving an interrogative question loop.
  *
  * Flow per turn:
- * 1. Load scaffold state from [engramClient].
- * 2. On first interaction ever: return the opening question, store as active scaffold question.
- * 3. Otherwise: capture the utterance for async memory ingestion via [memoryWriteService]
- *    (or synchronously if no service is wired), advance answered categories, determine
- *    the next uncovered category in priority order (IDENTITY → EXPERTISE → PREFERENCE →
- *    ROUTINE → RELATIONSHIP → CONTEXT), generate a contextual question via [llmClient],
- *    and store it as the new active scaffold question.
- * 4. When all categories are covered: emit a summary acknowledgment and clear the active question.
+ * 1. On the very first interaction ever (empty scaffold state, no active question): return the
+ *    opening prompt and store it as activeScaffoldQuestion.
+ * 2. Otherwise: capture the utterance for async memory ingestion via [memoryWriteService]
+ *    (fire-and-forget), clear the active scaffold question so subsequent turns route normally,
+ *    and return no branch result so the pipeline produces no assistant response for this turn.
  *
- * When [memoryWriteService] is provided the decompose + ingest step runs asynchronously
- * after the response is sent — the user never waits for phrase ingestion. Category
- * advancement uses a heuristic: the category the active question was about is marked
- * as answered. When [memoryWriteService] is null the old synchronous path is used
- * (backward-compatible for tests that construct the branch directly).
- *
- * LLM failure falls back to a hardcoded question — the onboarding loop never stalls.
+ * The interrogative category-cycling loop has been removed. The branch never generates or
+ * stores a new scaffold question — its sole job is silent memory capture.
  */
 class OnboardingBranch(
     private val engramClient: EngramClient,
-    private val llmClient: LlmClient?,
     private val memoryWriteService: MemoryWriteService? = null,
 ) : Branch {
 
@@ -64,25 +53,17 @@ class OnboardingBranch(
             return
         }
 
-        // ── Decompose and ingest the user's answer ────────────────────────────
-        val updatedAnswered: Set<PhraseCategory>
-        val recentContent: List<String>
+        // ── Passively capture the utterance for memory ingestion ──────────────
         if (memoryWriteService != null) {
-            // Async path — fire-and-forget; user response is not blocked on ingestion
-            val currentCategory = SCAFFOLD_PRIORITY.firstOrNull { it !in state.answeredCategories }
             memoryWriteService.captureUtterance(
                 utterance        = ctx.utterance,
                 userId           = ctx.userId,
                 sessionId        = ctx.sessionId,
                 turnIndex        = ctx.priorUtterances.size,
-                scaffoldCategory = currentCategory?.name,
+                scaffoldCategory = null,
                 sourceTag        = "onboarding_conversation",
             )
-            // Optimistically advance: assume the user answered the category we were asking about
-            updatedAnswered = state.answeredCategories + setOfNotNull(currentCategory)
-            recentContent   = emptyList() // no candidates available in the async path
         } else {
-            // Sync path — backward-compatible for tests that construct the branch directly
             val candidates = try {
                 engramClient.decompose(ctx.utterance, ctx.priorUtterances)
             } catch (_: Exception) {
@@ -91,75 +72,13 @@ class OnboardingBranch(
             try {
                 if (candidates.isNotEmpty()) engramClient.ingest(candidates, ctx.userId)
             } catch (_: Exception) {}
-            updatedAnswered = state.answeredCategories + candidates.map { it.category }.toSet()
-            recentContent   = candidates.take(3).map { it.content }
         }
 
-        // ── Find next uncovered category ──────────────────────────────────────
-        val nextUncovered = SCAFFOLD_PRIORITY.firstOrNull { it !in updatedAnswered }
-
-        if (nextUncovered == null) {
-            // All categories covered — wrap up
-            val summary = "I think I have a good picture now — thank you for sharing. I'll keep all of this in mind as we work together."
-            val newState = state.copy(answeredCategories = updatedAnswered, activeScaffoldQuestion = null)
-            tryUpdateState(ctx.userId, newState)
-            ctx.scaffoldState = null
-            ctx.branchResult = BranchResult(content = summary, responseStrategy = ResponseStrategy.SIMPLE)
-            return
-        }
-
-        // ── Generate next scaffold question ───────────────────────────────────
-        val question = generateScaffoldQuestion(nextUncovered, recentContent, ctx)
-
-        val newState = state.copy(answeredCategories = updatedAnswered, activeScaffoldQuestion = question)
+        // Clear the active question so subsequent utterances route via normal branches
+        val newState = state.copy(activeScaffoldQuestion = null)
         tryUpdateState(ctx.userId, newState)
         ctx.scaffoldState = newState
-        ctx.branchResult = BranchResult(content = question, responseStrategy = ResponseStrategy.SIMPLE)
-    }
-
-    private suspend fun generateScaffoldQuestion(
-        category: PhraseCategory,
-        recentContent: List<String>,
-        ctx: CognitiveContext,
-    ): String {
-        if (llmClient != null) {
-            try {
-                val knownContext = recentContent.joinToString("; ")
-                val categoryLabel = category.name.lowercase()
-                val systemPrompt = buildString {
-                    appendLine("You are a composed, warm assistant getting oriented with a new user.")
-                    appendLine("Ask one natural follow-up question about their $categoryLabel.")
-                    appendLine("Keep it to 1–2 sentences. Be conversational, not clinical or interrogative.")
-                    if (knownContext.isNotBlank()) {
-                        appendLine("You already know: $knownContext")
-                        appendLine("Weave that in to make the question feel like a real conversation.")
-                    }
-                    append("Do not repeat information you already have.")
-                }
-                val response = llmClient.complete(
-                    LlmRequest(
-                        prompt = "Ask about the user's $categoryLabel.",
-                        systemPrompt = systemPrompt,
-                        model = LlmModel.CLAUDE_SONNET_4_5,
-                        maxTokens = 100,
-                        timeoutMs = 10_000,
-                    )
-                )
-                if (response.text.isNotBlank()) return response.text
-            } catch (_: Exception) {
-                // Fall through to hardcoded fallback
-            }
-        }
-        return hardcodedQuestion(category)
-    }
-
-    private fun hardcodedQuestion(category: PhraseCategory): String = when (category) {
-        PhraseCategory.IDENTITY      -> "What's your role or what kind of work do you do?"
-        PhraseCategory.EXPERTISE     -> "What tools, languages, or technologies do you work with most?"
-        PhraseCategory.PREFERENCE    -> "Is there a particular way you prefer to work or communicate?"
-        PhraseCategory.ROUTINE       -> "What does a typical day or week look like for you?"
-        PhraseCategory.RELATIONSHIP  -> "Do you work with a team, or mostly independently?"
-        PhraseCategory.CONTEXT       -> "Is there anything important about your current situation I should know?"
+        ctx.branchResult = null
     }
 
     private suspend fun tryUpdateState(userId: String, state: ScaffoldState) {

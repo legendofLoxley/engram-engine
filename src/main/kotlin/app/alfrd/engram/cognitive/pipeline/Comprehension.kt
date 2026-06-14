@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
@@ -102,8 +103,8 @@ class Comprehension(
     private data class Tier1Result(val intent: IntentType, val confidence: Double, val ruleName: String)
 
     private fun classifyTier1(ctx: CognitiveContext, lower: String): Tier1Result {
-        // Rule 0 — Scaffold context-default: treat utterance as onboarding answer
-        if (ctx.scaffoldState != null) return Tier1Result(IntentType.ONBOARDING, 0.95, "scaffold_context_default")
+        // Rule 0 — Active scaffold question: treat utterance as onboarding answer
+        if ((ctx.scaffoldState as? ScaffoldState)?.activeScaffoldQuestion != null) return Tier1Result(IntentType.ONBOARDING, 0.95, "scaffold_context_default")
 
         // Rule 1 — Social / phatic
         if (isSocial(lower)) return Tier1Result(IntentType.SOCIAL, 0.90, "social_phatic")
@@ -123,10 +124,7 @@ class Comprehension(
         // Rule 5 — Question (interrogative or trailing "?")
         if (isQuestion(ctx.utterance.trim(), lower)) return Tier1Result(IntentType.QUESTION, 0.70, "question_interrogative")
 
-        // Rule 6 — Onboarding fallback during active onboarding session
-        if (ctx.trustPhase != null) return Tier1Result(IntentType.ONBOARDING, 0.60, "onboarding_fallback")
-
-        // Rule 7 — Ambiguous
+        // Rule 6 — Ambiguous
         return Tier1Result(IntentType.AMBIGUOUS, 0.30, "ambiguous")
     }
 
