@@ -26,7 +26,8 @@ class FirstSessionHandlerTest {
      * the overridden methods delegate to the parent, so the `db` field is never used.
      */
     @Suppress("UNCHECKED_CAST")
-    private class FakeUserGraphService(        private val userRecord: UserGraphService.UserRecord? = UserGraphService.UserRecord(
+    private class FakeUserGraphService(
+        private val userRecord: UserGraphService.UserRecord? = UserGraphService.UserRecord(
             uid = "user-uid-1", email = "alice@example.com", username = "Alice",
         ),
         private val invitedEdge: UserGraphService.InvitedEdgeRecord? = UserGraphService.InvitedEdgeRecord(
@@ -36,12 +37,14 @@ class FirstSessionHandlerTest {
             timestamp           = 1_000_000L,
         ),
         private val selectedEdges: Boolean = false,
+        private val verifiedEdge: Boolean = false,
         val verifiedEdgeWrites: MutableList<String> = mutableListOf(),
     ) : UserGraphService(null) {
 
         override fun findUserByEmail(email: String): UserRecord? = userRecord
         override fun findInvitedEdgeFromJacob(userId: String): InvitedEdgeRecord? = invitedEdge
         override fun hasSelectedEdges(userId: String): Boolean = selectedEdges
+        override fun hasVerifiedEdge(userEmail: String): Boolean = verifiedEdge
         override fun writeVerifiedEdge(userId: String, timestamp: Long) {
             verifiedEdgeWrites.add(userId)
         }
@@ -90,6 +93,17 @@ class FirstSessionHandlerTest {
         val handler = buildHandler(graphService = FakeUserGraphService(selectedEdges = true))
         val result  = handler.detectFirstSession("user-with-history", "alice@example.com")
         assertFalse(result.isFirstSession)
+    }
+
+    @Test
+    fun `detectFirstSession returns false and pre-loads invitedEdge for VERIFIED user with no SELECTED edges`() = runTest {
+        val handler = buildHandler(
+            graphService = FakeUserGraphService(selectedEdges = false, verifiedEdge = true),
+        )
+        val result = handler.detectFirstSession("verified-user", "alice@example.com")
+        assertFalse(result.isFirstSession)
+        // invitedEdge pre-loaded so warm-intro can use opening_context
+        assertNotNull(result.invitedEdge)
     }
 
     @Test

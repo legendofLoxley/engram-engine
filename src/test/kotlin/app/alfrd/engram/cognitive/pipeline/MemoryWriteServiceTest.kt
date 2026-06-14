@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MemoryWriteService — async write path tests
+// MemoryWriteService - async write path tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -26,11 +26,11 @@ class MemoryWriteServiceTest {
     // ── captureUtterance is non-suspending and returns immediately ─────────────
 
     @Test
-    fun `captureUtterance is non-blocking — function is not suspend`() {
+    fun `captureUtterance is non-blocking - function is not suspend`() {
         // If this compiles and is called from a non-suspend context it proves the signature
         val engram = InMemoryEngramClient()
         val service = MemoryWriteService(engram, TestScope())
-        // Called directly without runTest — must compile and not throw
+        // Called directly without runTest - must compile and not throw
         service.captureUtterance(
             utterance        = "I build Android apps.",
             userId           = "user-1",
@@ -69,7 +69,7 @@ class MemoryWriteServiceTest {
 
     @Test
     fun `write failure does not propagate to caller`() = runTest {
-        // ThrowingEngramClient always throws from decompose — simulates network failure
+        // ThrowingEngramClient always throws from decompose - simulates network failure
         val delegate = InMemoryEngramClient()
         val throwingEngram = object : EngramClient by delegate {
             override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> =
@@ -85,7 +85,7 @@ class MemoryWriteServiceTest {
             turnIndex        = 0,
             scaffoldCategory = null,
         )
-        advanceUntilIdle() // drives the launch — exception is caught internally
+        advanceUntilIdle() // drives the launch - exception is caught internally
     }
 
     // ── ingest failure also does not propagate ─────────────────────────────────
@@ -193,7 +193,7 @@ class MemoryWriteServiceTest {
         advanceUntilIdle()
 
         val state = engram.getScaffoldState("user-6")
-        // Should still be exactly the same set — no duplicates
+        // Should still be exactly the same set - no duplicates
         assertEquals(setOf(PhraseCategory.IDENTITY), state.answeredCategories)
     }
 
@@ -214,7 +214,7 @@ class MemoryWriteServiceTest {
 
         branch.execute(ctx)
 
-        // Response is set immediately — phrases not yet ingested (async not driven yet)
+        // Response is set immediately - phrases not yet ingested (async not driven yet)
         assertTrue(ctx.branchResult != null, "Branch should set a result immediately")
         assertTrue(engram.allPhrases().isEmpty(), "Phrases should not be ingested before advanceUntilIdle")
 
@@ -246,27 +246,27 @@ class MemoryWriteServiceTest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InMemoryEngramClient — contrastive marker splitting tests
+// InMemoryEngramClient - contrastive marker splitting tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ContrastiveDecomposeTest {
 
     @Test
-    fun `contrastive marker — but — splits into two phrases`() = runTest {
+    fun `contrastive marker - but - splits into two phrases`() = runTest {
         val client     = InMemoryEngramClient()
         val candidates = client.decompose("I like React but I think Vue is better.", emptyList())
         assertEquals(2, candidates.size, "Expected 2 candidates for contrasted sentence, got: ${candidates.map { it.content }}")
     }
 
     @Test
-    fun `contrastive marker — however — splits into two phrases`() = runTest {
+    fun `contrastive marker - however - splits into two phrases`() = runTest {
         val client     = InMemoryEngramClient()
         val candidates = client.decompose("I enjoy deep work however interruptions are common.", emptyList())
         assertEquals(2, candidates.size)
     }
 
     @Test
-    fun `contrastive marker — although — splits into two phrases`() = runTest {
+    fun `contrastive marker - although - splits into two phrases`() = runTest {
         val client     = InMemoryEngramClient()
         val candidates = client.decompose("I prefer Kotlin although I also write Python.", emptyList())
         assertEquals(2, candidates.size)

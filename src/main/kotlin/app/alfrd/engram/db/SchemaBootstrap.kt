@@ -125,6 +125,7 @@ object SchemaBootstrap {
                 et.createProperty("trustPhase", Type.STRING)
                 et.createProperty("engagementIntent", Type.STRING)
                 et.createProperty("tier", Type.INTEGER)
+                et.createProperty("openingContext", Type.STRING)
             }
 
             ensureEdge(schema, "QUOTES") { et ->
@@ -166,6 +167,7 @@ object SchemaBootstrap {
             ensureProperty(schema, "INVITED", "trustPhase",          Type.STRING)
             ensureProperty(schema, "INVITED", "engagementIntent",    Type.STRING)
             ensureProperty(schema, "INVITED", "tier",                Type.INTEGER)
+            ensureProperty(schema, "INVITED", "openingContext",      Type.STRING)
 
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")

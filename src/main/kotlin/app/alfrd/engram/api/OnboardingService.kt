@@ -24,6 +24,7 @@ data class InviteeManifest(
     val relationshipContext: String,
     val trustPhase: String,
     val engagementIntent: String,
+    val openingContext: String? = null,
     val personalPhrases: List<PhraseInput> = emptyList(),
     val globalPhrases: List<PhraseInput> = emptyList(),
 )
@@ -109,6 +110,7 @@ class OnboardingService(private val db: Database) {
                     set("relationshipContext", manifest.relationshipContext)
                     set("trustPhase", manifest.trustPhase)
                     set("engagementIntent", manifest.engagementIntent)
+                    manifest.openingContext?.let { set("openingContext", it) }
                     set("tier", 1)
                     set("resultingTier", 1)
                     set("timestamp", now)
