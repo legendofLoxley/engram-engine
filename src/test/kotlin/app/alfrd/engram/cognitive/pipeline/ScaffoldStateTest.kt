@@ -76,21 +76,6 @@ class ScaffoldStatePersistenceTest {
     }
 
     @Test
-    fun `PUT persists activeScaffoldQuestion, null clears it`() {
-        val userId = "active-question-user"
-
-        // Set a question
-        store.upsert(userId, store.get(userId).copy(
-            activeScaffoldQuestion = "What is your role?",
-        ))
-        assertEquals("What is your role?", store.get(userId).activeScaffoldQuestion)
-
-        // Clear it
-        store.upsert(userId, store.get(userId).copy(activeScaffoldQuestion = null))
-        assertNull(store.get(userId).activeScaffoldQuestion)
-    }
-
-    @Test
     fun `multiple answered categories are all persisted`() {
         val userId = "multi-category-user"
 
@@ -113,10 +98,9 @@ class ScaffoldStatePersistenceTest {
         SchemaBootstrap.bootstrap(db1.getDatabase())
         val store1 = ScaffoldStateStore(db1.getDatabase())
         store1.upsert("restart-user", store1.get("restart-user").copy(
-            trustPhase             = "WORKING_RHYTHM",
-            answeredCategories     = setOf("IDENTITY", "EXPERTISE"),
-            activeScaffoldQuestion = "What tools do you use?",
-            sessionCount           = 3,
+            trustPhase         = "WORKING_RHYTHM",
+            answeredCategories = setOf("IDENTITY", "EXPERTISE"),
+            sessionCount       = 3,
         ))
         db1.close()
 
@@ -130,7 +114,6 @@ class ScaffoldStatePersistenceTest {
 
         assertEquals("WORKING_RHYTHM", state.trustPhase)
         assertEquals(setOf("IDENTITY", "EXPERTISE"), state.answeredCategories)
-        assertEquals("What tools do you use?", state.activeScaffoldQuestion)
         assertEquals(3, state.sessionCount)
     }
 
@@ -227,9 +210,8 @@ class HttpEngramClientScaffoldTest {
         )
 
         val state = app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState(
-            trustPhase             = 1,
-            answeredCategories     = setOf(PhraseCategory.IDENTITY),
-            activeScaffoldQuestion = "What do you do for work?",
+            trustPhase         = 1,
+            answeredCategories = setOf(PhraseCategory.IDENTITY),
         )
         client().updateScaffoldState("u1", state)
 

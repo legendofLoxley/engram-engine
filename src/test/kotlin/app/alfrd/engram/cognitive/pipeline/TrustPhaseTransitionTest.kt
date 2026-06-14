@@ -1,7 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
@@ -10,10 +9,6 @@ import app.alfrd.engram.cognitive.pipeline.selection.SelectionScorer
 import app.alfrd.engram.model.OutcomeEdge
 import app.alfrd.engram.model.ResponsePhrase
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -254,42 +249,41 @@ class TrustPhaseTransitionTest {
         assertSame(TransitionDecision.NoChange, decision)
     }
 
-    // ── 5. Amendment does not trigger spurious transitions ────────────────────
+    // ── 6. Query respects phase ───────────────────────────────────────────────
 
     @Test
-    fun `amending an already-answered category does not re-trigger transitions`() = runTest {
-        val dispatcher = StandardTestDispatcher()
-        val scope      = TestScope(dispatcher)
-        val engram     = InMemoryEngramClient()
-        val svc        = service(engram)
-        val userId     = "user-amend-1"
-
-        // User is already at WORKING_RHYTHM with IDENTITY answered
-        engram.updateScaffoldState(userId, ScaffoldState(
-            trustPhase         = 2,
-            answeredCategories = setOf(PhraseCategory.IDENTITY, PhraseCategory.EXPERTISE, PhraseCategory.PREFERENCE),
-        ))
-
-        val writeService = MemoryWriteService(engram, scope, svc)
-
-        // Capture with IDENTITY — category already answered → no state change, no transition eval
-        writeService.captureUtterance(
-            utterance        = "I'm still a software engineer.",
-            userId           = userId,
-            sessionId        = "s1",
-            turnIndex        = 5,
-            scaffoldCategory = "IDENTITY",
+    fun `ORIENTATION meet-you phrase scores 1_0 contextualFit for brand-new sessionCount=0 user`() {
+        val newUserCtx = CognitiveContext(
+            utterance    = "",
+            sessionId    = "s1",
+            userId       = "u1",
+            trustPhase   = "ORIENTATION",
+            sessionCount = 0,
         )
-        scope.advanceUntilIdle()
-
-        val after = engram.getScaffoldState(userId)
-        // Phase must not have changed
-        assertEquals(2, after.trustPhase, "Phase should remain WORKING_RHYTHM after amendment")
-        // phaseTransitions must not have grown
-        assertTrue(after.phaseTransitions.isEmpty(), "No transitions expected after amendment")
+        val meetYouPhrase = phrase(phaseAffinity = setOf("ORIENTATION")).copy(
+            text     = "Good to meet you. I'd like to get oriented so I can be useful quickly.",
+            category = "GREETING",
+        )
+        val score = SelectionScorer.contextualFit(meetYouPhrase, newUserCtx)
+        assertEquals(1.0, score, 0.001, "ORIENTATION meet-you phrase must score 1.0 contextualFit for sessionCount=0")
     }
 
-    // ── 6. Query respects phase ───────────────────────────────────────────────
+    @Test
+    fun `ORIENTATION meet-you phrase scores 0_0 contextualFit for returning user`() {
+        val returningCtx = CognitiveContext(
+            utterance    = "",
+            sessionId    = "s1",
+            userId       = "u1",
+            trustPhase   = "WORKING_RHYTHM",
+            sessionCount = 5,
+        )
+        val meetYouPhrase = phrase(phaseAffinity = setOf("ORIENTATION")).copy(
+            text     = "Good to meet you. I'd like to get oriented so I can be useful quickly.",
+            category = "GREETING",
+        )
+        val score = SelectionScorer.contextualFit(meetYouPhrase, returningCtx)
+        assertEquals(0.0, score, 0.001, "ORIENTATION meet-you phrase must score 0.0 contextualFit for returning user")
+    }
 
     @Test
     fun `ORIENTATION-only phrase scores 0_3 adjacent when user is in WORKING_RHYTHM`() {
@@ -457,117 +451,4 @@ class TrustPhaseTransitionTest {
         assertEquals(1, after.phaseTransitions.size, "Second apply must not add a duplicate transition record")
     }
 
-    // ── 10. Concurrent writes ─────────────────────────────────────────────────
-
-    @Test
-    fun `concurrent captureUtterance calls on same user do not double-transition`() = runTest {
-        val dispatcher = StandardTestDispatcher()
-        val scope      = TestScope(dispatcher)
-        val engram     = InMemoryEngramClient()
-        val svc        = service(engram)
-        val userId     = "user-concurrent-1"
-
-        // Seed state: 2 categories answered already; adding PREFERENCE will make 3 (IDENTITY present)
-        engram.updateScaffoldState(userId, ScaffoldState(
-            trustPhase         = 1,
-            answeredCategories = setOf(PhraseCategory.IDENTITY, PhraseCategory.EXPERTISE),
-        ))
-
-        val writeService = MemoryWriteService(engram, scope, svc)
-
-        // Two concurrent captures of the same new category
-        scope.launch {
-            writeService.captureUtterance(
-                utterance        = "I prefer remote work.",
-                userId           = userId,
-                sessionId        = "s1",
-                turnIndex        = 1,
-                scaffoldCategory = "PREFERENCE",
-            )
-        }
-        scope.launch {
-            writeService.captureUtterance(
-                utterance        = "I prefer async communication.",
-                userId           = userId,
-                sessionId        = "s1",
-                turnIndex        = 2,
-                scaffoldCategory = "PREFERENCE",
-            )
-        }
-
-        scope.advanceUntilIdle()
-
-        val after = engram.getScaffoldState(userId)
-        assertEquals(2, after.trustPhase, "Phase should be WORKING_RHYTHM after concurrent advance")
-        // Even if both coroutines ran, idempotency must ensure exactly one transition record
-        assertEquals(
-            1, after.phaseTransitions.size,
-            "Concurrent transitions must result in exactly one phaseTransitions record, got: ${after.phaseTransitions.size}",
-        )
-    }
-
-    // ── End-to-end: MemoryWriteService drives advancement via transition service ──
-
-    @Test
-    fun `MemoryWriteService advances phase after new category triggers criteria`() = runTest {
-        val dispatcher = StandardTestDispatcher()
-        val scope      = TestScope(dispatcher)
-        val engram     = InMemoryEngramClient()
-        val svc        = service(engram)
-        val userId     = "user-e2e-1"
-
-        // Pre-load two categories
-        engram.updateScaffoldState(userId, ScaffoldState(
-            trustPhase         = 1,
-            answeredCategories = setOf(PhraseCategory.IDENTITY, PhraseCategory.EXPERTISE),
-        ))
-
-        val writeService = MemoryWriteService(engram, scope, svc)
-
-        // Adding PREFERENCE should cross the 3-category + foundational threshold
-        writeService.captureUtterance(
-            utterance        = "I prefer pair programming.",
-            userId           = userId,
-            sessionId        = "s1",
-            turnIndex        = 3,
-            scaffoldCategory = "PREFERENCE",
-        )
-
-        scope.advanceUntilIdle()
-
-        val after = engram.getScaffoldState(userId)
-        assertEquals(2, after.trustPhase, "Phase should advance to WORKING_RHYTHM after threshold met")
-        assertEquals(1, after.phaseTransitions.size)
-    }
-
-    @Test
-    fun `MemoryWriteService does not advance phase when threshold not met`() = runTest {
-        val dispatcher = StandardTestDispatcher()
-        val scope      = TestScope(dispatcher)
-        val engram     = InMemoryEngramClient()
-        val svc        = service(engram)
-        val userId     = "user-e2e-2"
-
-        engram.updateScaffoldState(userId, ScaffoldState(
-            trustPhase         = 1,
-            answeredCategories = setOf(PhraseCategory.IDENTITY),
-        ))
-
-        val writeService = MemoryWriteService(engram, scope, svc)
-
-        // Only one category — does not meet threshold of 3
-        writeService.captureUtterance(
-            utterance        = "I prefer Kotlin.",
-            userId           = userId,
-            sessionId        = "s1",
-            turnIndex        = 2,
-            scaffoldCategory = "EXPERTISE",
-        )
-
-        scope.advanceUntilIdle()
-
-        val after = engram.getScaffoldState(userId)
-        assertEquals(1, after.trustPhase, "Phase should remain ORIENTATION with only 2 categories")
-        assertTrue(after.phaseTransitions.isEmpty())
-    }
 }

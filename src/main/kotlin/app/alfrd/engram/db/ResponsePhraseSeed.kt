@@ -11,7 +11,7 @@ object ResponsePhraseSeed {
     private val json = Json { ignoreUnknownKeys = true }
 
     private val allPhases = listOf("ORIENTATION", "WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")
-    private val allBranches = listOf("SOCIAL", "ONBOARDING", "QUESTION", "TASK", "CORRECTION", "META", "CLARIFICATION")
+    private val allBranches = listOf("SOCIAL", "QUESTION", "TASK", "CORRECTION", "META", "CLARIFICATION")
 
     private data class SeedPhrase(
         val text: String,
@@ -217,31 +217,31 @@ object ResponsePhraseSeed {
 
         // ── Bridge (post-comprehension) ───────────────────────────────────────────
         SeedPhrase("Let me think about that...", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Give me a moment...", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("There\u2019s a lot here...", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Bear with me.", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Give me a second.", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Pulling that together...", "BRIDGE", "BRIDGE",
             listOf("TASK", "QUESTION", "META"), listOf("WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")),
         SeedPhrase("Let me work through that.", "BRIDGE", "BRIDGE",
             listOf("TASK", "QUESTION", "META"), allPhases),
         SeedPhrase("One moment.", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Thinking...", "BRIDGE", "BRIDGE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
 
         // ── Fillers ──────────────────────────────────────────────────────────
         SeedPhrase("Mm", "FILLER", "FIRST_RESPONSE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Right", "FILLER", "FIRST_RESPONSE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
         SeedPhrase("Okay...", "FILLER", "FIRST_RESPONSE",
-            listOf("SOCIAL", "QUESTION", "TASK", "META", "ONBOARDING"), allPhases),
+            listOf("SOCIAL", "QUESTION", "TASK", "META"), allPhases),
     )
 
     fun seed(db: Database) {

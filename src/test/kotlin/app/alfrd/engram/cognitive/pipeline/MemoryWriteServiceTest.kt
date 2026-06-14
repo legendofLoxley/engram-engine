@@ -4,8 +4,6 @@ import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
-import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
-import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -25,16 +23,14 @@ class MemoryWriteServiceTest {
 
     @Test
     fun `captureUtterance is non-blocking - function is not suspend`() {
-        // If this compiles and is called from a non-suspend context it proves the signature
         val engram = InMemoryEngramClient()
         val service = MemoryWriteService(engram, TestScope())
         // Called directly without runTest - must compile and not throw
         service.captureUtterance(
-            utterance        = "I build Android apps.",
-            userId           = "user-1",
-            sessionId        = "s1",
-            turnIndex        = 0,
-            scaffoldCategory = null,
+            utterance = "I build Android apps.",
+            userId    = "user-1",
+            sessionId = "s1",
+            turnIndex = 0,
         )
         // No exception, no suspend required → non-blocking ✓
     }
@@ -47,19 +43,16 @@ class MemoryWriteServiceTest {
         val service = MemoryWriteService(engram, this)
 
         service.captureUtterance(
-            utterance        = "I love Kotlin.",
-            userId           = "user-1",
-            sessionId        = "s1",
-            turnIndex        = 1,
-            scaffoldCategory = null,
+            utterance = "I love Kotlin.",
+            userId    = "user-1",
+            sessionId = "s1",
+            turnIndex = 1,
         )
 
-        // Before driving the scheduler the phrase list is still empty
         assertTrue(engram.allPhrases().isEmpty(), "Expected no phrases before coroutine runs")
 
         advanceUntilIdle()
 
-        // After driving idle the decompose+ingest coroutine has completed
         assertTrue(engram.allPhrases().isNotEmpty(), "Expected phrase to be ingested after advanceUntilIdle")
     }
 
@@ -67,7 +60,6 @@ class MemoryWriteServiceTest {
 
     @Test
     fun `write failure does not propagate to caller`() = runTest {
-        // ThrowingEngramClient always throws from decompose - simulates network failure
         val delegate = InMemoryEngramClient()
         val throwingEngram = object : EngramClient by delegate {
             override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> =
@@ -75,15 +67,13 @@ class MemoryWriteServiceTest {
         }
         val service = MemoryWriteService(throwingEngram, this)
 
-        // Must not throw, even after idle
         service.captureUtterance(
-            utterance        = "anything",
-            userId           = "user-1",
-            sessionId        = "s1",
-            turnIndex        = 0,
-            scaffoldCategory = null,
+            utterance = "anything",
+            userId    = "user-1",
+            sessionId = "s1",
+            turnIndex = 0,
         )
-        advanceUntilIdle() // drives the launch - exception is caught internally
+        advanceUntilIdle()
     }
 
     // ── ingest failure also does not propagate ─────────────────────────────────
@@ -98,147 +88,13 @@ class MemoryWriteServiceTest {
         val service = MemoryWriteService(throwingEngram, this)
 
         service.captureUtterance(
-            utterance        = "I prefer async patterns.",
-            userId           = "user-2",
-            sessionId        = "s1",
-            turnIndex        = 1,
-            scaffoldCategory = null,
+            utterance = "I prefer async patterns.",
+            userId    = "user-2",
+            sessionId = "s1",
+            turnIndex = 1,
         )
         advanceUntilIdle()
         // No exception thrown → pass
-    }
-
-    // ── scaffold state updated after successful write ──────────────────────────
-
-    @Test
-    fun `scaffold state updated after successful ingestion when scaffoldCategory provided`() = runTest {
-        val engram  = InMemoryEngramClient()
-        val service = MemoryWriteService(engram, this)
-
-        service.captureUtterance(
-            utterance        = "I'm a backend engineer.",
-            userId           = "user-3",
-            sessionId        = "s1",
-            turnIndex        = 1,
-            scaffoldCategory = "IDENTITY",
-        )
-
-        advanceUntilIdle()
-
-        val state = engram.getScaffoldState("user-3")
-        assertTrue(
-            PhraseCategory.IDENTITY in state.answeredCategories,
-            "IDENTITY should be in answered categories after async write, got: ${state.answeredCategories}",
-        )
-    }
-
-    @Test
-    fun `scaffold state not updated when scaffoldCategory is null`() = runTest {
-        val engram  = InMemoryEngramClient()
-        val service = MemoryWriteService(engram, this)
-
-        service.captureUtterance(
-            utterance        = "remind me to review the PR",
-            userId           = "user-4",
-            sessionId        = "s1",
-            turnIndex        = 2,
-            scaffoldCategory = null,
-        )
-
-        advanceUntilIdle()
-
-        val state = engram.getScaffoldState("user-4")
-        assertTrue(state.answeredCategories.isEmpty(), "No scaffold category should be marked for task_intent")
-    }
-
-    @Test
-    fun `unknown scaffoldCategory string is silently ignored`() = runTest {
-        val engram  = InMemoryEngramClient()
-        val service = MemoryWriteService(engram, this)
-
-        service.captureUtterance(
-            utterance        = "some input",
-            userId           = "user-5",
-            sessionId        = "s1",
-            turnIndex        = 0,
-            scaffoldCategory = "INVALID_CATEGORY_XYZ",
-        )
-
-        advanceUntilIdle()
-
-        val state = engram.getScaffoldState("user-5")
-        assertTrue(state.answeredCategories.isEmpty(), "Unknown category should not modify scaffold state")
-    }
-
-    @Test
-    fun `scaffold state not duplicated when category already present`() = runTest {
-        val engram  = InMemoryEngramClient()
-        // Pre-seed the state with IDENTITY already answered
-        engram.updateScaffoldState(
-            "user-6",
-            ScaffoldState(answeredCategories = setOf(PhraseCategory.IDENTITY))
-        )
-        val service = MemoryWriteService(engram, this)
-
-        service.captureUtterance(
-            utterance        = "I'm still a backend engineer.",
-            userId           = "user-6",
-            sessionId        = "s1",
-            turnIndex        = 3,
-            scaffoldCategory = "IDENTITY",
-        )
-
-        advanceUntilIdle()
-
-        val state = engram.getScaffoldState("user-6")
-        // Should still be exactly the same set - no duplicates
-        assertEquals(setOf(PhraseCategory.IDENTITY), state.answeredCategories)
-    }
-
-    // ── OnboardingBranch async path ────────────────────────────────────────────
-
-    @Test
-    fun `OnboardingBranch with MemoryWriteService captures passively and returns null branchResult`() = runTest {
-        val engram  = InMemoryEngramClient()
-        // Seed an active scaffold question so the branch goes to the passive capture path
-        engram.updateScaffoldState(
-            "user-7",
-            ScaffoldState(activeScaffoldQuestion = OnboardingBranch.OPENER),
-        )
-        val service = MemoryWriteService(engram, this)
-        val branch  = OnboardingBranch(engram, service)
-        val ctx     = CognitiveContext(utterance = "I build mobile apps.", sessionId = "s1", userId = "user-7")
-
-        branch.execute(ctx)
-
-        // Passive capture: no branch result, phrases not yet ingested (async not driven yet)
-        assertNull(ctx.branchResult, "Passive onboarding turn must not produce a branch result")
-        assertTrue(engram.allPhrases().isEmpty(), "Phrases should not be ingested before advanceUntilIdle")
-
-        advanceUntilIdle()
-
-        // After driving the scheduler, ingestion has completed
-        assertTrue(engram.allPhrases().isNotEmpty(), "Phrases should be ingested after advanceUntilIdle")
-    }
-
-    // ── TaskBranch async path ─────────────────────────────────────────────────
-
-    @Test
-    fun `TaskBranch with MemoryWriteService captures intent asynchronously`() = runTest {
-        val engram  = InMemoryEngramClient()
-        val service = MemoryWriteService(engram, this)
-        val branch  = TaskBranch(engram, service)
-        val ctx     = CognitiveContext(utterance = "Set a reminder for tomorrow.", sessionId = "s1", userId = "user-8")
-
-        branch.execute(ctx)
-
-        // Response is set, but ingestion is still pending
-        assertEquals("I've noted that — task execution is coming soon.", ctx.branchResult?.content)
-        assertTrue(engram.allPhrases().isEmpty(), "Phrases should not be ingested before advanceUntilIdle")
-
-        advanceUntilIdle()
-
-        assertTrue(engram.allPhrases().isNotEmpty(), "Phrases should be ingested after advanceUntilIdle")
     }
 }
 

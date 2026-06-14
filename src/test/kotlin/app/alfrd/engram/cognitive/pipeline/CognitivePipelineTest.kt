@@ -1,6 +1,5 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
@@ -116,33 +115,6 @@ class ComprehensionTest {
         assertEquals(0.85, ctx.intentConfidence)
     }
 
-    @Test
-    fun `Rule 0 scaffold fires before Rule 1 social when active scaffold question is set`() = runTest {
-        // A typical social utterance should be classified as ONBOARDING only when
-        // an activeScaffoldQuestion is present, confirming Rule 0 requires a pending question.
-        val ctx = CognitiveContext(
-            utterance     = "Hey",
-            sessionId     = "s",
-            userId        = "u",
-            scaffoldState = ScaffoldState(activeScaffoldQuestion = "What are you working on?"),
-        )
-        comprehension.evaluate(ctx)
-        assertEquals(IntentType.ONBOARDING, ctx.intent)
-        assertEquals(0.95, ctx.intentConfidence)
-    }
-
-    @Test
-    fun `Rule 0 does NOT fire when scaffoldState has no active question`() = runTest {
-        // Scaffold state existing without an activeScaffoldQuestion must not override classification.
-        val ctx = CognitiveContext(
-            utterance     = "Hey",
-            sessionId     = "s",
-            userId        = "u",
-            scaffoldState = ScaffoldState(activeScaffoldQuestion = null),
-        )
-        comprehension.evaluate(ctx)
-        assertEquals(IntentType.SOCIAL, ctx.intent, "No active question — should route to SOCIAL, not ONBOARDING")
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

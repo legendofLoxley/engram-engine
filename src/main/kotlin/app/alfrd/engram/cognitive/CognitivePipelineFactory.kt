@@ -49,7 +49,7 @@ object CognitivePipelineFactory {
             engramClient        = engramClient,
             llmClient           = llmClient,
             selectionService    = selectionService,
-            memoryWriteService  = MemoryWriteService(engramClient, transitionService = transitionService),
+            memoryWriteService  = MemoryWriteService(engramClient),
             transitionService   = transitionService,
             firstSessionHandler = firstSessionHandler,
         )

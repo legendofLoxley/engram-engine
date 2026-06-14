@@ -9,7 +9,6 @@ import kotlinx.coroutines.withContext
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
-import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.pipeline.scaffold.TransitionDecision
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
@@ -33,10 +32,10 @@ import java.util.logging.Logger
  * Lifecycle per utterance:
  *   1. Attention.evaluate
  *   2. If not PROCESS → return empty response
- *   3. Load scaffold state → populate ctx.scaffoldState to activate Comprehension Rule 0
- *   4. Comprehension.evaluate
- *   5. Router.route → Branch
- *   6. Branch.execute
+ *   3. Comprehension.evaluate
+ *   4. Router.route → Branch
+ *   5. Branch.execute
+ *   6. Universal memory ingestion (fire-and-forget via MemoryWriteService)
  *   7. Expression.evaluate
  *   8. onCycleEnd on all stages
  *
@@ -124,8 +123,6 @@ open class CognitivePipeline(
         val greeting: String,
         val phraseId: String,
         val sessionId: String,
-        /** Scaffold question to append for ORIENTATION users with < 3 answered categories. Null otherwise. */
-        val scaffoldQuestion: String? = null,
     )
 
     /**
@@ -356,10 +353,9 @@ open class CognitivePipeline(
                 "scaffoldTrustPhase=${scaffoldState?.trustPhase} firstSessionState=$firstSessionState"
             )
             return InitResponse(
-                greeting         = warmIntroText,
-                phraseId         = "invited-warm-intro",
-                sessionId        = sessionId,
-                scaffoldQuestion = resolveScaffoldQuestion(scaffoldState),
+                greeting  = warmIntroText,
+                phraseId  = "invited-warm-intro",
+                sessionId = sessionId,
             )
         }
 
@@ -401,10 +397,9 @@ open class CognitivePipeline(
                 "firstSessionState=$firstSessionState"
             )
             InitResponse(
-                greeting         = greeting,
-                phraseId         = phraseId,
-                sessionId        = sessionId,
-                scaffoldQuestion = resolveScaffoldQuestion(scaffoldState),
+                greeting  = greeting,
+                phraseId  = phraseId,
+                sessionId = sessionId,
             )
         } catch (_: Exception) {
             InitResponse(
@@ -412,42 +407,6 @@ open class CognitivePipeline(
                 phraseId  = "fallback",
                 sessionId = sessionId,
             )
-        }
-    }
-
-    /**
-     * Returns the scaffold question to pair with the INIT greeting, or null.
-     *
-     * Rules:
-     *   - ORIENTATION phase only
-     *   - Fewer than 3 answered categories
-     *   - Uses the active question if one exists; otherwise derives from the next
-     *     uncovered category (or the opener question for a brand-new user)
-     */
-    private fun resolveScaffoldQuestion(scaffoldState: ScaffoldState?): String? {
-        if (scaffoldState == null) return null
-        if (scaffoldState.trustPhase != 1) return null         // Not ORIENTATION
-        if (scaffoldState.answeredCategories.size >= 3) return null
-
-        // Return the question that was active when the user last left
-        scaffoldState.activeScaffoldQuestion?.let { return it }
-
-        // First-ever session — no question has been stored yet
-        if (scaffoldState.answeredCategories.isEmpty()) {
-            return "What are you working on right now?"
-        }
-
-        // Has some answered categories but no active question — derive the next one
-        val next = OnboardingBranch.SCAFFOLD_PRIORITY.firstOrNull { it !in scaffoldState.answeredCategories }
-        return next?.let { category ->
-            when (category) {
-                PhraseCategory.IDENTITY     -> "What are you working on right now?"
-                PhraseCategory.EXPERTISE    -> "What tools or technologies do you work with most?"
-                PhraseCategory.PREFERENCE   -> "Is there a particular way you prefer to work?"
-                PhraseCategory.ROUTINE      -> "What does a typical day look like for you?"
-                PhraseCategory.RELATIONSHIP -> "Do you work with a team, or mostly independently?"
-                PhraseCategory.CONTEXT      -> "Is there anything important about your current situation I should know?"
-            }
         }
     }
 
@@ -506,31 +465,15 @@ open class CognitivePipeline(
             )
         }
 
-        // Load scaffold state before Comprehension so Rule 0 fires correctly on subsequent turns.
-        // An active scaffold question means the user is mid-onboarding and any utterance is an answer.
-        val memoryStartNs = if (debug) System.nanoTime() else 0L
-        val scaffoldState = try {
-            val state = engramClient.getScaffoldState(userId)
-            if (state.activeScaffoldQuestion != null) state else null
-        } catch (_: Exception) {
-            null
-        }
-        if (debug) {
-            memoryNs = System.nanoTime() - memoryStartNs
-            trace!!.latencyBreakdown.memoryMs =
-                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(memoryNs)
-        }
-
         val ctx = CognitiveContext(
-            utterance     = utterance,
-            sessionId     = sessionId,
-            roomId        = "foyer",
-            userId        = userId,
-            userEmail     = userId,
-            timestamp     = java.time.Instant.now(),
-            zoneId        = sessionZoneId,
-            scaffoldState = scaffoldState,
-            trace         = trace,
+            utterance = utterance,
+            sessionId = sessionId,
+            roomId    = "foyer",
+            userId    = userId,
+            userEmail = userId,
+            timestamp = java.time.Instant.now(),
+            zoneId    = sessionZoneId,
+            trace     = trace,
         )
 
         attention.evaluate(ctx)
@@ -566,6 +509,18 @@ open class CognitivePipeline(
         // ── Reason (Branch execution) ────────────────────────────────────────
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
+
+        // ── Universal memory ingestion ────────────────────────────────────────
+        // Every PROCESS turn is silently decomposed and ingested exactly once,
+        // independent of which branch handled it. Fire-and-forget — never blocks.
+        memoryWriteService?.captureUtterance(
+            utterance = utterance,
+            userId    = userId,
+            sessionId = sessionId,
+            turnIndex = ctx.priorUtterances.size,
+            sourceTag = "conversation",
+        )
+
         // Record pending outcome for the *next* turn's classification.
         // Only set when a phrase was actually selected — pure-reason branches leave this null.
         ctx.selectionResult?.let { result ->
@@ -655,20 +610,18 @@ open class CognitivePipeline(
     }
 
     private fun routeNameFor(intent: IntentType): String = when (intent) {
-        IntentType.SOCIAL      -> "short_circuit_social"
-        IntentType.ONBOARDING  -> "decompose_and_scaffold"
-        IntentType.QUESTION    -> "graph_augmented_answer"
-        IntentType.TASK        -> "task_accept"
-        IntentType.CORRECTION  -> "correction_branch"
-        IntentType.META        -> "meta_branch"
+        IntentType.SOCIAL                  -> "short_circuit_social"
+        IntentType.QUESTION                -> "graph_augmented_answer"
+        IntentType.TASK                    -> "task_accept"
+        IntentType.CORRECTION              -> "correction_branch"
+        IntentType.META                    -> "meta_branch"
         IntentType.CLARIFICATION,
-        IntentType.AMBIGUOUS   -> "clarification_branch"
+        IntentType.AMBIGUOUS               -> "clarification_branch"
     }
 
     private fun reasonModelInfo(branch: Branch): Pair<String?, String?> = when (branch) {
-        is QuestionBranch    -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
-        is OnboardingBranch  -> null to null
-        else                 -> null to null
+        is QuestionBranch -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
+        else              -> null to null
     }
 
     /**
