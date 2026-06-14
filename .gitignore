@@ -15,4 +15,5 @@ frontend/dist/
 frontend/.env
 # frontend/.env.production is intentionally committed — Supabase anon key is public by design
 
-.vscode/.kotlin/
+.vscode/
+.kotlin/
