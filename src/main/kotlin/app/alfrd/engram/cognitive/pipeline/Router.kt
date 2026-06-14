@@ -14,7 +14,7 @@ class Router(
 ) {
 
     fun route(intent: IntentType): Branch = when (intent) {
-        IntentType.ONBOARDING            -> OnboardingBranch(engramClient, llmClient, memoryWriteService)
+        IntentType.ONBOARDING            -> OnboardingBranch(engramClient, memoryWriteService)
         IntentType.SOCIAL                -> SocialBranch(selectionService)
         IntentType.QUESTION              -> QuestionBranch(engramClient, llmClient)
         IntentType.TASK                  -> TaskBranch(engramClient, memoryWriteService)

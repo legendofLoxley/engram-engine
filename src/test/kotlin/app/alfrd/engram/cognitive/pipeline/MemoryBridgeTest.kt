@@ -7,7 +7,6 @@ import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.cognitive.pipeline.memory.ScoredPhrase
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
-import app.alfrd.engram.cognitive.providers.LlmTimeoutError
 import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
@@ -29,10 +28,9 @@ class MemoryBridgeIntegrationTest {
         utterance: String,
         userId: String,
         engram: InMemoryEngramClient,
-        llm: TestLlmClient,
     ): String {
         val ctx = CognitiveContext(utterance = utterance, sessionId = "s1", userId = userId)
-        OnboardingBranch(engram, llm).execute(ctx)
+        OnboardingBranch(engram).execute(ctx)
         Expression().evaluate(ctx)
         return ctx.responseText
     }
@@ -42,9 +40,8 @@ class MemoryBridgeIntegrationTest {
     @Test
     fun `first onboarding turn returns the opener question`() = runTest {
         val engram = InMemoryEngramClient()
-        val llm = TestLlmClient { LlmResponse(text = "What is your role?", latencyMs = 0, retryCount = 0) }
 
-        val response = directOnboardingTurn("hi", "user-1", engram, llm)
+        val response = directOnboardingTurn("hi", "user-1", engram)
 
         assertTrue(
             OnboardingBranch.OPENER in response,
@@ -53,74 +50,72 @@ class MemoryBridgeIntegrationTest {
     }
 
     @Test
-    fun `second onboarding turn decomposes and ingests, returns next scaffold question`() = runTest {
+    fun `second onboarding turn passively ingests utterance and clears active question`() = runTest {
         val engram = InMemoryEngramClient()
-        val llm = TestLlmClient { LlmResponse(text = "What tools do you use?", latencyMs = 0, retryCount = 0) }
-        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
+        val pipeline = CognitivePipeline(engramClient = engram)
 
         // Turn 1 — bootstrap via direct branch call so active question is set
-        directOnboardingTurn("hi", "user-1", engram, llm)
+        directOnboardingTurn("hi", "user-1", engram)
 
-        // Turn 2 — full pipeline: Rule 0 fires because activeScaffoldQuestion is set
+        // Turn 2 — full pipeline: Rule 0 fires because activeScaffoldQuestion is set;
+        // branch captures silently and returns no result
         val response = pipeline.process("I'm a software engineer working on mobile apps.", "s1", "user-1")
 
         assertTrue(engram.allPhrases().isNotEmpty(), "Expected phrases to be ingested after turn 2")
-        assertTrue(response.isNotBlank(), "Expected a scaffold question in turn 2, got: $response")
-    }
-
-    @Test
-    fun `third onboarding turn covers a new category and advances scaffold`() = runTest {
-        val engram = InMemoryEngramClient()
-        var callCount = 0
-        val llm = TestLlmClient {
-            callCount++
-            LlmResponse(text = "Question $callCount", latencyMs = 0, retryCount = 0)
-        }
-        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
-
-        // Bootstrap turn 1
-        directOnboardingTurn("hi", "user-1", engram, llm)
-
-        // Turns 2 & 3 via full pipeline (Rule 0 active)
-        pipeline.process("I'm a software engineer.", "s1", "user-1")
-        pipeline.process("I use Kotlin and Python every day.", "s1", "user-1")
-
-        val state = engram.getScaffoldState("user-1")
-        assertTrue(
-            state.answeredCategories.isNotEmpty(),
-            "Expected at least one answered category after multiple turns",
+        assertTrue(response.isBlank(), "Expected no assistant response from passive onboarding turn")
+        assertNull(
+            engram.getScaffoldState("user-1").activeScaffoldQuestion,
+            "Expected activeScaffoldQuestion cleared after passive turn",
         )
     }
 
     @Test
-    fun `scaffold state tracks answered categories correctly`() = runTest {
+    fun `turn after passive onboarding routes normally once active question is cleared`() = runTest {
         val engram = InMemoryEngramClient()
-        val llm = TestLlmClient { LlmResponse(text = "Next question", latencyMs = 0, retryCount = 0) }
-        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
+        val pipeline = CognitivePipeline(engramClient = engram)
+
+        // Bootstrap turn 1 — sets activeScaffoldQuestion
+        directOnboardingTurn("hi", "user-1", engram)
+
+        // Turn 2 — passive capture clears activeScaffoldQuestion
+        pipeline.process("I'm a software engineer.", "s1", "user-1")
+
+        val stateAfterTurn2 = engram.getScaffoldState("user-1")
+        assertNull(stateAfterTurn2.activeScaffoldQuestion, "Active question should be cleared after passive turn")
+
+        // Turn 3 — with no activeScaffoldQuestion, Rule 0 does NOT fire; routes normally
+        // "I use Kotlin" doesn't start with an interrogative or imperative, so AMBIGUOUS
+        val response = pipeline.process("I use Kotlin and Python every day.", "s1", "user-1")
+        assertTrue(response.isNotBlank(), "Turn 3 should produce a response via normal routing, got blank")
+    }
+
+    @Test
+    fun `scaffold state active question cleared after passive capture turn`() = runTest {
+        val engram = InMemoryEngramClient()
+        val pipeline = CognitivePipeline(engramClient = engram)
 
         // Bootstrap turn 1 — active question will be set
-        directOnboardingTurn("hi", "user-1", engram, llm)
+        directOnboardingTurn("hi", "user-1", engram)
 
         val stateAfterOpener = engram.getScaffoldState("user-1")
         assertNotNull(stateAfterOpener.activeScaffoldQuestion, "Expected active question after opener turn")
 
-        // Turn 2 full pipeline — provide identity info
+        // Turn 2 full pipeline — passive capture clears the active question
         pipeline.process("I am a product designer.", "s1", "user-1")
 
         val stateAfterAnswer = engram.getScaffoldState("user-1")
-        assertTrue(
-            PhraseCategory.IDENTITY in stateAfterAnswer.answeredCategories,
-            "Expected IDENTITY in answered categories, got: ${stateAfterAnswer.answeredCategories}",
+        assertNull(
+            stateAfterAnswer.activeScaffoldQuestion,
+            "Expected activeScaffoldQuestion cleared after passive capture turn",
         )
     }
 
     @Test
     fun `Comprehension Rule 0 fires on second turn due to active scaffold question`() = runTest {
         val engram = InMemoryEngramClient()
-        val llm = TestLlmClient { LlmResponse(text = "Next question", latencyMs = 0, retryCount = 0) }
 
         // Bootstrap turn 1 to set active scaffold question
-        directOnboardingTurn("hi", "user-1", engram, llm)
+        directOnboardingTurn("hi", "user-1", engram)
 
         val state = engram.getScaffoldState("user-1")
         assertNotNull(state.activeScaffoldQuestion, "Expected active question to be set after turn 1")
@@ -204,18 +199,18 @@ class MemoryBridgeIntegrationTest {
     // ── LLM failure graceful degradation ─────────────────────────────────────
 
     @Test
-    fun `OnboardingBranch falls back to hardcoded question on LLM failure`() = runTest {
+    fun `OnboardingBranch passive turn ingests and returns blank response`() = runTest {
         val engram = InMemoryEngramClient()
-        val failingLlm = TestLlmClient { throw LlmTimeoutError("simulated timeout") }
 
-        // Bootstrap turn 1 — opener requires no LLM call
+        // Bootstrap turn 1 — sets activeScaffoldQuestion
         val ctx1 = CognitiveContext(utterance = "hi", sessionId = "s1", userId = "user-1")
-        OnboardingBranch(engram, failingLlm).execute(ctx1)
+        OnboardingBranch(engram).execute(ctx1)
 
-        // Turn 2 via failing LLM — should fall back to hardcoded question
-        val pipeline = CognitivePipeline(engramClient = engram, llmClient = failingLlm)
+        // Turn 2 via pipeline — passive capture; no response produced
+        val pipeline = CognitivePipeline(engramClient = engram)
         val response = pipeline.process("I'm a data scientist.", "s1", "user-1")
-        assertTrue(response.isNotBlank(), "Expected a non-blank fallback response")
+        assertTrue(response.isBlank(), "Expected blank response from passive onboarding turn")
+        assertTrue(engram.allPhrases().isNotEmpty(), "Expected utterance to be ingested silently")
     }
 
     @Test
@@ -374,58 +369,42 @@ class InMemoryEngramClientTest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unit tests — OnboardingBranch scaffold category progression
+// Unit tests — OnboardingBranch passive listener behaviour
 // ─────────────────────────────────────────────────────────────────────────────
 
 class OnboardingBranchTest {
 
     @Test
-    fun `asks about uncovered categories in priority order`() = runTest {
+    fun `passive turn captures utterance and returns null branchResult`() = runTest {
         val engram = InMemoryEngramClient()
-        // Pre-seed IDENTITY as answered; next should be EXPERTISE or later
         engram.updateScaffoldState(
             "user-1",
-            ScaffoldState(
-                answeredCategories = setOf(PhraseCategory.IDENTITY),
-                activeScaffoldQuestion = "dummy active question",
-            )
+            ScaffoldState(activeScaffoldQuestion = "What are you working on?"),
         )
 
-        val capturedPrompts = mutableListOf<String>()
-        val llm = TestLlmClient { req ->
-            capturedPrompts.add(req.prompt)
-            LlmResponse(text = "Mock question about ${req.prompt}", latencyMs = 0, retryCount = 0)
-        }
-
-        val branch = OnboardingBranch(engram, llm)
+        val branch = OnboardingBranch(engram)
         val ctx = CognitiveContext(
-            utterance = "Yes I am a designer",
+            utterance = "I build mobile apps",
             sessionId = "s1",
             userId = "user-1",
             scaffoldState = engram.getScaffoldState("user-1"),
         )
         branch.execute(ctx)
 
-        val questionText = ctx.branchResult?.content ?: ""
-        assertTrue(questionText.isNotBlank(), "Expected a scaffold question")
-        assertTrue(
-            capturedPrompts.any {
-                it.contains("expertise") || it.contains("preference") ||
-                    it.contains("routine") || it.contains("relationship") || it.contains("context")
-            },
-            "Expected LLM prompt to ask about a category after IDENTITY, got: $capturedPrompts",
+        assertNull(ctx.branchResult, "Passive turn must not produce a branch result")
+        assertTrue(engram.allPhrases().isNotEmpty(), "Utterance must be ingested via sync path")
+        assertNull(
+            engram.getScaffoldState("user-1").activeScaffoldQuestion,
+            "Active question must be cleared after passive turn",
         )
     }
 
     @Test
-    fun `hardcoded fallback questions cover all categories`() {
-        val branch = OnboardingBranch(InMemoryEngramClient(), null)
-        PhraseCategory.entries.forEach { cat ->
-            val question = branch.javaClass
-                .getDeclaredMethod("hardcodedQuestion", PhraseCategory::class.java)
-                .also { it.isAccessible = true }
-                .invoke(branch, cat) as String
-            assertTrue(question.isNotBlank(), "Expected a hardcoded question for $cat")
-        }
+    fun `SCAFFOLD_PRIORITY covers all PhraseCategory values`() {
+        assertEquals(
+            PhraseCategory.entries.toSet(),
+            OnboardingBranch.SCAFFOLD_PRIORITY.toSet(),
+            "SCAFFOLD_PRIORITY must include every PhraseCategory",
+        )
     }
 }

@@ -667,7 +667,7 @@ open class CognitivePipeline(
 
     private fun reasonModelInfo(branch: Branch): Pair<String?, String?> = when (branch) {
         is QuestionBranch    -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
-        is OnboardingBranch  -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
+        is OnboardingBranch  -> null to null
         else                 -> null to null
     }
 

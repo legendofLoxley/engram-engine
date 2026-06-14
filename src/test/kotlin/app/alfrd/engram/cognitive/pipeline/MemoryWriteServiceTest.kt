@@ -6,8 +6,6 @@ import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
-import app.alfrd.engram.cognitive.providers.LlmResponse
-import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -200,22 +198,21 @@ class MemoryWriteServiceTest {
     // ── OnboardingBranch async path ────────────────────────────────────────────
 
     @Test
-    fun `OnboardingBranch with MemoryWriteService does not block response on ingestion`() = runTest {
+    fun `OnboardingBranch with MemoryWriteService captures passively and returns null branchResult`() = runTest {
         val engram  = InMemoryEngramClient()
-        // Seed an active scaffold question so the branch goes to the "advance" path
+        // Seed an active scaffold question so the branch goes to the passive capture path
         engram.updateScaffoldState(
             "user-7",
             ScaffoldState(activeScaffoldQuestion = OnboardingBranch.OPENER),
         )
-        val llm     = TestLlmClient { LlmResponse(text = "What tools do you use?", latencyMs = 0, retryCount = 0) }
         val service = MemoryWriteService(engram, this)
-        val branch  = OnboardingBranch(engram, llm, service)
+        val branch  = OnboardingBranch(engram, service)
         val ctx     = CognitiveContext(utterance = "I build mobile apps.", sessionId = "s1", userId = "user-7")
 
         branch.execute(ctx)
 
-        // Response is set immediately - phrases not yet ingested (async not driven yet)
-        assertTrue(ctx.branchResult != null, "Branch should set a result immediately")
+        // Passive capture: no branch result, phrases not yet ingested (async not driven yet)
+        assertNull(ctx.branchResult, "Passive onboarding turn must not produce a branch result")
         assertTrue(engram.allPhrases().isEmpty(), "Phrases should not be ingested before advanceUntilIdle")
 
         advanceUntilIdle()
