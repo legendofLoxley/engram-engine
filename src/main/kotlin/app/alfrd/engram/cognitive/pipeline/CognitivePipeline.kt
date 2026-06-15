@@ -258,6 +258,13 @@ open class CognitivePipeline(
         timestamp: java.time.Instant = java.time.Instant.now(),
         userEmail: String = "",
     ): InitResponse {
+        // Ensure a User vertex exists for Supabase-direct signups (no-op for seeded users).
+        if (userEmail.isNotBlank()) {
+            firstSessionHandler?.userGraphService?.let { ugs ->
+                withContext(Dispatchers.IO) { ugs.findOrCreateUser(userEmail) }
+            }
+        }
+
         if (userEmail == "yardkup@gmail.com") {
             return InitResponse(
                 greeting  = "[debug] engram-engine ok · session=$sessionId",
@@ -270,13 +277,6 @@ open class CognitivePipeline(
             try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
         }
         sessionZoneId = zoneId
-
-        // Ensure a User vertex exists for Supabase-direct signups (no-op for seeded users).
-        if (userEmail.isNotBlank()) {
-            firstSessionHandler?.userGraphService?.let { ugs ->
-                withContext(Dispatchers.IO) { ugs.findOrCreateUser(userEmail) }
-            }
-        }
 
         val fallbackGreeting: () -> String = {
             val hour = java.time.LocalTime.now(zoneId ?: java.time.ZoneId.systemDefault()).hour
