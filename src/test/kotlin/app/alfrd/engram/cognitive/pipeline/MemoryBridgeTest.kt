@@ -148,6 +148,70 @@ class MemoryBridgeIntegrationTest {
         assertNotEquals(capturedEmails[0], capturedEmails[1], "Different users must produce different emails")
     }
 
+    // ── Recall-question routing ───────────────────────────────────────────────
+
+    @Test
+    fun `recall question with fact in graph returns that fact not the meta stub`() = runTest {
+        val engram = InMemoryEngramClient()
+        engram.ingest(
+            listOf(PhraseCandidate("My dog's name is Newton", "user", PhraseCategory.IDENTITY))
+        )
+        val llm = TestLlmClient { LlmResponse(text = "Your dog's name is Newton.", latencyMs = 0, retryCount = 0) }
+        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
+
+        val response = pipeline.process("What did I tell you my dog's name was?", "s1", "user-1")
+
+        assertFalse(
+            response == "Memory queries aren't available yet.",
+            "Recall question must not dead-end at the MetaBranch stub",
+        )
+        assertTrue(
+            "Newton" in response,
+            "Expected the graph fact in the response, got: $response",
+        )
+    }
+
+    @Test
+    fun `recall question against empty graph returns graceful no-data response not stub`() = runTest {
+        val engram = InMemoryEngramClient()
+        val llm = TestLlmClient {
+            LlmResponse(text = "I don't have that in my memory yet.", latencyMs = 0, retryCount = 0)
+        }
+        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
+
+        val response = pipeline.process("What did I tell you my dog's name was?", "s1", "user-1")
+
+        assertFalse(
+            response == "Memory queries aren't available yet.",
+            "Empty-graph recall must not produce the MetaBranch stub",
+        )
+        assertTrue(response.isNotBlank(), "Expected a graceful non-blank response for empty-graph recall")
+    }
+
+    @Test
+    fun `no normal conversational turn produces the meta stub string`() = runTest {
+        val engram = InMemoryEngramClient()
+        val llm = TestLlmClient { LlmResponse(text = "Sure thing.", latencyMs = 0, retryCount = 0) }
+        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
+
+        val utterances = listOf(
+            "What did I tell you about my dog?",
+            "What do you know about me?",
+            "What have I told you?",
+            "Do you remember my wife's name?",
+            "What is the weather like?",
+            "Hey",
+            "Remind me to call the vet",
+        )
+        for (utterance in utterances) {
+            val response = pipeline.process(utterance, "s1", "user-1")
+            assertFalse(
+                response == "Memory queries aren't available yet.",
+                "Utterance '$utterance' must never produce the MetaBranch stub, got: $response",
+            )
+        }
+    }
+
     @Test
     fun `branches still respond when EngramClient operations fail`() = runTest {
         val brokenEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {

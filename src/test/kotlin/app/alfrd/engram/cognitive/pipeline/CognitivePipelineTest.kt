@@ -52,10 +52,12 @@ class CognitivePipelineIntegrationTest {
     }
 
     @Test
-    fun `meta utterance routes to MetaBranch stub`() = runTest {
+    fun `recall question routes to QuestionBranch not MetaBranch stub`() = runTest {
         val response = pipeline.process("What do you know about me?", "session-1", "user-1")
-        assertTrue("memory" in response.lowercase() || "available" in response.lowercase(),
-            "Expected a meta stub response, got: $response")
+        assertFalse(
+            "Memory queries aren't available yet." == response,
+            "Recall question must not dead-end at the MetaBranch stub, got: $response",
+        )
     }
 }
 
@@ -108,11 +110,21 @@ class ComprehensionTest {
     }
 
     @Test
-    fun `meta query classified as META with 0_85 confidence`() = runTest {
-        val ctx = CognitiveContext(utterance = "What do you know about me?", sessionId = "s", userId = "u")
-        comprehension.evaluate(ctx)
-        assertEquals(IntentType.META, ctx.intent)
-        assertEquals(0.85, ctx.intentConfidence)
+    fun `recall question classified as QUESTION not META`() = runTest {
+        val recallPhrases = listOf(
+            "What do you know about me?",
+            "What have I told you about my dog?",
+            "What did I tell you my wife's name was?",
+            "Do you remember my dog's name?",
+        )
+        for (utterance in recallPhrases) {
+            val ctx = CognitiveContext(utterance = utterance, sessionId = "s", userId = "u")
+            comprehension.evaluate(ctx)
+            assertEquals(
+                IntentType.QUESTION, ctx.intent,
+                "Recall question '$utterance' must be QUESTION, not META",
+            )
+        }
     }
 
 }
