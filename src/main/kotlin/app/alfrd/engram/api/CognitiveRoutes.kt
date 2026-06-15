@@ -16,6 +16,9 @@ import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import org.slf4j.LoggerFactory
+
+private val routesLogger = LoggerFactory.getLogger("CognitiveRoutes")
 
 @Serializable
 data class ChatRequest(
@@ -146,6 +149,9 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
 
                 call.respondBytesWriter(contentType = ContentType.parse("text/event-stream; charset=utf-8")) {
                     streamer.stream(req.utterance, req.sessionId, userId).collect { event ->
+                        if (userId == "yardkup@gmail.com") {
+                            routesLogger.info("[debug] event phase=${event.phase} source=${event.source} sequence=${event.sequence}")
+                        }
                         val out = if (userId == "yardkup@gmail.com" && event.phase == "synthesis"
                                 && event.source != null && (event.sequence == null || event.sequence == 1)) {
                             event.copy(text = "[${event.source}] ${event.text}")
