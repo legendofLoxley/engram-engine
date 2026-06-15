@@ -24,7 +24,7 @@ class Router(
             TurnShape.FYI,
             TurnShape.Continuation -> return VerbalMoveBranch(selectionService, turnShape)
             TurnShape.TaskRequest  -> return TaskBranch(engramClient, memoryWriteService)
-            TurnShape.Correction   -> return CorrectionBranch()
+            TurnShape.Correction   -> return CorrectionBranch(engramClient)
             else                   -> { /* fall through to intent-based routing */ }
         }
 
@@ -33,7 +33,7 @@ class Router(
             IntentType.SOCIAL                -> SocialBranch(selectionService)
             IntentType.QUESTION              -> QuestionBranch(engramClient, llmClient)
             IntentType.TASK                  -> TaskBranch(engramClient, memoryWriteService)
-            IntentType.CORRECTION            -> CorrectionBranch()
+            IntentType.CORRECTION            -> CorrectionBranch(engramClient)
             IntentType.META                  -> QuestionBranch(engramClient, llmClient)
             IntentType.CLARIFICATION,
             IntentType.AMBIGUOUS             -> ClarificationBranch()
