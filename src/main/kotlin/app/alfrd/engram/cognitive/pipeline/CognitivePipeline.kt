@@ -596,7 +596,8 @@ open class CognitivePipeline(
 
         logger.info(
             "turn sessionId=$sessionId userId=$userId intent=${ctx.intent} " +
-            "branch=${branch::class.simpleName} source=${ctx.branchResult?.source ?: "pool"}"
+            "branch=${branch::class.simpleName} source=${ctx.branchResult?.source ?: "pool"} " +
+            "utterance=\"${ctx.utterance}\" response=\"${ctx.responseText}\""
         )
         // TODO: log comprehensionTier and selectionResult.phraseId at DEBUG level for phrase-level tracing
 
