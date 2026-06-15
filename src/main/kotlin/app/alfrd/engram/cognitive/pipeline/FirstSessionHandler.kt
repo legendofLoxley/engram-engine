@@ -35,9 +35,13 @@ class FirstSessionHandler(
     private val json   = Json { ignoreUnknownKeys = true }
 
     companion object {
-        private val BYPASS_EMAILS = setOf(
-            "jmac@primarykey.consulting",
-            "yardkup@gmail.com",
+        // Owner account: always simulate a first-session invitee for repeatable flow testing.
+        private const val OWNER_EMAIL = "jmac@primarykey.consulting"
+        private val OWNER_SYNTHETIC_INVITE = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "Jacob is the app owner, testing the invite flow",
+            trustPhase          = "Confidant",
+            engagementIntent    = "testing",
+            timestamp           = 0L,
         )
 
         const val CLOSED_BETA_REJECTION =
@@ -79,8 +83,8 @@ class FirstSessionHandler(
      * On graph failure, assumes not-first-session to avoid blocking returning users.
      */
     suspend fun detectFirstSession(userId: String, userEmail: String): DetectionResult {
-        if (userEmail in BYPASS_EMAILS) {
-            return DetectionResult(isFirstSession = false)
+        if (userEmail == OWNER_EMAIL) {
+            return DetectionResult(isFirstSession = true, invitedEdge = OWNER_SYNTHETIC_INVITE)
         }
 
         // Fast path: if SessionManager has seen this userId, not a first session.

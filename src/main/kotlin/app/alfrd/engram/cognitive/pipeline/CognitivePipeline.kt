@@ -258,6 +258,14 @@ open class CognitivePipeline(
         timestamp: java.time.Instant = java.time.Instant.now(),
         userEmail: String = "",
     ): InitResponse {
+        if (userEmail == "yardkup@gmail.com") {
+            return InitResponse(
+                greeting  = "[debug] engram-engine ok · session=$sessionId",
+                phraseId  = "debug",
+                sessionId = sessionId,
+            )
+        }
+
         val zoneId = context?.get("timezone")?.let {
             try { java.time.ZoneId.of(it) } catch (_: Exception) { null }
         }
