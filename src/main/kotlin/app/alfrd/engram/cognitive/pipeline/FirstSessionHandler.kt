@@ -35,6 +35,11 @@ class FirstSessionHandler(
     private val json   = Json { ignoreUnknownKeys = true }
 
     companion object {
+        private val BYPASS_EMAILS = setOf(
+            "jmac@primarykey.consulting",
+            "yardkup@gmail.com",
+        )
+
         const val CLOSED_BETA_REJECTION =
             "alfrd is in closed beta right now. If you think you should have access, reach out to Jacob."
         const val REASK_PROMPT =
@@ -74,6 +79,10 @@ class FirstSessionHandler(
      * On graph failure, assumes not-first-session to avoid blocking returning users.
      */
     suspend fun detectFirstSession(userId: String, userEmail: String): DetectionResult {
+        if (userEmail in BYPASS_EMAILS) {
+            return DetectionResult(isFirstSession = false)
+        }
+
         // Fast path: if SessionManager has seen this userId, not a first session.
         if (!sessionManager.isFirstKnownSession(userId)) {
             return DetectionResult(isFirstSession = false)
