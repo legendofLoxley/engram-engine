@@ -104,7 +104,9 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 call.respond(
                     HttpStatusCode.OK,
                     ChatResponse(
-                        response          = result.responseText,
+                        response          = if (userId == "yardkup@gmail.com")
+                                                "[${result.synthesisSource}] ${result.responseText}"
+                                            else result.responseText,
                         intent            = result.intent.name,
                         latencyMs         = latencyMs,
                         comprehensionTier = result.comprehensionTier,
