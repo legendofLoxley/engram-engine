@@ -147,7 +147,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 call.respondBytesWriter(contentType = ContentType.parse("text/event-stream; charset=utf-8")) {
                     streamer.stream(req.utterance, req.sessionId, userId).collect { event ->
                         val out = if (userId == "yardkup@gmail.com" && event.phase == "synthesis"
-                                && event.source != null && (event.sequence == null || event.sequence == 0)) {
+                                && event.source != null && (event.sequence == null || event.sequence == 1)) {
                             event.copy(text = "[${event.source}] ${event.text}")
                         } else event
                         val line = "data: ${Json.encodeToString(out)}\n\n"
