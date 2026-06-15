@@ -34,7 +34,7 @@ class Router(
             IntentType.QUESTION              -> QuestionBranch(engramClient, llmClient)
             IntentType.TASK                  -> TaskBranch(engramClient, memoryWriteService)
             IntentType.CORRECTION            -> CorrectionBranch()
-            IntentType.META                  -> MetaBranch()
+            IntentType.META                  -> QuestionBranch(engramClient, llmClient)
             IntentType.CLARIFICATION,
             IntentType.AMBIGUOUS             -> ClarificationBranch()
         }
