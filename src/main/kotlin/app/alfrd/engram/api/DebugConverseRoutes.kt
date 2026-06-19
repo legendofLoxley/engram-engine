@@ -67,6 +67,28 @@ data class DebugPurgeResponse(
     val message: String,
 )
 
+internal data class DebugResolution(
+    val resolutionPath: String,
+    val fallbackTriggered: Boolean,
+    val fallbackReason: String?,
+)
+
+internal fun classifyDebugResolution(synthesisSource: String): DebugResolution {
+    val fallbackTriggered = synthesisSource == "fallback" || synthesisSource == "llm"
+    val fallbackReason = when (synthesisSource) {
+        "llm"      -> "llm_branch_no_graph_phrase"
+        "fallback" -> "no_phrase_selected_or_service_unavailable"
+        else       -> null
+    }
+    val resolutionPath = when (synthesisSource) {
+        "first-session", "first-session-turn1" -> "FirstSessionHandler"
+        "llm"      -> "LlmBranch"
+        "fallback" -> "FallbackText"
+        else       -> "CognitivePipeline"
+    }
+    return DebugResolution(resolutionPath, fallbackTriggered, fallbackReason)
+}
+
 // ── Route configuration ───────────────────────────────────────────────────────
 
 /**
@@ -116,24 +138,11 @@ fun Application.configureDebugConverseRoutes(
                         val debugResult = pipeline.processForDebug(req.message, sessionId, syntheticEmail)
                         val totalLatencyMs = System.currentTimeMillis() - startMs
 
-                        val fallbackTriggered = debugResult.chat.synthesisSource == "fallback"
-                            || debugResult.chat.synthesisSource == "llm"
-                        val fallbackReason = when (debugResult.chat.synthesisSource) {
-                            "llm"      -> "llm_branch_no_graph_phrase"
-                            "fallback" -> "no_phrase_selected_or_service_unavailable"
-                            else       -> null
-                        }
-
-                        val resolutionPath = when (debugResult.chat.synthesisSource) {
-                            "first-session", "first-session-turn1" -> "FirstSessionHandler"
-                            "llm"      -> "LlmBranch"
-                            "fallback" -> "FallbackText"
-                            else       -> "CognitivePipeline"
-                        }
+                        val resolution = classifyDebugResolution(debugResult.chat.synthesisSource)
 
                         logger.info(
                             "debug-converse traceId={} resolutionPath={} fallback={} latencyMs={}",
-                            traceId, resolutionPath, fallbackTriggered, totalLatencyMs,
+                            traceId, resolution.resolutionPath, resolution.fallbackTriggered, totalLatencyMs,
                         )
 
                         call.respond(
@@ -143,9 +152,9 @@ fun Application.configureDebugConverseRoutes(
                                 reply             = debugResult.chat.responseText,
                                 sessionId         = sessionId,
                                 syntheticUserId   = syntheticEmail,
-                                resolutionPath    = resolutionPath,
-                                fallbackTriggered = fallbackTriggered,
-                                fallbackReason    = fallbackReason,
+                                resolutionPath    = resolution.resolutionPath,
+                                fallbackTriggered = resolution.fallbackTriggered,
+                                fallbackReason    = resolution.fallbackReason,
                                 totalLatencyMs    = totalLatencyMs,
                                 trace             = debugResult.trace,
                             )

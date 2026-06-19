@@ -206,25 +206,15 @@ class PurgeAndShapeTest {
         val debugResult = pipeline.processForDebug("Hey", "session-shape-1", "user-shape-1@test.alfrd.internal")
 
         val traceId = UUID.randomUUID().toString()
-        val resolutionPath = when (debugResult.chat.synthesisSource) {
-            "first-session", "first-session-turn1" -> "FirstSessionHandler"
-            "llm"      -> "LlmBranch"
-            "fallback" -> "FallbackText"
-            else       -> "CognitivePipeline"
-        }
+        val resolution = classifyDebugResolution(debugResult.chat.synthesisSource)
         val response = DebugConverseResponse(
             traceId           = traceId,
             reply             = debugResult.chat.responseText,
             sessionId         = "session-shape-1",
             syntheticUserId   = "user-shape-1@test.alfrd.internal",
-            resolutionPath    = resolutionPath,
-            fallbackTriggered = debugResult.chat.synthesisSource == "fallback"
-                || debugResult.chat.synthesisSource == "llm",
-            fallbackReason    = when (debugResult.chat.synthesisSource) {
-                "llm"      -> "llm_branch_no_graph_phrase"
-                "fallback" -> "no_phrase_selected_or_service_unavailable"
-                else       -> null
-            },
+            resolutionPath    = resolution.resolutionPath,
+            fallbackTriggered = resolution.fallbackTriggered,
+            fallbackReason    = resolution.fallbackReason,
             totalLatencyMs    = 0L,
             trace             = debugResult.trace,
         )
@@ -246,30 +236,26 @@ class LlmFallbackFlagTest {
 
     @Test
     fun `llm synthesisSource maps to fallbackTriggered true and llm_branch_no_graph_phrase reason`() = runTest {
+        // Tier 2 classification returns "QUESTION" → Router selects QuestionBranch →
+        // QuestionBranch calls llmClient for the answer → synthesisSource = "llm".
         val llm = TestLlmClient { req ->
             if (req.prompt.contains("Classify"))
-                LlmResponse(text = "TASK", latencyMs = 0L, retryCount = 0)
+                LlmResponse(text = "QUESTION", latencyMs = 0L, retryCount = 0)
             else
-                LlmResponse(text = "LLM generated answer", latencyMs = 0L, retryCount = 0)
+                LlmResponse(text = "Here is the answer.", latencyMs = 0L, retryCount = 0)
         }
         val pipeline = CognitivePipeline(llmClient = llm)
         pipeline.init()
 
-        // Ambiguous utterance: Tier 1 misses, Tier 2 fires via LLM, routes to TASK → LLM branch
+        // "Blah blorp zam" is ambiguous: Tier 1 yields AMBIGUOUS (0.30), so Tier 2 fires.
         val debugResult = pipeline.processForDebug("Blah blorp zam", "session-llm-1", "user-llm-1")
 
-        if (debugResult.chat.synthesisSource == "llm") {
-            val fallbackTriggered = debugResult.chat.synthesisSource == "fallback"
-                || debugResult.chat.synthesisSource == "llm"
-            val fallbackReason = when (debugResult.chat.synthesisSource) {
-                "llm"      -> "llm_branch_no_graph_phrase"
-                "fallback" -> "no_phrase_selected_or_service_unavailable"
-                else       -> null
-            }
-            assertTrue(fallbackTriggered, "LLM path must set fallbackTriggered=true")
-            assertEquals("llm_branch_no_graph_phrase", fallbackReason)
-        }
-        // If the utterance routes differently (no LLM client needed), the test passes vacuously.
-        // The fixed DebugConverseRoutes.kt is verified by the when-expression above matching production code.
+        assertEquals("llm", debugResult.chat.synthesisSource,
+            "Expected QuestionBranch LLM path; got synthesisSource=${debugResult.chat.synthesisSource}")
+
+        val resolution = classifyDebugResolution(debugResult.chat.synthesisSource)
+        assertTrue(resolution.fallbackTriggered, "LLM path must set fallbackTriggered=true")
+        assertEquals("llm_branch_no_graph_phrase", resolution.fallbackReason)
+        assertEquals("LlmBranch", resolution.resolutionPath)
     }
 }
