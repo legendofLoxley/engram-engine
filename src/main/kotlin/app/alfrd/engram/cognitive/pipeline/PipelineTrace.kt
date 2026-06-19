@@ -11,6 +11,8 @@ data class PipelineTrace(
     val latencyBreakdown: LatencyBreakdownTrace = LatencyBreakdownTrace(),
     val model: ModelTrace = ModelTrace(),
     var responseSelection: ResponseSelectionTrace? = null,
+    var candidatePhrases: List<CandidatePhraseTrace> = emptyList(),
+    var graphMutations: GraphMutationsTrace = GraphMutationsTrace(),
 )
 
 @Serializable
@@ -66,4 +68,38 @@ data class ResponseSelectionTrace(
     val scores: Map<String, Double>,
     val candidatesConsidered: Int,
     val selectionLatencyMs: Long,
+)
+
+@Serializable
+data class CandidatePhraseTrace(
+    val phraseId: String,
+    val phraseText: String,
+    val compositeScore: Double,
+    val scores: Map<String, Double>,
+    val selected: Boolean,
+)
+
+@Serializable
+data class GraphMutationsTrace(
+    var selectedEdge: SelectedEdgeMutationTrace? = null,
+    var outcomeEdge: OutcomeEdgeMutationTrace? = null,
+)
+
+@Serializable
+data class SelectedEdgeMutationTrace(
+    val phraseUid: String,
+    val userId: String,
+    val sessionId: String,
+    val turnIndex: Int,
+    val branch: String?,
+    val compositeScore: Double,
+)
+
+@Serializable
+data class OutcomeEdgeMutationTrace(
+    val phraseUid: String,
+    val userId: String,
+    val sessionId: String,
+    val signal: String,
+    val turnIndex: Int,
 )

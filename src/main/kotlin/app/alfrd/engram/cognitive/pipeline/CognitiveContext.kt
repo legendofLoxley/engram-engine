@@ -70,4 +70,6 @@ data class CognitiveContext(
     var selectionResult: ResponseSelectionResult? = null,
     var selectionCandidatesConsidered: Int = 0,
     var selectionLatencyMs: Long = 0L,
+    /** All scored candidates; only populated when trace != null (debug mode). */
+    var selectionCandidates: List<ResponseSelectionResult>? = null,
 )

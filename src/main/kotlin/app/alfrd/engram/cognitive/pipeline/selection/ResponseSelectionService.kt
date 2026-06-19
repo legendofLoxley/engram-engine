@@ -77,6 +77,12 @@ class ResponseSelectionService(
         }
 
         val candidateCount = scored.size
+
+        // Expose all scored candidates for the debug trace (no-op on the non-debug hot path).
+        if (ctx.trace != null) {
+            ctx.selectionCandidates = scored
+        }
+
         val ranked = scored.sortedByDescending { it.compositeScore }.take(query.limit)
             .map { it.copy(candidatesConsidered = candidateCount) }
 

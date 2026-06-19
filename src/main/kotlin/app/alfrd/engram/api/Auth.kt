@@ -11,6 +11,7 @@ import io.ktor.server.response.*
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
+
 fun Application.configureAuth() {
     val jwtIssuer = System.getenv("SUPABASE_ISSUER")
         ?: error("SUPABASE_ISSUER environment variable is required")
@@ -22,6 +23,8 @@ fun Application.configureAuth() {
         .build()
 
     val logger = log
+    // Read once at startup; immutable for the server lifetime.
+    val debugToken = System.getenv("DEBUG_CONVERSE_TOKEN") ?: ""
 
     install(Authentication) {
         jwt("supabase") {
@@ -62,6 +65,17 @@ fun Application.configureAuth() {
                     logger.warn("JWT rejected: no Authorization header on {}", call.request.uri)
                 }
                 call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing token"))
+            }
+        }
+
+        // Static bearer token for the debug-converse endpoint.
+        // Returns null (deny) when DEBUG_CONVERSE_TOKEN is not configured so the endpoint
+        // can still be disabled at startup by not setting the variable.
+        bearer("debug-token") {
+            authenticate { tokenCredential ->
+                if (debugToken.isNotBlank() && tokenCredential.token == debugToken) {
+                    UserIdPrincipal("debug")
+                } else null
             }
         }
     }

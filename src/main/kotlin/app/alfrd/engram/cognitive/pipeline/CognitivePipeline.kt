@@ -472,6 +472,15 @@ open class CognitivePipeline(
                 signal          = classification.signal,
                 contextSnapshot = buildContextSnapshot(utterance, classification.confidence, null),
             )
+            if (debug) {
+                trace!!.graphMutations.outcomeEdge = OutcomeEdgeMutationTrace(
+                    phraseUid = priorPending.phraseUid,
+                    userId    = priorPending.userId,
+                    sessionId = priorPending.sessionId,
+                    signal    = classification.signal.name,
+                    turnIndex = priorPending.turnIndex,
+                )
+            }
         }
 
         val ctx = CognitiveContext(
@@ -571,6 +580,33 @@ open class CognitivePipeline(
                     candidatesConsidered = ctx.selectionCandidatesConsidered,
                     selectionLatencyMs = ctx.selectionLatencyMs,
                 )
+            }
+
+            // Graph mutations: SELECTED edge written this turn
+            ctx.selectionResult?.let { selResult ->
+                val isFirstResponse = selResult.phrase.moveType != null
+                trace.graphMutations.selectedEdge = SelectedEdgeMutationTrace(
+                    phraseUid      = selResult.phrase.uid,
+                    userId         = userId,
+                    sessionId      = sessionId,
+                    turnIndex      = ctx.priorUtterances.size + 1,
+                    branch         = if (!isFirstResponse) ctx.branchResult?.responseStrategy?.name else null,
+                    compositeScore = selResult.compositeScore,
+                )
+            }
+
+            // All scored candidates (populated by ResponseSelectionService when trace != null)
+            ctx.selectionCandidates?.let { candidates ->
+                val selectedId = ctx.selectionResult?.phrase?.uid
+                trace.candidatePhrases = candidates.map { candidate ->
+                    CandidatePhraseTrace(
+                        phraseId       = candidate.phrase.uid,
+                        phraseText     = candidate.phrase.text,
+                        compositeScore = candidate.compositeScore,
+                        scores         = candidate.scoreBreakdown,
+                        selected       = candidate.phrase.uid == selectedId,
+                    )
+                }
             }
         }
 

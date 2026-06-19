@@ -2,6 +2,7 @@ package app.alfrd.engram
 
 import app.alfrd.engram.api.configureCognitiveRoutes
 import app.alfrd.engram.api.configureAuth
+import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureOnboardingRoutes
 import app.alfrd.engram.api.configurePhrasesRoutes
 import app.alfrd.engram.api.configureRoutes
@@ -62,6 +63,7 @@ fun main() {
             allowHost("localhost:5173", schemes = listOf("http"))
             allowMethod(HttpMethod.Get)
             allowMethod(HttpMethod.Post)
+            allowMethod(HttpMethod.Delete)
             allowMethod(HttpMethod.Options)
             allowHeader(HttpHeaders.ContentType)
             allowHeader(HttpHeaders.Authorization)
@@ -73,6 +75,14 @@ fun main() {
         configureScaffoldRoutes(db)
         configurePhrasesRoutes(db)
         configureOnboardingRoutes(db)
+
+        if (System.getenv("DEBUG_CONVERSE_ENABLED") == "true") {
+            // Isolated session pool — debug sessions never share state with production sessions.
+            // No sessionManager passed to factory → FirstSessionHandler is disabled for synthetic users.
+            val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db) })
+            configureDebugConverseRoutes(debugSessionManager, db)
+            log.info("debug-converse endpoint enabled")
+        }
         routing {
             staticResources("/", "static") {
                 default("index.html")
