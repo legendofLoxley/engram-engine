@@ -117,9 +117,12 @@ fun Application.configureDebugConverseRoutes(
                         val totalLatencyMs = System.currentTimeMillis() - startMs
 
                         val fallbackTriggered = debugResult.chat.synthesisSource == "fallback"
-                        val fallbackReason = if (fallbackTriggered) {
-                            "no_phrase_selected_or_service_unavailable"
-                        } else null
+                            || debugResult.chat.synthesisSource == "llm"
+                        val fallbackReason = when (debugResult.chat.synthesisSource) {
+                            "llm"      -> "llm_branch_no_graph_phrase"
+                            "fallback" -> "no_phrase_selected_or_service_unavailable"
+                            else       -> null
+                        }
 
                         val resolutionPath = when (debugResult.chat.synthesisSource) {
                             "first-session", "first-session-turn1" -> "FirstSessionHandler"

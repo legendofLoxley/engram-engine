@@ -132,7 +132,10 @@ internal object DebugConverseService {
                     db.command("sql", "DELETE FROM SELECTED WHERE userId = :e", mapOf("e" to email)).close()
                     db.command("sql", "DELETE FROM OUTCOME  WHERE userId = :e", mapOf("e" to email)).close()
                     db.command("sql", "DELETE FROM UserScaffoldState WHERE userId = :e", mapOf("e" to email)).close()
-                    db.command("sql", "DELETE FROM User WHERE email = :e", mapOf("e" to email)).close()
+                    // Delete vertex via graph API so ArcadeDB cascades any remaining TRUSTS/INVITED edges
+                    db.query("sql", "SELECT FROM User WHERE email = :e", mapOf("e" to email)).use { rs ->
+                        if (rs.hasNext()) rs.next().toElement().asVertex().delete()
+                    }
                 }
                 logger.info("debug: purged synthetic user email={}", email)
                 deleted++
