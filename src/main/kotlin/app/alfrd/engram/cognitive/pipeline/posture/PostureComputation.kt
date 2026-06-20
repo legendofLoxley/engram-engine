@@ -91,9 +91,10 @@ fun classifyTextPathTurnShape(utterance: String): TurnShape? {
     // Task request (checked before Question so "can you update X?" resolves correctly)
     if (TASK_REQUEST_PATTERN.containsMatchIn(transcript)) return TurnShape.TaskRequest
 
-    // Question: ends with "?" or interrogative opener
+    // Question: ends with "?" or interrogative opener (including contractions like "what's", "who's").
     val firstWord = words.firstOrNull()?.lowercase()?.trimEnd('?', ',', '.') ?: ""
-    if (transcript.endsWith("?") || firstWord in QUESTION_WORDS) return TurnShape.Question
+    val firstWordRoot = firstWord.substringBefore('\'')
+    if (transcript.endsWith("?") || firstWord in QUESTION_WORDS || firstWordRoot in QUESTION_WORDS) return TurnShape.Question
 
     // Heavy filler use → Continuation
     val fillerCount = words.count { it.lowercase() in FILLER_WORDS }
@@ -231,9 +232,10 @@ private fun classifyTurnShape(
     // "Can you find...?" resolves to TaskRequest rather than Question.
     if (TASK_REQUEST_PATTERN.containsMatchIn(transcript)) return TurnShape.TaskRequest
 
-    // Question: ends with "?" or opens with an interrogative word.
+    // Question: ends with "?" or opens with an interrogative word (including contractions like "what's", "who's").
     val firstWord = words.firstOrNull()?.lowercase()?.trimEnd('?', ',', '.') ?: ""
-    if (transcript.endsWith("?") || firstWord in QUESTION_WORDS) return TurnShape.Question
+    val firstWordRoot = firstWord.substringBefore('\'')
+    if (transcript.endsWith("?") || firstWord in QUESTION_WORDS || firstWordRoot in QUESTION_WORDS) return TurnShape.Question
 
     // Continuation: heavy filler density (> 30 % of words) — checked before Disclosure
     // to prevent filler-heavy utterances matching personal-pronoun patterns.
