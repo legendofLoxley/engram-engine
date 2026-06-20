@@ -3,15 +3,12 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.SessionManager
 import app.alfrd.engram.cognitive.UserGraphService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
-import app.alfrd.engram.cognitive.providers.LlmResponse
-import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FirstSessionHandler — unit tests for detection and identity verification flow
+// FirstSessionHandler — unit tests for detection and warm provenance intro flow
 // ─────────────────────────────────────────────────────────────────────────────
 
 class FirstSessionHandlerTest {
@@ -35,6 +32,7 @@ class FirstSessionHandlerTest {
             trustPhase          = "Acquaintance",
             engagementIntent    = "productivity",
             timestamp           = 1_000_000L,
+            openingContext      = "Jacob mentioned you from your time together at Acme — said you were great to work with.",
         ),
         private val selectedEdges: Boolean = false,
         private val verifiedEdge: Boolean = false,
@@ -56,17 +54,10 @@ class FirstSessionHandlerTest {
     private fun buildHandler(
         graphService: FakeUserGraphService = FakeUserGraphService(),
         sessionManager: SessionManager = buildSessionManager(),
-        llmResponse: String? = null,
-    ): FirstSessionHandler {
-        val llm = if (llmResponse != null) {
-            TestLlmClient { LlmResponse(text = llmResponse, latencyMs = 0, retryCount = 0) }
-        } else null
-        return FirstSessionHandler(
-            userGraphService = graphService,
-            sessionManager   = sessionManager,
-            llmClient        = llm,
-        )
-    }
+    ): FirstSessionHandler = FirstSessionHandler(
+        userGraphService = graphService,
+        sessionManager   = sessionManager,
+    )
 
     // ── Detection ─────────────────────────────────────────────────────────────
 
@@ -102,7 +93,6 @@ class FirstSessionHandlerTest {
         )
         val result = handler.detectFirstSession("verified-user", "alice@example.com")
         assertFalse(result.isFirstSession)
-        // invitedEdge pre-loaded so warm-intro can use opening_context
         assertNotNull(result.invitedEdge)
     }
 
@@ -113,6 +103,7 @@ class FirstSessionHandlerTest {
             trustPhase          = "Confidant",
             engagementIntent    = "growth",
             timestamp           = 99L,
+            openingContext      = "Jacob said you two go way back.",
         )
         val handler = buildHandler(graphService = FakeUserGraphService(invitedEdge = edge))
         val result  = handler.detectFirstSession("new-user-2", "bob@example.com")
@@ -120,319 +111,174 @@ class FirstSessionHandlerTest {
         assertEquals("Confidant", result.invitedEdge?.trustPhase)
     }
 
-    // ── Turn 1 ────────────────────────────────────────────────────────────────
+    // ── Turn 1: closed-beta rejection ─────────────────────────────────────────
 
     @Test
-    fun `handleTurn1 returns closed-beta rejection when no INVITED edge`() = runTest {
+    fun `handleTurn1 returns closed-beta rejection when no INVITED edge`() {
         val handler = buildHandler(graphService = FakeUserGraphService(invitedEdge = null))
         val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = null)
         val result = handler.handleTurn1(detection)
         assertTrue(result.rejected)
+        assertFalse(result.seedingError)
         assertEquals(FirstSessionHandler.CLOSED_BETA_REJECTION, result.response)
     }
 
+    // ── Turn 1: warm intro ─────────────────────────────────────────────────────
+
     @Test
-    fun `handleTurn1 returns acquaintance greeting for default trustPhase`() = runTest {
+    fun `handleTurn1 returns warm intro from openingContext for acquaintance`() {
         val edge = UserGraphService.InvitedEdgeRecord(
             relationshipContext = "Work colleagues",
             trustPhase          = "Acquaintance",
-            engagementIntent    = "",
+            engagementIntent    = "productivity",
             timestamp           = 1L,
+            openingContext      = "Jacob mentioned you work in design.",
         )
-        val handler = buildHandler()
         val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
-        val result = handler.handleTurn1(detection)
+        val result = buildHandler().handleTurn1(detection)
         assertFalse(result.rejected)
-        assertTrue("How do you know Jacob?" in result.response)
+        assertFalse(result.seedingError)
+        assertTrue("Jacob mentioned you work in design." in result.response)
         assertTrue("Good to meet you" in result.response)
+        assertFalse("How do you know Jacob?" in result.response)
     }
 
     @Test
-    fun `handleTurn1 returns confidant greeting when trustPhase is Confidant`() = runTest {
+    fun `handleTurn1 returns warm intro calibrated for confidant trustPhase`() {
         val edge = UserGraphService.InvitedEdgeRecord(
             relationshipContext = "Old friends",
             trustPhase          = "Confidant",
-            engagementIntent    = "",
+            engagementIntent    = "personal",
             timestamp           = 1L,
+            openingContext      = "You two go way back, Jacob says.",
         )
-        val handler = buildHandler()
         val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
-        val result = handler.handleTurn1(detection)
+        val result = buildHandler().handleTurn1(detection)
         assertFalse(result.rejected)
+        assertFalse(result.seedingError)
         assertTrue("Good to finally talk" in result.response)
+        assertTrue("You two go way back, Jacob says." in result.response)
     }
 
     @Test
-    fun `handleTurn1 returns colleague greeting when trustPhase is Colleague`() = runTest {
+    fun `handleTurn1 returns warm intro calibrated for colleague trustPhase`() {
         val edge = UserGraphService.InvitedEdgeRecord(
             relationshipContext = "Co-workers",
             trustPhase          = "Colleague",
-            engagementIntent    = "",
+            engagementIntent    = "collaboration",
             timestamp           = 1L,
+            openingContext      = "Jacob said you were on the same product team.",
         )
-        val handler = buildHandler()
         val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
-        val result = handler.handleTurn1(detection)
+        val result = buildHandler().handleTurn1(detection)
         assertFalse(result.rejected)
+        assertFalse(result.seedingError)
         assertTrue("Good to hear from you" in result.response)
+        assertTrue("Jacob said you were on the same product team." in result.response)
     }
 
-    // ── Turn 2: match ─────────────────────────────────────────────────────────
+    // ── Turn 1: seeding error ─────────────────────────────────────────────────
 
     @Test
-    fun `handleTurn2 verifies user when LLM returns high confidence`() = runTest {
-        val llmJson = """{"match": true, "confidence": 0.9, "reasoning": "Same company mentioned"}"""
-        val graphService = FakeUserGraphService()
-        val handler = buildHandler(graphService = graphService, llmResponse = llmJson)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            engagementIntent             = "productivity",
-            relationshipContext          = "We worked together at Acme Corp.",
+    fun `handleTurn1 surfaces seeding error when openingContext is null`() {
+        val edge = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "Old friends",
+            trustPhase          = "Confidant",
+            engagementIntent    = "personal",
+            timestamp           = 1L,
+            openingContext      = null,
         )
-
-        val result = handler.handleTurn2("user-1", "We both worked at Acme on payments.", state)
-
-        assertTrue(result.newState.identityVerified)
-        assertFalse(result.newState.awaitingIdentityVerification)
-        assertFalse(result.newState.identityFlagged)
-        assertEquals(1, graphService.verifiedEdgeWrites.size)
-        // Acquaintance opener
-        assertTrue("What are you working on right now?" in result.response)
+        val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
+        val result = buildHandler().handleTurn1(detection)
+        assertFalse(result.rejected)
+        assertTrue(result.seedingError)
+        assertEquals(FirstSessionHandler.SEEDING_ERROR, result.response)
     }
 
     @Test
-    fun `handleTurn2 confidant verification returns warm opener`() = runTest {
-        val llmJson = """{"match": true, "confidence": 0.85, "reasoning": "Old friends described consistently"}"""
-        val handler = buildHandler(llmResponse = llmJson)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Confidant",
-            engagementIntent             = "personal",
-            relationshipContext          = "We grew up together.",
+    fun `handleTurn1 surfaces seeding error when openingContext is blank`() {
+        val edge = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "Old friends",
+            trustPhase          = "Confidant",
+            engagementIntent    = "personal",
+            timestamp           = 1L,
+            openingContext      = "   ",
         )
-
-        val result = handler.handleTurn2("user-2", "We've been friends since high school.", state)
-
-        assertTrue(result.newState.identityVerified)
-        assertTrue("What's got your attention lately?" in result.response)
-    }
-
-    @Test
-    fun `handleTurn2 colleague verification returns colleague opener`() = runTest {
-        val llmJson = """{"match": true, "confidence": 0.75, "reasoning": "Matching work context"}"""
-        val handler = buildHandler(llmResponse = llmJson)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Colleague",
-            engagementIntent             = "collaboration",
-            relationshipContext          = "Worked on the same product team.",
-        )
-
-        val result = handler.handleTurn2("user-3", "We were on the same product team.", state)
-
-        assertTrue(result.newState.identityVerified)
-        assertTrue("What's on your plate this week?" in result.response)
-    }
-
-    // ── Turn 2: low confidence / reask ────────────────────────────────────────
-
-    @Test
-    fun `handleTurn2 reasks on first low-confidence attempt`() = runTest {
-        val llmJson = """{"match": false, "confidence": 0.3, "reasoning": "No overlap found"}"""
-        val graphService = FakeUserGraphService()
-        val handler = buildHandler(graphService = graphService, llmResponse = llmJson)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            relationshipContext          = "Work colleagues at TechCo",
-            retryCount                   = 0,
-        )
-
-        val result = handler.handleTurn2("user-4", "I know him from the internet.", state)
-
-        assertFalse(result.newState.identityVerified)
-        assertFalse(result.newState.identityFlagged)
-        assertEquals(1, result.newState.retryCount)
-        assertEquals(FirstSessionHandler.REASK_PROMPT, result.response)
-        assertTrue(graphService.verifiedEdgeWrites.isEmpty())
-    }
-
-    @Test
-    fun `handleTurn2 flags user on second low-confidence attempt`() = runTest {
-        val llmJson = """{"match": false, "confidence": 0.2, "reasoning": "Contradictory context"}"""
-        val graphService = FakeUserGraphService()
-        val handler = buildHandler(graphService = graphService, llmResponse = llmJson)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            relationshipContext          = "Work colleagues at TechCo",
-            retryCount                   = 1,  // already retried once
-        )
-
-        val result = handler.handleTurn2("user-5", "Never met him actually.", state)
-
-        assertFalse(result.newState.identityVerified)
-        assertTrue(result.newState.identityFlagged)
-        assertFalse(result.newState.awaitingIdentityVerification)
-        assertEquals(FirstSessionHandler.FLAG_MESSAGE, result.response)
-        assertTrue(graphService.verifiedEdgeWrites.isEmpty())
-    }
-
-    // ── Turn 2: off-topic ────────────────────────────────────────────────────
-
-    @Test
-    fun `handleTurn2 reasks when response is a single-word non-answer`() = runTest {
-        val handler = buildHandler(llmResponse = null)  // LLM not needed for off-topic detection
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            relationshipContext          = "Colleagues",
-            retryCount                   = 0,
-        )
-
-        val result = handler.handleTurn2("user-6", "yes", state)
-
-        assertEquals(FirstSessionHandler.REASK_PROMPT, result.response)
-        assertEquals(1, result.newState.retryCount)
-    }
-
-    @Test
-    fun `handleTurn2 flags user when off-topic on second attempt`() = runTest {
-        val graphService = FakeUserGraphService()
-        val handler = buildHandler(graphService = graphService, llmResponse = null)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            relationshipContext          = "Colleagues",
-            retryCount                   = 1,
-        )
-
-        val result = handler.handleTurn2("user-7", "ok", state)
-
-        assertTrue(result.newState.identityFlagged)
-        assertEquals(FirstSessionHandler.FLAG_MESSAGE, result.response)
-    }
-
-    // ── Turn 2: LLM unavailable ───────────────────────────────────────────────
-
-    @Test
-    fun `handleTurn2 flags user when LLM is unavailable`() = runTest {
-        val graphService = FakeUserGraphService()
-        val handler = buildHandler(graphService = graphService, llmResponse = null)
-
-        val state = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            relationshipContext          = "We worked together",
-            retryCount                   = 0,
-        )
-
-        // "We worked together at Acme." is non-trivial (> 5 chars, not a short non-answer)
-        // but LLM is null → conservative flag.
-        val result = handler.handleTurn2("user-8", "We worked together at Acme.", state)
-
-        assertTrue(result.newState.identityFlagged)
-        assertEquals(FirstSessionHandler.FLAG_MESSAGE, result.response)
+        val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
+        val result = buildHandler().handleTurn1(detection)
+        assertFalse(result.rejected)
+        assertTrue(result.seedingError)
+        assertEquals(FirstSessionHandler.SEEDING_ERROR, result.response)
     }
 
     // ── CognitivePipeline integration ─────────────────────────────────────────
 
     @Test
-    fun `pipeline returns first-session greeting at initSession for new user`() = runTest {
+    fun `pipeline returns warm intro at initSession for first-session user with openingContext`() = runTest {
         val graphService = FakeUserGraphService(
             invitedEdge = UserGraphService.InvitedEdgeRecord(
                 relationshipContext = "Old colleagues",
                 trustPhase          = "Acquaintance",
                 engagementIntent    = "productivity",
                 timestamp           = 1L,
+                openingContext      = "Jacob mentioned you both worked on the payments team.",
             ),
         )
         val sm      = buildSessionManager()
-        val handler = FirstSessionHandler(
-            userGraphService = graphService,
-            sessionManager   = sm,
-            llmClient        = null,
-        )
-        val pipeline = CognitivePipeline(firstSessionHandler = handler)
+        val handler = FirstSessionHandler(userGraphService = graphService, sessionManager = sm)
+        val engram  = InMemoryEngramClient()
+        val pipeline = CognitivePipeline(engramClient = engram, firstSessionHandler = handler)
         pipeline.init()
 
         val response = pipeline.initSession("session-1", "user-new", userEmail = "alice@example.com")
 
-        assertTrue(response.phraseId == "first-session-turn1")
-        assertTrue("How do you know Jacob?" in response.greeting)
+        assertEquals("first-session-turn1", response.phraseId)
+        assertTrue("Jacob mentioned you both worked on the payments team." in response.greeting)
+        assertFalse("How do you know Jacob?" in response.greeting)
         assertNotNull(pipeline.firstSessionState)
-        assertTrue(pipeline.firstSessionState!!.awaitingIdentityVerification)
+        // VERIFIED edge is written during Turn 1 so returning users skip this flow.
+        assertEquals(1, graphService.verifiedEdgeWrites.size)
+        // Scaffold state seeded immediately with trustPhase 1 (Acquaintance → ORIENTATION).
+        assertEquals(1, engram.getScaffoldState("user-new").trustPhase)
+    }
+
+    @Test
+    fun `pipeline surfaces seeding error when openingContext is missing`() = runTest {
+        val graphService = FakeUserGraphService(
+            invitedEdge = UserGraphService.InvitedEdgeRecord(
+                relationshipContext = "Old colleagues",
+                trustPhase          = "Acquaintance",
+                engagementIntent    = "productivity",
+                timestamp           = 1L,
+                openingContext      = null,
+            ),
+        )
+        val sm      = buildSessionManager()
+        val handler = FirstSessionHandler(userGraphService = graphService, sessionManager = sm)
+        val pipeline = CognitivePipeline(firstSessionHandler = handler)
+        pipeline.init()
+
+        val response = pipeline.initSession("session-2", "user-seed-error", userEmail = "alice@example.com")
+
+        assertEquals("first-session-seeding-error", response.phraseId)
+        assertEquals(FirstSessionHandler.SEEDING_ERROR, response.greeting)
+        // No VERIFIED edge written — user remains un-marked so the error surfaces again on next session.
+        assertTrue(graphService.verifiedEdgeWrites.isEmpty())
     }
 
     @Test
     fun `pipeline falls through to normal greeting at initSession when no INVITED edge`() = runTest {
-        // Authenticated users (any call reaching initSession has passed JWT auth) must never
-        // see the closed-beta rejection, even if they have no INVITED edge in the graph.
         val graphService = FakeUserGraphService(invitedEdge = null)
         val sm      = buildSessionManager()
-        val handler = FirstSessionHandler(
-            userGraphService = graphService,
-            sessionManager   = sm,
-            llmClient        = null,
-        )
+        val handler = FirstSessionHandler(userGraphService = graphService, sessionManager = sm)
         val pipeline = CognitivePipeline(firstSessionHandler = handler)
         pipeline.init()
 
-        val response = pipeline.initSession("session-2", "user-uninvited", userEmail = "stranger@example.com")
+        val response = pipeline.initSession("session-3", "user-uninvited", userEmail = "stranger@example.com")
 
         assertNotEquals(FirstSessionHandler.CLOSED_BETA_REJECTION, response.greeting)
         assertNotEquals("first-session-rejected", response.phraseId)
         assertNull(pipeline.firstSessionState)
-    }
-
-    @Test
-    fun `pipeline intercepts first process call for identity verification Turn 2`() = runTest {
-        val llmJson = """{"match": true, "confidence": 0.8, "reasoning": "Matching work context"}"""
-        val graphService = FakeUserGraphService()
-        val sm = buildSessionManager()
-        val llm = TestLlmClient { LlmResponse(text = llmJson, latencyMs = 0, retryCount = 0) }
-        val handler = FirstSessionHandler(
-            userGraphService = graphService,
-            sessionManager   = sm,
-            llmClient        = llm,
-        )
-        val engram   = InMemoryEngramClient()
-        val pipeline = CognitivePipeline(engramClient = engram, firstSessionHandler = handler)
-        pipeline.init()
-
-        // Seed the first-session state directly (simulating Turn 1 completed)
-        pipeline.firstSessionState = FirstSessionState(
-            isFirstSession               = true,
-            awaitingIdentityVerification = true,
-            trustPhase                   = "Acquaintance",
-            engagementIntent             = "productivity",
-            relationshipContext          = "We worked at the same startup.",
-        )
-
-        val response = pipeline.process("We met at a startup I worked at.", "session-3", "user-9")
-
-        // Should be Turn 2 verified response, not a normal pipeline response
-        assertTrue("What are you working on right now?" in response)
-        assertTrue(pipeline.firstSessionState!!.identityVerified)
-        // Scaffold state should be seeded with trustPhase 1 (Acquaintance → ORIENTATION)
-        val scaffoldState = engram.getScaffoldState("user-9")
-        assertEquals(1, scaffoldState.trustPhase)
     }
 
     @Test
@@ -442,7 +288,6 @@ class FirstSessionHandlerTest {
 
         val response = pipeline.process("Hey", "session-4", "user-existing")
         assertTrue(response.isNotBlank())
-        // Normal social response — not a first-session response
         assertNull(pipeline.firstSessionState)
     }
 }

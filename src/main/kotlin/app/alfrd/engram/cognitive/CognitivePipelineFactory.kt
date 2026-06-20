@@ -41,7 +41,6 @@ object CognitivePipelineFactory {
             FirstSessionHandler(
                 userGraphService = UserGraphService(db),
                 sessionManager   = sessionManager,
-                llmClient        = llmClient,
             )
         } else null
 

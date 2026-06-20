@@ -72,9 +72,9 @@ object PhantomUserCleanup {
                 emptyMap<String, Any>(),
             ).use { rs ->
                 while (rs.hasNext()) {
-                    val el    = rs.next().toElement()
-                    val uid   = el.get("uid")   as? String ?: continue
-                    val email = el.get("email") as? String
+                    val row   = rs.next().toMap()
+                    val uid   = row["uid"]   as? String ?: continue
+                    val email = row["email"] as? String
                     // Seeded users have a real email field; phantoms do not.
                     if (email.isNullOrBlank()) uids.add(uid)
                 }
@@ -96,7 +96,7 @@ object PhantomUserCleanup {
                 "SELECT count(*) as cnt FROM $edgeType WHERE userId = :userId",
                 mapOf("userId" to userId),
             ).use { rs ->
-                if (rs.hasNext()) (rs.next().toElement().get("cnt") as? Number)?.toLong() ?: 0L
+                if (rs.hasNext()) (rs.next().toMap()["cnt"] as? Number)?.toLong() ?: 0L
                 else 0L
             }
         } catch (e: Exception) {

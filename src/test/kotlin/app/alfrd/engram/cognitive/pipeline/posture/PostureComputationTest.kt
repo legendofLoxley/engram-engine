@@ -448,4 +448,40 @@ class PostureComputationTest {
         val move = selectMoveType(signals)
         assertEquals(PostureMoveType.ORIENT, move)
     }
+
+    // ── Interrogative-contraction Question detection ─────────────────────────
+
+    @Test
+    fun `what contraction without question mark produces Question - text path`() {
+        assertEquals(TurnShape.Question, classifyTextPathTurnShape("what's my dog's name"))
+    }
+
+    @Test
+    fun `who contraction without question mark produces Question - text path`() {
+        assertEquals(TurnShape.Question, classifyTextPathTurnShape("who's coming to the party tonight"))
+    }
+
+    @Test
+    fun `what contraction without question mark produces Question via computePostureSignals`() {
+        val signals = computePostureSignals(ctx("what's my dog's name"))
+        assertEquals(TurnShape.Question, signals.turnShape)
+    }
+
+    @Test
+    fun `who contraction without question mark produces Question via computePostureSignals`() {
+        val signals = computePostureSignals(ctx("who's coming to the party tonight"))
+        assertEquals(TurnShape.Question, signals.turnShape)
+    }
+
+    @Test
+    fun `can you update task still classifies as TaskRequest despite question mark`() {
+        // TaskRequest is checked before Question so "can you update X?" resolves to TaskRequest.
+        assertEquals(TurnShape.TaskRequest, classifyTextPathTurnShape("can you update the doc?"))
+    }
+
+    @Test
+    fun `non-interrogative contraction does not produce Question`() {
+        // "i'm" -> root "i" is not in QUESTION_WORDS; sentence should classify as Disclosure.
+        assertEquals(TurnShape.Disclosure, classifyTextPathTurnShape("i'm really tired and feeling overwhelmed today"))
+    }
 }

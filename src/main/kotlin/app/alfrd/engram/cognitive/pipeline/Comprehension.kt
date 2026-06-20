@@ -65,15 +65,15 @@ class Comprehension(
         val prompt = """
             Classify the following utterance into exactly one intent category.
             Reply with ONLY the category name — no punctuation, no explanation.
-            
+
             Categories:
             - TASK        (imperative request: do something, remind, schedule, create, find)
-            - QUESTION    (asking for information or an answer)
+            - QUESTION    (asking for information or an answer, including recall questions like "what did I tell you about X", "do you remember my dog's name")
             - SOCIAL      (greeting, farewell, small talk, thanks)
-            - META        (asking what the assistant knows or remembers about them)
+            - META        (asking about the assistant's capabilities or how it works — e.g. "what can you do", "how do you work")
             - CORRECTION  (correcting or clarifying a prior response)
             - CLARIFICATION (ambiguous — cannot determine intent)
-            
+
             Utterance: "$utterance"
         """.trimIndent()
 
@@ -113,16 +113,15 @@ class Comprehension(
         // Rule 2 — Correction
         if (isCorrection(lower)) return Tier1Result(IntentType.CORRECTION, 0.80, "correction")
 
-        // Rule 3 — Meta query
-        if (isMeta(lower)) return Tier1Result(IntentType.META, 0.85, "meta_query")
-
-        // Rule 4 — Task request (imperative verbs)
+        // Rule 3 — Task request (imperative verbs)
+        // Note: META is not produced by Tier 1. Recall/memory-retrieval phrasings fall through
+        // to isQuestion() below. Tier 2 (LLM) may emit META for genuine capability queries.
         if (isTask(lower)) return Tier1Result(IntentType.TASK, 0.70, "task_imperative")
 
-        // Rule 5 — Question (interrogative or trailing "?")
+        // Rule 4 — Question (interrogative or trailing "?")
         if (isQuestion(ctx.utterance.trim(), lower)) return Tier1Result(IntentType.QUESTION, 0.70, "question_interrogative")
 
-        // Rule 6 — Ambiguous
+        // Rule 5 — Ambiguous
         return Tier1Result(IntentType.AMBIGUOUS, 0.30, "ambiguous")
     }
 
@@ -147,11 +146,6 @@ class Comprehension(
     private fun isCorrection(lower: String): Boolean {
         val markers = listOf("actually", "no i meant", "no, i meant", "that's not right", "thats not right", "wait")
         return markers.any { lower.startsWith(it) || lower.contains(it) }
-    }
-
-    private fun isMeta(lower: String): Boolean {
-        val patterns = listOf("what do you know about", "what have i told you", "show me my")
-        return patterns.any { lower.contains(it) }
     }
 
     private fun isTask(lower: String): Boolean {
