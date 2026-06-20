@@ -138,15 +138,25 @@ class FirstSessionHandler(
      *     - Acquaintance (default): more formal
      *     - Colleague: warm but professional
      *     - Confidant: warmest
+     *
+     * When [UserGraphService.InvitedEdgeRecord.openingContext] is present, it is prepended to the
+     * trust-phase greeting so first-session invitees receive the warm provenance intro Jacob wrote
+     * before the identity-verification ask.  Blank openingContext falls back to the generic greeting.
      */
     fun handleTurn1(detection: DetectionResult): Turn1Result {
         val edge = detection.invitedEdge
             ?: return Turn1Result(response = CLOSED_BETA_REJECTION, rejected = true)
 
-        val greeting = when (edge.trustPhase.trim().lowercase()) {
+        val baseGreeting = when (edge.trustPhase.trim().lowercase()) {
             "confidant" -> "Good to finally talk. How do you know Jacob?"
             "colleague" -> "Good to hear from you. How do you know Jacob?"
             else        -> "Good to meet you. How do you know Jacob?"  // Acquaintance / default
+        }
+
+        val greeting = if (!edge.openingContext.isNullOrBlank()) {
+            "${edge.openingContext.trim()} $baseGreeting"
+        } else {
+            baseGreeting
         }
 
         return Turn1Result(response = greeting, rejected = false, invitedEdge = edge)

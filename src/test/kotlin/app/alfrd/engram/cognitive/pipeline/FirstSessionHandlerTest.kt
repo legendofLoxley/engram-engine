@@ -177,6 +177,79 @@ class FirstSessionHandlerTest {
         assertTrue("Good to hear from you" in result.response)
     }
 
+    @Test
+    fun `handleTurn1 prepends openingContext when present`() = runTest {
+        val edge = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "We worked together at Acme.",
+            trustPhase          = "Acquaintance",
+            engagementIntent    = "productivity",
+            timestamp           = 1L,
+            openingContext      = "Jacob thought you'd find this useful.",
+        )
+        val handler = buildHandler()
+        val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
+        val result = handler.handleTurn1(detection)
+        assertFalse(result.rejected)
+        // openingContext leads the response
+        assertTrue(result.response.startsWith("Jacob thought you'd find this useful."))
+        // trust-phase greeting and verification ask still present
+        assertTrue("Good to meet you" in result.response)
+        assertTrue("How do you know Jacob?" in result.response)
+    }
+
+    @Test
+    fun `handleTurn1 prepends openingContext with confidant trust calibration`() = runTest {
+        val edge = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "Old friends",
+            trustPhase          = "Confidant",
+            engagementIntent    = "personal",
+            timestamp           = 1L,
+            openingContext      = "I've been excited to get you on here.",
+        )
+        val handler = buildHandler()
+        val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
+        val result = handler.handleTurn1(detection)
+        assertFalse(result.rejected)
+        assertTrue(result.response.startsWith("I've been excited to get you on here."))
+        assertTrue("Good to finally talk" in result.response)
+        assertTrue("How do you know Jacob?" in result.response)
+    }
+
+    @Test
+    fun `handleTurn1 falls back to generic greeting when openingContext is blank`() = runTest {
+        val edge = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "Co-workers",
+            trustPhase          = "Colleague",
+            engagementIntent    = "",
+            timestamp           = 1L,
+            openingContext      = "  ",  // blank — should not be prepended
+        )
+        val handler = buildHandler()
+        val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
+        val result = handler.handleTurn1(detection)
+        assertFalse(result.rejected)
+        // Starts directly with the generic greeting, no stray whitespace prefix
+        assertTrue(result.response.startsWith("Good to hear from you"))
+        assertTrue("How do you know Jacob?" in result.response)
+    }
+
+    @Test
+    fun `handleTurn1 falls back to generic greeting when openingContext is null`() = runTest {
+        val edge = UserGraphService.InvitedEdgeRecord(
+            relationshipContext = "College friends",
+            trustPhase          = "Confidant",
+            engagementIntent    = "growth",
+            timestamp           = 1L,
+            openingContext      = null,
+        )
+        val handler = buildHandler()
+        val detection = FirstSessionHandler.DetectionResult(isFirstSession = true, invitedEdge = edge)
+        val result = handler.handleTurn1(detection)
+        assertFalse(result.rejected)
+        assertTrue(result.response.startsWith("Good to finally talk"))
+        assertTrue("How do you know Jacob?" in result.response)
+    }
+
     // ── Turn 2: match ─────────────────────────────────────────────────────────
 
     @Test
