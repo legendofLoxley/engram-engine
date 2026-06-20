@@ -75,9 +75,8 @@ open class CognitivePipeline(
         internal set
 
     /**
-     * First-session identity verification state.
-     * Set during [initSession] when both detection checks pass; updated through Turn 2.
-     * Null when first-session handling is disabled or not triggered.
+     * First-session state recorded when an invited user is greeted with the warm provenance
+     * intro. Set during [initSession]; null when first-session handling is disabled or not triggered.
      */
     @Volatile var firstSessionState: FirstSessionState? = null
         internal set
@@ -295,29 +294,58 @@ open class CognitivePipeline(
             val detection = firstSessionHandler.detectFirstSession(userId, userEmail)
             if (detection.isFirstSession) {
                 val turn1 = firstSessionHandler.handleTurn1(detection)
-                if (!turn1.rejected) {
-                    // Valid invitee — store state and return Turn 1 greeting.
-                    val edge = turn1.invitedEdge!!
-                    firstSessionState = FirstSessionState(
-                        isFirstSession               = true,
-                        awaitingIdentityVerification = true,
-                        trustPhase                   = edge.trustPhase,
-                        engagementIntent             = edge.engagementIntent,
-                        relationshipContext          = edge.relationshipContext,
-                    )
-                    logger.info(
-                        "initSession userId=$userId email=$userEmail path=first-session-turn1 " +
-                        "trustPhase=${edge.trustPhase}"
-                    )
-                    return InitResponse(
-                        greeting  = turn1.response,
-                        phraseId  = "first-session-turn1",
-                        sessionId = sessionId,
-                    )
+                when {
+                    turn1.seedingError -> {
+                        // INVITED edge present but openingContext missing — surface the error visibly.
+                        logger.error(
+                            "initSession: seeding error for userId=$userId email=$userEmail — " +
+                            "openingContext is blank on INVITED edge"
+                        )
+                        return InitResponse(
+                            greeting  = turn1.response,
+                            phraseId  = "first-session-seeding-error",
+                            sessionId = sessionId,
+                        )
+                    }
+                    !turn1.rejected -> {
+                        // Valid invitee — write VERIFIED edge, seed scaffold, return warm intro.
+                        val edge = turn1.invitedEdge!!
+                        withContext(Dispatchers.IO) {
+                            try {
+                                firstSessionHandler.userGraphService.writeVerifiedEdge(
+                                    userId, System.currentTimeMillis(),
+                                )
+                            } catch (_: Exception) { /* non-fatal */ }
+                        }
+                        val trustPhaseInt = when (edge.trustPhase.trim().lowercase()) {
+                            "colleague"  -> 2
+                            "confidant"  -> 3
+                            else         -> 1  // Acquaintance / default → ORIENTATION
+                        }
+                        try {
+                            val current = engramClient.getScaffoldState(userId)
+                            engramClient.updateScaffoldState(userId, current.copy(trustPhase = trustPhaseInt))
+                        } catch (_: Exception) { /* non-fatal */ }
+                        firstSessionState = FirstSessionState(
+                            isFirstSession   = true,
+                            trustPhase       = edge.trustPhase,
+                            engagementIntent = edge.engagementIntent,
+                        )
+                        logger.info(
+                            "initSession userId=$userId email=$userEmail path=first-session-warm-intro " +
+                            "trustPhase=${edge.trustPhase}"
+                        )
+                        return InitResponse(
+                            greeting  = turn1.response,
+                            phraseId  = "first-session-turn1",
+                            sessionId = sessionId,
+                        )
+                    }
+                    else -> {
+                        // No INVITED edge — fall through to normal greeting selection.
+                        logger.info("initSession userId=$userId email=$userEmail path=closed-beta-rejection")
+                    }
                 }
-                // No INVITED edge — user reached this endpoint authenticated, so the
-                // beta gate is already cleared. Fall through to normal greeting selection.
-                logger.info("initSession userId=$userId email=$userEmail path=closed-beta-rejection")
             } else {
                 // Not first session — capture opening_context for warm intro if present.
                 warmIntroText = detection.invitedEdge?.openingContext?.takeIf { it.isNotBlank() }
@@ -422,32 +450,6 @@ open class CognitivePipeline(
     private suspend fun processInternal(
         utterance: String, sessionId: String, userId: String, debug: Boolean,
     ): Pair<ChatResult, PipelineTrace?> {
-
-        // ── First-session Turn 2 interception ────────────────────────────────
-        // When the user is mid-verification, bypass the normal cognitive pipeline
-        // and route directly to the identity verification handler.
-        val fss = firstSessionState
-        if (fss != null && fss.awaitingIdentityVerification && firstSessionHandler != null) {
-            val turn2 = firstSessionHandler.handleTurn2(userId, utterance, fss)
-            firstSessionState = turn2.newState
-            // On successful verification, seed the scaffold state with the trust phase from
-            // the INVITED edge so subsequent sessions start at the correct onboarding phase.
-            if (turn2.newState.identityVerified) {
-                val trustPhaseInt = when (turn2.newState.trustPhase?.trim()?.lowercase()) {
-                    "colleague"  -> 2
-                    "confidant"  -> 3
-                    else         -> 1  // Acquaintance / default → ORIENTATION
-                }
-                try {
-                    val current = engramClient.getScaffoldState(userId)
-                    engramClient.updateScaffoldState(
-                        userId,
-                        current.copy(trustPhase = trustPhaseInt),
-                    )
-                } catch (_: Exception) { /* non-fatal */ }
-            }
-            return Pair(ChatResult(turn2.response, IntentType.SOCIAL, 1, "first-session"), null)
-        }
 
         val trace = if (debug) PipelineTrace() else null
         // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
