@@ -55,10 +55,14 @@ open class CognitivePipeline(
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
 
+    // Comprehension is a classifier, not a mouth — it never needed identity injection; giving
+    // it the raw client (instead of a voice-wrapped one) drops an irrelevant "you are a voice
+    // assistant, you can hear them" system instruction from tier-2 classification calls.
+    // Isolated in its own commit: unverified whether this shifts real classification output,
+    // since no test here exercises a real model and TestLlmClient fakes don't react to
+    // systemPrompt content either way.
     private val attention     = Attention()
-    // NOTE: kept voice-wrapped here, unchanged from pre-refactor behavior — see the follow-up
-    // commit that removes this wrap for the isolated, independently revertible discussion.
-    private val comprehension = Comprehension(llmClient?.let { VoiceContextLlmClient(it) }, selectTier2Model(llmClient))
+    private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
     private val router        = Router()
     private val script        = Script(engramClient, selectionService)
     private val actor         = Actor(llmClient)
