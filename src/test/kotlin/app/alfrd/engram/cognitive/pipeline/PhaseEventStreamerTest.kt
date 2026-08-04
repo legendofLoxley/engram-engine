@@ -216,18 +216,19 @@ class PhaseEventStreamerTest {
 
     @Test
     fun `synthesis event always carries a non-null source`() = runTest {
+        // No llmClient configured — every branch now degrades through the same centralized
+        // actor fallback rather than a per-branch pool string.
         val streamer = buildStreamer()
-        // SIMPLE (pool) path
+
         val simpleEvents = streamer.stream("Remind me to call the vet", "s1", "u1").toList()
         val simpleSynth = simpleEvents.first { it.phase == "synthesis" }
         assertNotNull(simpleSynth.source, "Synthesis source must not be null")
-        assertEquals("pool", simpleSynth.source, "TaskBranch synthesis must have source=pool")
+        assertEquals("degraded", simpleSynth.source, "TaskBranch synthesis without an LLM must have source=degraded")
 
-        // SOCIAL (pool) path
         val socialEvents = streamer.stream("Hey", "s1", "u1").toList()
         val socialSynth = socialEvents.first { it.phase == "synthesis" }
         assertNotNull(socialSynth.source, "Social synthesis source must not be null")
-        assertEquals("pool", socialSynth.source, "SocialBranch synthesis must have source=pool")
+        assertEquals("degraded", socialSynth.source, "SocialBranch synthesis without an LLM must have source=degraded")
     }
 
     @Test
@@ -277,7 +278,7 @@ class PhaseEventStreamerTest {
         // TimeoutCancellationException; any other exception silently closed the stream
         // after acknowledge had already been flushed to the browser.
         val throwingPipeline = object : CognitivePipeline() {
-            override suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
+            override suspend fun processForStream(utterance: String, sessionId: String, userId: String, modality: Modality): SynthesisResult {
                 throw RuntimeException("simulated infrastructure failure")
             }
         }
@@ -296,7 +297,7 @@ class PhaseEventStreamerTest {
     @Test
     fun `SOCIAL pipeline exception emits apology not silent close`() = runTest {
         val throwingPipeline = object : CognitivePipeline() {
-            override suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
+            override suspend fun processForStream(utterance: String, sessionId: String, userId: String, modality: Modality): SynthesisResult {
                 throw RuntimeException("simulated infrastructure failure")
             }
         }

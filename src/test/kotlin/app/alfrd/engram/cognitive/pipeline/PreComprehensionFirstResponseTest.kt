@@ -4,6 +4,9 @@ import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
+import app.alfrd.engram.cognitive.providers.LlmRequest
+import app.alfrd.engram.cognitive.providers.LlmResponse
+import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -21,7 +24,13 @@ import org.junit.jupiter.api.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class PreComprehensionFirstResponseTest {
 
-    private val pipeline = CognitivePipeline()
+    // Echoes the actor's system prompt back so branch routing can be verified from the
+    // directive text — with no LLM, every branch now produces the same centralized
+    // degraded string, so routing tests need an LLM to distinguish which branch fired.
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+    private val pipeline = CognitivePipeline(llmClient = echoLlm)
 
     // ── Acceptance criterion 1: Disclosure → verbal acknowledgment ────────────
 
@@ -86,10 +95,9 @@ class PreComprehensionFirstResponseTest {
     @Test
     fun `what's the weather like still routes to QuestionBranch`() = runTest {
         val response = pipeline.process("What's the weather like?", "session-1", "user-1")
-        // QuestionBranch fallback (no LLM available in unit tests)
         assertTrue(
-            "question" in response.lowercase() || "trouble" in response.lowercase() || "having" in response.lowercase(),
-            "Expected QuestionBranch response, got: '$response'",
+            response.contains("asked a question", ignoreCase = true),
+            "Expected QuestionBranch's directive, got: '$response'",
         )
     }
 
@@ -98,10 +106,9 @@ class PreComprehensionFirstResponseTest {
     @Test
     fun `can you update the task status still routes to TaskBranch`() = runTest {
         val response = pipeline.process("Can you update the task status?", "session-1", "user-1")
-        // TaskBranch stub contains "noted" and "task"
         assertTrue(
-            "task" in response.lowercase() || "noted" in response.lowercase(),
-            "Expected TaskBranch stub response, got: '$response'",
+            response.contains("task request", ignoreCase = true),
+            "Expected TaskBranch's directive, got: '$response'",
         )
     }
 
@@ -109,8 +116,8 @@ class PreComprehensionFirstResponseTest {
     fun `remind me to call the vet still routes to TaskBranch`() = runTest {
         val response = pipeline.process("Remind me to call the vet", "session-1", "user-1")
         assertTrue(
-            "task" in response.lowercase() || "noted" in response.lowercase(),
-            "Expected TaskBranch stub response, got: '$response'",
+            response.contains("task request", ignoreCase = true),
+            "Expected TaskBranch's directive, got: '$response'",
         )
     }
 

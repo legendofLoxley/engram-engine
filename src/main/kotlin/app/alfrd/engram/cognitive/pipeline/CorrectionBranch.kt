@@ -1,21 +1,20 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
-
 /**
  * Resolves a user correction by locating the relevant stored fact and superseding it,
  * or ingesting the corrected fact when no existing phrase can be found.
  *
+ * This is the director half only: parsing the utterance is pure string logic and stays here.
+ * The actual memory lookup and write happen in [Script] via [RetrievalIntent.Correction] —
+ * this branch never touches [app.alfrd.engram.cognitive.pipeline.memory.EngramClient].
+ *
  * Flow:
  * 1. Strip correction markers ("actually", "no i meant", etc.) from the utterance.
  * 2. Extract the superseded value from a trailing "not X" clause, if present.
- * 3. Query memory for a phrase matching the superseded value; if one exists, amend it.
- * 4. If no existing phrase to amend, ingest the corrected fact directly.
- * 5. If the correction body is too short to act on, return a graceful clarification.
+ * 3. If the correction body is too short to act on, return a graceful clarification (no retrieval).
+ * 4. Otherwise, hand the superseded value and new fact to the script stage.
  */
-class CorrectionBranch(
-    private val engramClient: EngramClient,
-) : Branch {
+class CorrectionBranch : Branch {
 
     companion object {
         private val CORRECTION_PREFIXES: List<String> = listOf(
@@ -47,42 +46,17 @@ class CorrectionBranch(
             correctionBody
         }
 
-        if (newFact.length <= 4) {
-            ctx.branchResult = BranchResult(
-                content = "What should I update?",
+        ctx.branchResult = if (newFact.length <= 4) {
+            BranchResult(
                 responseStrategy = ResponseStrategy.SIMPLE,
-                source = "pool",
-            )
-            return
-        }
-
-        val queryHint = supersededValue ?: newFact.take(80)
-        val existingPhrases = try {
-            engramClient.queryPhrases(ctx.userEmail, queryHint, limit = 5)
-        } catch (_: Exception) {
-            emptyList()
-        }
-
-        val phraseToAmend = supersededValue?.let { sv ->
-            existingPhrases.firstOrNull { it.text.lowercase().contains(sv.lowercase()) }
-        }
-
-        if (phraseToAmend != null) {
-            try { engramClient.amendPhrase(phraseToAmend.uid, newFact) } catch (_: Exception) { }
-            ctx.branchResult = BranchResult(
-                content = "Got it — updated.",
-                responseStrategy = ResponseStrategy.SIMPLE,
-                source = "pool",
+                retrieval = RetrievalIntent.None,
+                directive = "The user's correction was too vague to act on. Ask them, briefly, what they'd like you to update.",
             )
         } else {
-            try {
-                val candidates = engramClient.decompose(newFact, ctx.priorUtterances)
-                if (candidates.isNotEmpty()) engramClient.ingest(candidates, ctx.userEmail)
-            } catch (_: Exception) { }
-            ctx.branchResult = BranchResult(
-                content = "Got it, I'll remember that.",
+            BranchResult(
                 responseStrategy = ResponseStrategy.SIMPLE,
-                source = "pool",
+                retrieval = RetrievalIntent.Correction(supersededValue = supersededValue, newFact = newFact),
+                directive = "The user corrected something you knew. Confirm briefly and warmly that you've updated it — don't repeat the full correction verbatim.",
             )
         }
     }

@@ -2,14 +2,18 @@ package app.alfrd.engram.cognitive.pipeline
 
 /**
  * Expression stage — maps [ResponseStrategy] to a streaming-phase pattern and
- * writes the concatenated result to [CognitiveContext.responseText].
+ * writes the actor's composed text to [CognitiveContext.responseText].
  *
- * Also produces a [StreamingExpressionResult] with distinct Acknowledge / Bridge / Synthesis
- * phases for the voice loop orchestrator.
+ * Also runs a modality-aware safety-net filter: even with a correct per-modality identity
+ * prompt at the [Actor] call site, an LLM can occasionally ignore its system prompt, so this
+ * catches the two ways that can leak — a voice reply admitting it can't hear, or a text reply
+ * falsely claiming it can hear/listen. Both directions read [CognitiveContext.modality] — the
+ * same field the [Actor] reads via [Conditioners.modality] — so there is exactly one source of
+ * truth for "which identity applies to this turn."
  */
 class Expression : CognitiveStage {
 
-    private val modalityLeakPhrases = listOf(
+    private val voiceLeakPhrases = listOf(
         "i can see what you type",
         "as a text-based",
         "i don't have ears",
@@ -17,11 +21,21 @@ class Expression : CognitiveStage {
         "i'm a language model",
     )
 
-    override suspend fun evaluate(ctx: CognitiveContext) {
-        val result = ctx.branchResult ?: return
+    private val textLeakPhrases = listOf(
+        "i can hear you",
+        "i'm listening",
+        "loud and clear",
+        "hearing you fine",
+        "as a voice assistant",
+        "speaking with you",
+    )
 
-        val filtered = applyModalityFilter(result)
-        val streaming = toStreamingResult(filtered)
+    override suspend fun evaluate(ctx: CognitiveContext) {
+        val actorResult = ctx.actorResult ?: return
+        val strategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE
+
+        val filteredText = applyModalityFilter(actorResult.text, ctx.modality)
+        val streaming = toStreamingResult(filteredText, strategy)
         ctx.streamingExpressionResult = streaming
 
         // Backward-compat: flatten phases into the list / concatenated text
@@ -37,29 +51,31 @@ class Expression : CognitiveStage {
         ctx.responseText = streaming.synthesis
     }
 
-    private fun applyModalityFilter(result: BranchResult): BranchResult {
-        val lower = result.content.lowercase()
-        return if (modalityLeakPhrases.any { lower.contains(it) })
-            result.copy(content = "I'm right here. What do you need?")
-        else result
+    private fun applyModalityFilter(text: String, modality: Modality): String {
+        val lower = text.lowercase()
+        val leaks = if (modality == Modality.VOICE) voiceLeakPhrases else textLeakPhrases
+        val fallback = if (modality == Modality.VOICE)
+            "I'm right here. What do you need?"
+        else
+            "I'm here — what do you need?"
+        return if (leaks.any { lower.contains(it) }) fallback else text
     }
 
     /**
-     * Decompose a [BranchResult] into streaming cognition phases.
+     * Decompose composed text into streaming cognition phases.
      *
      * Phrase selection is deterministic here (first element of pool).
      * The orchestrator may override acknowledge/bridge using its own
      * session-aware deduplication.
      */
-    fun toStreamingResult(result: BranchResult): StreamingExpressionResult {
-        val strategy = result.responseStrategy
+    fun toStreamingResult(text: String, strategy: ResponseStrategy): StreamingExpressionResult {
         val ackPool = ExpressionPhrasePool.acknowledgeFor(strategy)
         val bridgePool = ExpressionPhrasePool.bridgeFor(strategy)
 
         return StreamingExpressionResult(
             acknowledge = ackPool.firstOrNull(),
             bridge = bridgePool.firstOrNull(),
-            synthesis = result.content,
+            synthesis = text,
             strategy = strategy,
         )
     }

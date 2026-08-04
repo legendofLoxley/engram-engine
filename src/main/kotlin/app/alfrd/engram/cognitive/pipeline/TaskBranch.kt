@@ -1,23 +1,17 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
-
 /**
- * Task branch — graceful decline stub.
- *
- * Memory ingestion is handled by the universal capture step in [CognitivePipeline.processInternal],
- * not here — every PROCESS turn is captured exactly once regardless of branch.
+ * Task branch — the director for task requests. Task execution isn't implemented yet, so
+ * this only produces a conditioner instructing the actor to acknowledge honestly.
  */
-class TaskBranch(
-    @Suppress("UNUSED_PARAMETER") private val engramClient: EngramClient?,
-    @Suppress("UNUSED_PARAMETER") private val memoryWriteService: MemoryWriteService? = null,
-) : Branch {
+class TaskBranch : Branch {
 
     override suspend fun execute(ctx: CognitiveContext) {
         ctx.branchResult = BranchResult(
-            content          = "I've noted that — task execution is coming soon.",
             responseStrategy = ResponseStrategy.SIMPLE,
+            retrieval = RetrievalIntent.None,
+            directive = "The user made a task request. Task execution isn't available yet — acknowledge that " +
+                "you've noted it, briefly and warmly, but do not claim to have performed or scheduled it.",
         )
     }
 }

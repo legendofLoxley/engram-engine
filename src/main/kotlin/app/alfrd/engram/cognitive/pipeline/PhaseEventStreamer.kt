@@ -158,7 +158,7 @@ class PhaseEventStreamer(
             if (strategy == ResponseStrategy.SOCIAL) {
                 // SOCIAL path: no acknowledge/bridge — synthesise directly.
                 val result = awaitWithTimeout {
-                    pipeline.processForStream(utterance, sessionId, userId)
+                    pipeline.processForStream(utterance, sessionId, userId, modality = Modality.VOICE)
                 }
                 if (result.text == APOLOGY_TEXT) {
                     send(phaseEvent("apology", result.text, turnId, traceId))
@@ -181,7 +181,9 @@ class PhaseEventStreamer(
             // they never propagate as scope-cancellation to the parent channelFlow coroutine.
             val pipelineDeferred = async {
                 try {
-                    pipeline.processForStream(utterance, sessionId, userId)
+                    // This orchestrator is voice-shaped (acknowledge/bridge pre-roll for TTS timing) —
+                    // declare that explicitly now that CognitivePipeline defaults to text identity.
+                    pipeline.processForStream(utterance, sessionId, userId, modality = Modality.VOICE)
                 } catch (e: CancellationException) {
                     throw e // external scope cancel — propagate
                 } catch (_: Exception) {

@@ -20,6 +20,10 @@ data class CognitiveContext(
     val userEmail: String = "",
     val timestamp: Instant = Instant.now(),
     val zoneId: java.time.ZoneId? = null,
+    /** Communication modality for this turn. Defaults to TEXT — an unset flag must never produce a voice identity. */
+    val modality: Modality = Modality.TEXT,
+    /** 1-indexed turn number within the session. Defaults to 1 so standalone/test construction behaves as turn 1. */
+    val turnIndex: Int = 1,
 
     // ── STT / Flux events (pre-comprehension posture signals) ─────────────────
     /** STT transcription results for the current turn (used for speech_final detection). */
@@ -54,6 +58,10 @@ data class CognitiveContext(
     var responseIntent: IntentType? = null,
     var responsePhrases: List<ResponsePhrase>? = null,
     var phaseTransitionEvidence: String? = null,
+
+    // ── Reason (Actor) ───────────────────────────────────────────────────────
+    /** Set by the [Actor] stage — the sole writer of user-facing text. Null until it has run. */
+    var actorResult: ActorResult? = null,
 
     // ── Expression ────────────────────────────────────────────────────────────
     var streamingPhases: List<String>? = null,

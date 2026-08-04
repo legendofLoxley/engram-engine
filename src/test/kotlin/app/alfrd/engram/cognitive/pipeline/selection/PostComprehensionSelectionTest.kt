@@ -260,7 +260,7 @@ class PostComprehensionSelectionTest {
 
         val postCompCtx = ctx.copy(
             sessionId = "s-edge-postcomp",
-            branchResult = BranchResult("content", ResponseStrategy.SOCIAL),
+            branchResult = BranchResult(responseStrategy = ResponseStrategy.SOCIAL),
         )
         val postCompResult = service.select(
             ResponseSelectionQuery(

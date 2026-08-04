@@ -55,13 +55,13 @@ open class CognitivePipeline(
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
 
-    // Wrap with voice identity so every LLM call includes the base voice-modality prompt.
-    // The original llmClient is kept separately for the CloudLlmClient type check in selectTier2Model.
-    private val voiceLlmClient: LlmClient? = llmClient?.let { VoiceContextLlmClient(it) }
-
     private val attention     = Attention()
-    private val comprehension = Comprehension(voiceLlmClient, selectTier2Model(llmClient))
-    private val router        = Router(engramClient, voiceLlmClient, selectionService, memoryWriteService)
+    // NOTE: kept voice-wrapped here, unchanged from pre-refactor behavior — see the follow-up
+    // commit that removes this wrap for the isolated, independently revertible discussion.
+    private val comprehension = Comprehension(llmClient?.let { VoiceContextLlmClient(it) }, selectTier2Model(llmClient))
+    private val router        = Router()
+    private val script        = Script(engramClient, selectionService)
+    private val actor         = Actor(llmClient)
     private val expression    = Expression()
 
     private val stages: List<CognitiveStage> = listOf(attention, comprehension, expression)
@@ -83,7 +83,21 @@ open class CognitivePipeline(
 
     @Volatile private var sessionZoneId: java.time.ZoneId? = null
 
+    /**
+     * Per-session turn counters, keyed by sessionId. Every public method here already takes
+     * [String] sessionId per call, so — unlike, say, [pendingOutcome], which assumes one
+     * instance per session — this has to hold up even when a single [CognitivePipeline] is
+     * driven across multiple sessions (as several tests deliberately do). This is the reliable
+     * source of "what turn number is this" — [CognitiveContext.priorUtterances] is never
+     * populated in production and cannot be used for this. Drives the turn-1-only greeting
+     * gate in [SocialBranch].
+     */
+    private val turnCounters = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
     companion object {
+        /** Human-readable name of the model [Actor] uses, for debug-trace reporting. Keep in sync with [Actor]. */
+        private const val ACTOR_MODEL_NAME = "claude-sonnet-4-5"
+
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
             if (llmClient == null) return null
             if (llmClient is CloudLlmClient) return when {
@@ -128,8 +142,10 @@ open class CognitivePipeline(
     /**
      * Process a single utterance end-to-end and return the final response text.
      */
-    open suspend fun process(utterance: String, sessionId: String, userId: String): String =
-        processInternal(utterance, sessionId, userId, debug = false).first.responseText
+    open suspend fun process(
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+    ): String =
+        processInternal(utterance, sessionId, userId, debug = false, modality = modality).first.responseText
 
     /**
      * Process a single utterance end-to-end and return synthesis text with its source tag.
@@ -138,8 +154,10 @@ open class CognitivePipeline(
      *
      * Overridable so tests can inject controlled failures without touching [process].
      */
-    open suspend fun processForStream(utterance: String, sessionId: String, userId: String): SynthesisResult {
-        val (chatResult, _) = processInternal(utterance, sessionId, userId, debug = false)
+    open suspend fun processForStream(
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+    ): SynthesisResult {
+        val (chatResult, _) = processInternal(utterance, sessionId, userId, debug = false, modality = modality)
         return SynthesisResult(chatResult.responseText, chatResult.synthesisSource)
     }
 
@@ -223,15 +241,19 @@ open class CognitivePipeline(
      * Process a single utterance and return both the response text and the resolved intent.
      * Used by the HTTP chat surface to populate [ChatResult.intent] in the API response.
      */
-    suspend fun processForChat(utterance: String, sessionId: String, userId: String): ChatResult =
-        processInternal(utterance, sessionId, userId, debug = false).first
+    suspend fun processForChat(
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+    ): ChatResult =
+        processInternal(utterance, sessionId, userId, debug = false, modality = modality).first
 
     /**
      * Process a single utterance with full instrumentation, returning both the
      * chat result and the pipeline trace for the debug endpoint.
      */
-    suspend fun processForDebug(utterance: String, sessionId: String, userId: String): DebugChatResult {
-        val (chatResult, trace) = processInternal(utterance, sessionId, userId, debug = true)
+    suspend fun processForDebug(
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+    ): DebugChatResult {
+        val (chatResult, trace) = processInternal(utterance, sessionId, userId, debug = true, modality = modality)
         return DebugChatResult(chatResult, trace!!)
     }
 
@@ -448,9 +470,10 @@ open class CognitivePipeline(
     }
 
     private suspend fun processInternal(
-        utterance: String, sessionId: String, userId: String, debug: Boolean,
+        utterance: String, sessionId: String, userId: String, debug: Boolean, modality: Modality = Modality.TEXT,
     ): Pair<ChatResult, PipelineTrace?> {
 
+        val turnIndex = turnCounters.merge(sessionId, 1, Int::plus)!!
         val trace = if (debug) PipelineTrace() else null
         // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
         // the breakdown always adds up correctly regardless of sub-millisecond rounding.
@@ -494,12 +517,14 @@ open class CognitivePipeline(
             timestamp = java.time.Instant.now(),
             zoneId    = sessionZoneId,
             trace     = trace,
+            modality  = modality,
+            turnIndex = turnIndex,
         )
 
         attention.evaluate(ctx)
 
         if (ctx.attentionAction != AttentionAction.PROCESS) {
-            return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, "pool"), trace)
+            return Pair(ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, "none"), trace)
         }
 
         // ── Comprehension ────────────────────────────────────────────────────
@@ -526,9 +551,20 @@ open class CognitivePipeline(
             trace.routing.route = routeNameFor(ctx.intent, ctx.turnShape)
         }
 
-        // ── Reason (Branch execution) ────────────────────────────────────────
+        // ── Reason (Branch execution — director) ─────────────────────────────
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
+
+        // ── Script (retrieval) + Actor (composition) ─────────────────────────
+        // The only two components allowed to touch EngramClient/LlmClient for this turn.
+        val retrievedScript = script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
+        val conditioners = Conditioners(
+            modality         = ctx.modality,
+            trustPhase       = ctx.trustPhase,
+            responseStrategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE,
+            directive        = ctx.branchResult?.directive ?: "Respond naturally and briefly.",
+        )
+        ctx.actorResult = actor.compose(ctx.utterance, retrievedScript, conditioners)
 
         // ── Universal memory ingestion ────────────────────────────────────────
         // Every PROCESS turn is silently decomposed and ingested exactly once,
@@ -559,7 +595,7 @@ open class CognitivePipeline(
             reasonNs = System.nanoTime() - reasonStartNs
             trace!!.latencyBreakdown.reasonMs =
                 java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(reasonNs)
-            val (provider, model) = reasonModelInfo(branch)
+            val (provider, model) = if (ctx.actorResult?.source == "llm") "anthropic" to ACTOR_MODEL_NAME else null to null
             trace.model.reasonProvider = provider
             trace.model.reasonModel = model
 
@@ -634,13 +670,13 @@ open class CognitivePipeline(
 
         logger.info(
             "turn sessionId=$sessionId userId=$userId intent=${ctx.intent} " +
-            "branch=${branch::class.simpleName} source=${ctx.branchResult?.source ?: "pool"} " +
+            "branch=${branch::class.simpleName} source=${ctx.actorResult?.source ?: "degraded"} " +
             "utterance=\"${ctx.utterance}\" response=\"${ctx.responseText}\""
         )
         // TODO: log comprehensionTier and selectionResult.phraseId at DEBUG level for phrase-level tracing
 
         return Pair(
-            ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, ctx.branchResult?.source ?: "pool"),
+            ChatResult(ctx.responseText, ctx.intent, ctx.comprehensionTier, ctx.actorResult?.source ?: "degraded"),
             trace,
         )
     }
@@ -681,11 +717,6 @@ open class CognitivePipeline(
             IntentType.CLARIFICATION,
             IntentType.AMBIGUOUS               -> "clarification_branch"
         }
-    }
-
-    private fun reasonModelInfo(branch: Branch): Pair<String?, String?> = when (branch) {
-        is QuestionBranch -> if (llmClient != null) ("anthropic" to "claude-3-7-sonnet") else (null to null)
-        else              -> null to null
     }
 
     /**

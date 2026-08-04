@@ -3,214 +3,178 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
+import app.alfrd.engram.cognitive.providers.LlmRequest
+import app.alfrd.engram.cognitive.providers.LlmResponse
+import app.alfrd.engram.cognitive.providers.TestLlmClient
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CorrectionBranch — unit tests
+// CorrectionBranch — director-only unit tests (pure parsing, no EngramClient)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class CorrectionBranchTest {
 
-    // ── Acceptance: "not X" amends existing phrase; subsequent recall returns new value ──
+    private val branch = CorrectionBranch()
 
     @Test
-    fun `correction with not-X amends existing phrase and subsequent recall returns corrected value`() = runTest {
-        val engram = InMemoryEngramClient()
-        // Seed the existing fact
-        engram.ingest(
-            listOf(PhraseCandidate("My dog's name is Neutron", "user", PhraseCategory.CONTEXT)),
-            userEmail = "user-1",
-        )
-
-        val branch = CorrectionBranch(engram)
+    fun `correction with not-X produces a Correction retrieval intent`() = runTest {
         val ctx = CognitiveContext(
             utterance = "Actually my dog's name is Newton, not Neutron",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
+            sessionId = "s", userId = "user-1", userEmail = "user-1",
         )
         branch.execute(ctx)
 
-        // Should acknowledge the update, not the stub
-        val content = ctx.branchResult!!.content
-        assertFalse(
-            content.contains("Corrections aren't available yet"),
-            "Must not return stub, got: $content",
-        )
-        assertTrue(content.isNotBlank())
-
-        // Subsequent recall should return Newton, not Neutron
-        val recalled = engram.queryPhrases("user-1", "dog")
-        val texts = recalled.map { it.text.lowercase() }
-        assertTrue(texts.any { it.contains("newton") }, "Expected Newton in memory after correction, got: $recalled")
-        assertFalse(texts.any { it.contains("neutron") && !it.contains("newton") },
-            "Neutron should be superseded, got: $recalled")
+        val retrieval = ctx.branchResult!!.retrieval
+        assertTrue(retrieval is RetrievalIntent.Correction, "Expected Correction intent, got: $retrieval")
+        retrieval as RetrievalIntent.Correction
+        assertEquals("neutron", retrieval.supersededValue?.lowercase())
+        assertTrue(retrieval.newFact.contains("Newton"), "Expected new fact to mention Newton, got: ${retrieval.newFact}")
     }
 
-    // ── No existing phrase: ingest the corrected fact and acknowledge ──────────
-
     @Test
-    fun `correction without matching memory ingests new fact and acknowledges`() = runTest {
-        val engram = InMemoryEngramClient()
-        val branch = CorrectionBranch(engram)
-        val ctx = CognitiveContext(
-            utterance = "Actually my name is Alex, not Sam",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
-        )
-        branch.execute(ctx)
-
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("Corrections aren't available yet"), "Must not return stub, got: $content")
-        assertTrue(content.isNotBlank())
-        // The new fact should be ingested
-        val phrases = engram.queryPhrases("user-1", "alex")
-        assertTrue(phrases.isNotEmpty(), "Expected corrected fact to be stored, got: $phrases")
-    }
-
-    // ── Correction with new fact but no "not X": ingest and acknowledge ────────
-
-    @Test
-    fun `correction without not-X clause ingests new fact`() = runTest {
-        val engram = InMemoryEngramClient()
-        val branch = CorrectionBranch(engram)
+    fun `correction without not-X clause still produces a Correction intent with null superseded value`() = runTest {
         val ctx = CognitiveContext(
             utterance = "Actually I prefer TypeScript over JavaScript",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
+            sessionId = "s", userId = "user-1", userEmail = "user-1",
         )
         branch.execute(ctx)
 
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("Corrections aren't available yet"), "Must not return stub, got: $content")
-        assertTrue(content.isNotBlank())
+        val retrieval = ctx.branchResult!!.retrieval
+        assertTrue(retrieval is RetrievalIntent.Correction)
+        retrieval as RetrievalIntent.Correction
+        assertNull(retrieval.supersededValue)
+        assertTrue(retrieval.newFact.isNotBlank())
     }
 
-    // ── Unresolvable (too vague) correction returns clarification, not stub ────
-
     @Test
-    fun `unresolvable correction returns clarification question`() = runTest {
-        val engram = InMemoryEngramClient()
-        val branch = CorrectionBranch(engram)
-        val ctx = CognitiveContext(
-            utterance = "wait",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
-        )
+    fun `unresolvable (too vague) correction produces no retrieval and a clarification directive`() = runTest {
+        val ctx = CognitiveContext(utterance = "wait", sessionId = "s", userId = "user-1", userEmail = "user-1")
         branch.execute(ctx)
 
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("Corrections aren't available yet"), "Must not return stub, got: $content")
-        assertTrue(content.isNotBlank())
+        assertEquals(RetrievalIntent.None, ctx.branchResult!!.retrieval)
         assertTrue(
-            content.contains("update", ignoreCase = true) || content.contains("correct", ignoreCase = true),
-            "Expected clarification, got: $content",
+            ctx.branchResult!!.directive.contains("update", ignoreCase = true),
+            "Expected the too-vague directive to ask what to update, got: ${ctx.branchResult!!.directive}",
         )
     }
 
     @Test
-    fun `no I meant with vague body returns clarification`() = runTest {
-        val engram = InMemoryEngramClient()
-        val branch = CorrectionBranch(engram)
-        val ctx = CognitiveContext(
-            utterance = "no, i meant it",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
-        )
+    fun `no I meant with vague body produces no retrieval`() = runTest {
+        val ctx = CognitiveContext(utterance = "no, i meant it", sessionId = "s", userId = "user-1", userEmail = "user-1")
         branch.execute(ctx)
-
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("Corrections aren't available yet"), "Must not return stub, got: $content")
+        assertEquals(RetrievalIntent.None, ctx.branchResult!!.retrieval)
     }
-
-    // ── Response strategy ──────────────────────────────────────────────────────
 
     @Test
     fun `correction branch sets SIMPLE response strategy`() = runTest {
-        val engram = InMemoryEngramClient()
-        engram.ingest(
-            listOf(PhraseCandidate("My cat's name is Whiskers", "user", PhraseCategory.CONTEXT)),
-            userEmail = "user-1",
-        )
-        val branch = CorrectionBranch(engram)
         val ctx = CognitiveContext(
             utterance = "Actually my cat's name is Shadow, not Whiskers",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
+            sessionId = "s", userId = "user-1", userEmail = "user-1",
         )
         branch.execute(ctx)
         assertEquals(ResponseStrategy.SIMPLE, ctx.branchResult!!.responseStrategy)
     }
 
-    // ── Source tag ─────────────────────────────────────────────────────────────
-
     @Test
-    fun `correction branch source is pool`() = runTest {
-        val engram = InMemoryEngramClient()
-        val branch = CorrectionBranch(engram)
-        val ctx = CognitiveContext(
-            utterance = "Actually I live in Portland, not Seattle",
-            sessionId = "s",
-            userId = "user-1",
-            userEmail = "user-1",
-        )
-        branch.execute(ctx)
-        assertEquals("pool", ctx.branchResult!!.source)
+    fun `correction branch never touches EngramClient directly`() {
+        // Compile-time guarantee, not a runtime assertion: CorrectionBranch() takes zero
+        // constructor arguments, so there is no way to hand it an EngramClient.
+        CorrectionBranch()
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sweep: no turn may produce "Corrections aren't available yet."
+// Script — correction resolution (the amend/ingest behavior moved here from the branch)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class CorrectionStubSweepTest {
+class ScriptCorrectionTest {
 
-    private val STUB = "Corrections aren't available yet."
+    @Test
+    fun `not-X amends the existing phrase and subsequent recall returns the corrected value`() = runTest {
+        val engram = InMemoryEngramClient()
+        engram.ingest(
+            listOf(PhraseCandidate("My dog's name is Neutron", "user", PhraseCategory.CONTEXT)),
+            userEmail = "user-1",
+        )
+        val script = Script(engram)
+        val ctx = CognitiveContext(
+            utterance = "Actually my dog's name is Newton, not Neutron",
+            sessionId = "s", userId = "user-1", userEmail = "user-1",
+        )
 
-    private val pipeline = CognitivePipeline()
+        val result = script.run(ctx, RetrievalIntent.Correction(supersededValue = "Neutron", newFact = "my dog's name is Newton"))
+        assertEquals("correction-amended", result.label)
 
-    private suspend fun assertNoStub(utterance: String) {
-        val response = pipeline.process(utterance, "s", "u")
+        val recalled = engram.queryPhrases("user-1", "dog")
+        val texts = recalled.map { it.text.lowercase() }
+        assertTrue(texts.any { it.contains("newton") }, "Expected Newton in memory after correction, got: $recalled")
         assertFalse(
-            response == STUB,
-            "Stub must not be returned for utterance \"$utterance\", got: $response",
+            texts.any { it.contains("neutron") && !it.contains("newton") },
+            "Neutron should be superseded, got: $recalled",
         )
     }
 
     @Test
-    fun `actually utterance does not return canned stub`() = runTest {
-        assertNoStub("Actually it's Newton, not Neutron")
+    fun `no matching phrase ingests the new fact fresh`() = runTest {
+        val engram = InMemoryEngramClient()
+        val script = Script(engram)
+        val ctx = CognitiveContext(
+            utterance = "Actually my name is Alex, not Sam",
+            sessionId = "s", userId = "user-1", userEmail = "user-1",
+        )
+
+        val result = script.run(ctx, RetrievalIntent.Correction(supersededValue = "Sam", newFact = "my name is Alex"))
+        assertEquals("correction-ingested", result.label)
+
+        val phrases = engram.queryPhrases("user-1", "alex")
+        assertTrue(phrases.isNotEmpty(), "Expected corrected fact to be stored, got: $phrases")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sweep: every correction utterance routes to CorrectionBranch's directive, not a
+// stub or a wrong branch — verified by echoing the actor's system prompt back.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class CorrectionRoutingSweepTest {
+
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+    private val pipeline = CognitivePipeline(llmClient = echoLlm)
+
+    private suspend fun assertRoutedToCorrection(utterance: String) {
+        val response = pipeline.process(utterance, "s-${utterance.hashCode()}", "u")
+        assertTrue(
+            response.contains("corrected something", ignoreCase = true),
+            "Expected CorrectionBranch's directive to reach the actor for \"$utterance\", got: $response",
+        )
     }
 
     @Test
-    fun `no i meant utterance does not return canned stub`() = runTest {
-        assertNoStub("No I meant the staging deploy")
+    fun `actually utterance routes to correction`() = runTest {
+        assertRoutedToCorrection("Actually it's Newton, not Neutron")
     }
 
     @Test
-    fun `no comma i meant utterance does not return canned stub`() = runTest {
-        assertNoStub("No, I meant the other one")
+    fun `no i meant utterance routes to correction`() = runTest {
+        assertRoutedToCorrection("No I meant the staging deploy")
     }
 
     @Test
-    fun `thats not right utterance does not return canned stub`() = runTest {
-        assertNoStub("That's not right, I said Berlin not Paris")
+    fun `no comma i meant utterance routes to correction`() = runTest {
+        assertRoutedToCorrection("No, I meant the other one")
     }
 
     @Test
-    fun `wait utterance does not return canned stub`() = runTest {
-        assertNoStub("Wait, I meant Tuesday")
+    fun `thats not right utterance routes to correction`() = runTest {
+        assertRoutedToCorrection("That's not right, I said Berlin not Paris")
     }
 
     @Test
-    fun `correction intent utterance does not return canned stub`() = runTest {
-        assertNoStub("Actually my project deadline is Friday")
+    fun `correction intent utterance routes to correction`() = runTest {
+        assertRoutedToCorrection("Actually the deadline is Friday, not Thursday")
     }
 }

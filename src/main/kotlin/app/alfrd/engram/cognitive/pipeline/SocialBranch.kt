@@ -1,89 +1,52 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
-import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.model.BranchType
 import app.alfrd.engram.model.ExpressionPhase
 import app.alfrd.engram.model.ResponseCategory
-import java.time.LocalTime
 
 /**
- * SocialBranch — handles greetings, thanks, and farewells without LLM or memory.
- * Target < 50 ms.
+ * SocialBranch — the director for greetings, thanks, farewells, and modality checks.
  *
- * When [selectionService] is provided, responses are selected from the ResponsePhrase
- * pool with full scoring. Falls back to hardcoded strings when the service is null
- * or returns no candidates.
+ * Produces conditioners only. The greeting case is gated on [CognitiveContext.turnIndex]:
+ * a GREETING-category retrieval (and the "greet them" directive) is only ever produced on
+ * turn 1 of a session — every subsequent unmatched SOCIAL utterance is treated as smalltalk,
+ * never a repeat greeting.
  */
-class SocialBranch(
-    private val selectionService: ResponseSelectionService? = null,
-) : Branch {
+class SocialBranch : Branch {
 
     override suspend fun execute(ctx: CognitiveContext) {
         val lower = ctx.utterance.trim().lowercase()
 
-        val response = when {
-            isGoodbye(lower) -> selectOrFallback(
-                ctx = ctx,
-                category = ResponseCategory.SIGN_OFF,
-                expressionPhase = ExpressionPhase.SYNTHESIS,
-                fallback = "Until next time.",
-            )
-            isThanks(lower) -> selectOrFallback(
-                ctx = ctx,
-                category = ResponseCategory.RECEIPT,
-                expressionPhase = ExpressionPhase.FIRST_RESPONSE,
-                fallback = "Of course.",
-            )
-            isModalityCheck(lower) -> pickModalityConfirmation()
-            else -> selectOrFallback(
-                ctx = ctx,
-                category = ResponseCategory.GREETING,
-                expressionPhase = ExpressionPhase.FIRST_RESPONSE,
-                fallback = timeBasedGreeting(ctx.zoneId),
-            )
+        // expressionPhase matches the pre-split SocialBranch exactly: SIGN_OFF phrases are
+        // seeded under SYNTHESIS, RECEIPT/GREETING under FIRST_RESPONSE.
+        val (retrieval, directive) = when {
+            isGoodbye(lower) -> phrasePool(ResponseCategory.SIGN_OFF, ExpressionPhase.SYNTHESIS) to
+                "The user is signing off. Say a brief, warm goodbye."
+
+            isThanks(lower) -> phrasePool(ResponseCategory.RECEIPT, ExpressionPhase.FIRST_RESPONSE) to
+                "The user thanked you. Acknowledge briefly and warmly — no need to over-explain."
+
+            isModalityCheck(lower) -> RetrievalIntent.None to
+                "The user is checking whether you're there or paying attention. Confirm you're present " +
+                "and ready, in a way appropriate to how you're communicating with them."
+
+            ctx.turnIndex <= 1 -> phrasePool(ResponseCategory.GREETING, ExpressionPhase.FIRST_RESPONSE) to
+                "This is the first turn of the session. Greet the user warmly, appropriate to the time of day."
+
+            else -> RetrievalIntent.None to
+                "The user made small talk (\"${ctx.utterance.trim()}\"). This is NOT the first turn of the " +
+                "session — you already greeted them earlier. Do not greet them again. Respond naturally and briefly."
         }
 
         ctx.branchResult = BranchResult(
-            content = response,
             responseStrategy = ResponseStrategy.SOCIAL,
+            retrieval = retrieval,
+            directive = directive,
         )
     }
 
-    private fun selectOrFallback(
-        ctx: CognitiveContext,
-        category: ResponseCategory,
-        expressionPhase: ExpressionPhase,
-        fallback: String,
-    ): String {
-        if (selectionService == null) return fallback
-
-        return try {
-            val query = ResponseSelectionQuery(
-                branch = BranchType.SOCIAL,
-                expressionPhase = expressionPhase,
-                category = category,
-                context = ctx,
-                limit = 1,
-            )
-            val selectionStartMs = System.currentTimeMillis()
-            val results = selectionService.select(query)
-            ctx.selectionLatencyMs = System.currentTimeMillis() - selectionStartMs
-            ctx.selectionResult = results.firstOrNull()
-            results.firstOrNull()?.interpolated ?: fallback
-        } catch (_: Exception) {
-            fallback
-        }
-    }
-
-    private fun timeBasedGreeting(zoneId: java.time.ZoneId? = null): String {
-        val hour = LocalTime.now(zoneId ?: java.time.ZoneId.systemDefault()).hour
-        return when {
-            hour < 12 -> "Good morning."
-            hour < 17 -> "Good afternoon."
-            else      -> "Good evening."
-        }
-    }
+    private fun phrasePool(category: ResponseCategory, expressionPhase: ExpressionPhase): RetrievalIntent =
+        RetrievalIntent.PhrasePool(branch = BranchType.SOCIAL, category = category, expressionPhase = expressionPhase)
 
     private fun isGoodbye(lower: String) =
         listOf("bye", "goodbye", "see you", "until next time", "take care").any { lower.contains(it) }
@@ -97,15 +60,4 @@ class SocialBranch(
             "is this working", "can you see me", "hello?",
             "is anyone there", "can you understand me",
         ).any { lower == it || lower.contains(it) }
-
-    private fun pickModalityConfirmation(): String {
-        val options = listOf(
-            "Loud and clear.",
-            "I'm here.",
-            "I can hear you.",
-            "Right here — go ahead.",
-            "Hearing you fine.",
-        )
-        return options.random()
-    }
 }

@@ -5,8 +5,9 @@ class ClarificationBranch : Branch {
 
     override suspend fun execute(ctx: CognitiveContext) {
         ctx.branchResult = BranchResult(
-            content = "Could you say more about what you mean?",
             responseStrategy = ResponseStrategy.SOCIAL,
+            retrieval = RetrievalIntent.None,
+            directive = "The user's intent is unclear. Ask a brief, warm clarifying question about what they mean.",
         )
     }
 }

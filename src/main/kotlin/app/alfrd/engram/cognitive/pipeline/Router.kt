@@ -1,19 +1,13 @@
 package app.alfrd.engram.cognitive.pipeline
 
-import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
-import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
-import app.alfrd.engram.cognitive.providers.LlmClient
 
-
-/** Maps an [IntentType] (and optional [TurnShape]) to the appropriate [Branch] instance. Pure function — no state. */
-class Router(
-    private val engramClient: EngramClient,
-    private val llmClient: LlmClient?,
-    private val selectionService: ResponseSelectionService? = null,
-    private val memoryWriteService: MemoryWriteService? = null,
-) {
+/**
+ * Maps an [IntentType] (and optional [TurnShape]) to the appropriate [Branch] instance.
+ * Pure function — no state, no dependencies. Branches are directors: they classify the turn
+ * and produce conditioners, never language or I/O, so they need nothing wired in here.
+ */
+class Router {
 
     fun route(intent: IntentType, turnShape: TurnShape? = null): Branch {
         // ── Text-path posture routing ───────────────────────────────────────
@@ -22,19 +16,19 @@ class Router(
         when (turnShape) {
             TurnShape.Disclosure,
             TurnShape.FYI,
-            TurnShape.Continuation -> return VerbalMoveBranch(selectionService, turnShape)
-            TurnShape.TaskRequest  -> return TaskBranch(engramClient, memoryWriteService)
-            TurnShape.Correction   -> return CorrectionBranch(engramClient)
+            TurnShape.Continuation -> return VerbalMoveBranch(turnShape)
+            TurnShape.TaskRequest  -> return TaskBranch()
+            TurnShape.Correction   -> return CorrectionBranch()
             else                   -> { /* fall through to intent-based routing */ }
         }
 
         // ── Intent-based routing ────────────────────────────────────────────
         return when (intent) {
-            IntentType.SOCIAL                -> SocialBranch(selectionService)
-            IntentType.QUESTION              -> QuestionBranch(engramClient, llmClient)
-            IntentType.TASK                  -> TaskBranch(engramClient, memoryWriteService)
-            IntentType.CORRECTION            -> CorrectionBranch(engramClient)
-            IntentType.META                  -> QuestionBranch(engramClient, llmClient)
+            IntentType.SOCIAL                -> SocialBranch()
+            IntentType.QUESTION              -> QuestionBranch()
+            IntentType.TASK                  -> TaskBranch()
+            IntentType.CORRECTION            -> CorrectionBranch()
+            IntentType.META                  -> QuestionBranch()
             IntentType.CLARIFICATION,
             IntentType.AMBIGUOUS             -> ClarificationBranch()
         }

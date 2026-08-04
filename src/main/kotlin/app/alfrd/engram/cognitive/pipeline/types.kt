@@ -20,13 +20,17 @@ data class AffectConfig(
     val energy: EnergyLevel = EnergyLevel.MEDIUM,
 )
 
+/**
+ * Output of a branch (the director): conditioners for the actor, never user-facing text.
+ * [retrieval] tells the [Script] stage what grounding material to fetch, if any.
+ * [directive] is a free-form instruction to the [Actor] — also never shown to the user.
+ */
 data class BranchResult(
-    val content: String,
     val responseStrategy: ResponseStrategy,
+    val retrieval: RetrievalIntent = RetrievalIntent.None,
+    val directive: String = "Respond naturally and briefly.",
     val memoryWrites: List<String>? = null,
     val phaseTransitionEvidence: String? = null,
-    /** "pool" for canned/selection responses, "llm" for LLM-generated responses. */
-    val source: String = "pool",
 )
 
 /**
@@ -37,3 +41,18 @@ const val VOICE_IDENTITY_SYSTEM_PROMPT =
     "You are alfrd, a voice assistant. The user is speaking to you aloud and you are responding with speech. " +
     "You can hear them. Never say you cannot hear, listen, or speak. Never reference text input, typing, reading, or screens. " +
     "Respond conversationally as someone who is present in the room."
+
+/**
+ * System prompt for the text modality — the counterpart to [VOICE_IDENTITY_SYSTEM_PROMPT].
+ * Kept as a distinct constant (not derived from the voice prompt) so the two identities can
+ * never drift into claiming the wrong sense.
+ */
+const val TEXT_IDENTITY_SYSTEM_PROMPT =
+    "You are alfrd, a personal assistant. The user is chatting with you over text. " +
+    "You cannot hear or speak aloud — you read and write messages. Never say you can hear them, are listening, " +
+    "or are speaking aloud. Never reference audio, a microphone, or being physically present in the room. " +
+    "Respond naturally in writing."
+
+/** Single source of truth for identity-prompt selection — used by [Actor]. */
+fun identitySystemPrompt(modality: Modality): String =
+    if (modality == Modality.VOICE) VOICE_IDENTITY_SYSTEM_PROMPT else TEXT_IDENTITY_SYSTEM_PROMPT

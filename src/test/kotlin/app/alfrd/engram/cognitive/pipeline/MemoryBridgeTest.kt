@@ -84,16 +84,16 @@ class MemoryBridgeIntegrationTest {
     // ── LLM failure graceful degradation ─────────────────────────────────────
 
     @Test
-    fun `QuestionBranch returns fallback message on LLM failure`() = runTest {
+    fun `actor failure produces the single centralized degraded message, not a per-branch fallback`() = runTest {
         val engram = InMemoryEngramClient()
         val failingLlm = TestLlmClient { throw RuntimeException("LLM exploded") }
         val pipeline = CognitivePipeline(engramClient = engram, llmClient = failingLlm)
 
         val response = pipeline.process("What time does school start?", "s1", "user-1")
 
-        assertTrue(
-            "question" in response.lowercase(),
-            "Expected fallback message containing 'question', got: $response",
+        assertEquals(
+            Actor.DEGRADED_TEXT, response,
+            "LLM failure must surface the single centralized degraded message, not a per-branch string",
         )
     }
 

@@ -7,74 +7,42 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unit tests — VerbalMoveBranch (no selection service, fallback paths only)
+// Unit tests — VerbalMoveBranch (director only: posture move classification)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class VerbalMoveBranchTest {
 
-    // ── Fallback phrase content ───────────────────────────────────────────────
+    // ── Retrieval intent carries the computed move type ───────────────────────
 
     @Test
-    fun `Disclosure branch produces a non-blank acknowledgment`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
+    fun `Disclosure branch produces a PhrasePool retrieval intent`() = runTest {
+        val branch = VerbalMoveBranch(turnShape = TurnShape.Disclosure)
         val ctx = CognitiveContext(utterance = "My dog's name is Newton", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        assertTrue(ctx.branchResult!!.content.isNotBlank())
+        assertTrue(ctx.branchResult!!.retrieval is RetrievalIntent.PhrasePool)
     }
 
     @Test
-    fun `FYI branch produces a non-blank acknowledgment`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.FYI)
+    fun `FYI branch produces a PhrasePool retrieval intent`() = runTest {
+        val branch = VerbalMoveBranch(turnShape = TurnShape.FYI)
         val ctx = CognitiveContext(utterance = "FYI I pushed the branch", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        assertTrue(ctx.branchResult!!.content.isNotBlank())
+        assertTrue(ctx.branchResult!!.retrieval is RetrievalIntent.PhrasePool)
     }
 
     @Test
-    fun `Continuation branch produces a non-blank acknowledgment`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Continuation)
+    fun `Continuation branch produces a PhrasePool retrieval intent`() = runTest {
+        val branch = VerbalMoveBranch(turnShape = TurnShape.Continuation)
         val ctx = CognitiveContext(utterance = "um uh I was thinking about something", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        assertTrue(ctx.branchResult!!.content.isNotBlank())
-    }
-
-    // ── No branch fallback stubs ──────────────────────────────────────────────
-
-    @Test
-    fun `Disclosure branch does not return task stub`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
-        val ctx = CognitiveContext(utterance = "I'm working on alfrd", sessionId = "s", userId = "u")
-        branch.execute(ctx)
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("task execution is coming soon"),
-            "Verbal move must not return task stub, got: $content")
-    }
-
-    @Test
-    fun `FYI branch does not return meta stub`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.FYI)
-        val ctx = CognitiveContext(utterance = "FYI the API key rotated", sessionId = "s", userId = "u")
-        branch.execute(ctx)
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("Memory queries aren't available yet"),
-            "Verbal move must not return meta stub, got: $content")
-    }
-
-    @Test
-    fun `Disclosure branch does not return clarification prompt`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
-        val ctx = CognitiveContext(utterance = "My dog's name is Newton", sessionId = "s", userId = "u")
-        branch.execute(ctx)
-        val content = ctx.branchResult!!.content
-        assertFalse(content.contains("Could you say more about what you mean"),
-            "Verbal move must not return clarification prompt, got: $content")
+        assertTrue(ctx.branchResult!!.retrieval is RetrievalIntent.PhrasePool)
     }
 
     // ── Response strategy ─────────────────────────────────────────────────────
 
     @Test
     fun `Disclosure branch sets SOCIAL response strategy`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
+        val branch = VerbalMoveBranch(turnShape = TurnShape.Disclosure)
         val ctx = CognitiveContext(utterance = "My dog's name is Newton", sessionId = "s", userId = "u")
         branch.execute(ctx)
         assertEquals(ResponseStrategy.SOCIAL, ctx.branchResult!!.responseStrategy)
@@ -82,46 +50,42 @@ class VerbalMoveBranchTest {
 
     @Test
     fun `FYI branch sets SOCIAL response strategy`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.FYI)
+        val branch = VerbalMoveBranch(turnShape = TurnShape.FYI)
         val ctx = CognitiveContext(utterance = "FYI I pushed the branch", sessionId = "s", userId = "u")
         branch.execute(ctx)
         assertEquals(ResponseStrategy.SOCIAL, ctx.branchResult!!.responseStrategy)
     }
 
-    // ── Source tag ───────────────────────────────────────────────────────────
+    // ── No dependencies — branch never touches EngramClient/LlmClient ────────
 
     @Test
-    fun `verbal move source is pool`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
-        val ctx = CognitiveContext(utterance = "My dog's name is Newton", sessionId = "s", userId = "u")
-        branch.execute(ctx)
-        assertEquals("pool", ctx.branchResult!!.source)
+    fun `verbal move branch has no I O dependencies`() {
+        // Compile-time guarantee: VerbalMoveBranch(turnShape) takes only a TurnShape.
+        VerbalMoveBranch(turnShape = TurnShape.Disclosure)
     }
 
     // ── HOLD move for emotionally loaded Disclosure ───────────────────────────
 
     @Test
-    fun `Disclosure with neutral content resolves to RECEIPT fallback`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
+    fun `Disclosure with neutral content resolves to RECEIPT move`() = runTest {
+        val branch = VerbalMoveBranch(turnShape = TurnShape.Disclosure)
         // "My dog's name is Newton" — no emotional markers → surface energy ≈ 0 → RECEIPT
         val ctx = CognitiveContext(utterance = "My dog's name is Newton", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        // RECEIPT fallback is "Got it." — check it's not a HOLD phrase
-        val content = ctx.branchResult!!.content
-        assertTrue(content.isNotBlank())
-        assertFalse(content.contains("hear you"), "Neutral disclosure must not produce HOLD phrase")
+        val retrieval = ctx.branchResult!!.retrieval as RetrievalIntent.PhrasePool
+        assertEquals(PostureMoveType.RECEIPT, retrieval.moveType)
     }
 
     @Test
-    fun `Disclosure with emotional content may resolve to HOLD`() = runTest {
-        val branch = VerbalMoveBranch(selectionService = null, turnShape = TurnShape.Disclosure)
+    fun `Disclosure with emotional content resolves to HOLD move`() = runTest {
+        val branch = VerbalMoveBranch(turnShape = TurnShape.Disclosure)
         // Dense emotional markers push surface energy above 0.3 threshold → HOLD
         val ctx = CognitiveContext(
             utterance = "I feel really overwhelmed and stressed by everything honestly it was awful",
             sessionId = "s", userId = "u",
         )
         branch.execute(ctx)
-        // HOLD fallback is "I hear you."
-        assertEquals("I hear you.", ctx.branchResult!!.content)
+        val retrieval = ctx.branchResult!!.retrieval as RetrievalIntent.PhrasePool
+        assertEquals(PostureMoveType.HOLD, retrieval.moveType)
     }
 }

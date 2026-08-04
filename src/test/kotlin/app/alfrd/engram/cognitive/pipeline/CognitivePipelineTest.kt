@@ -9,55 +9,70 @@ import org.junit.jupiter.api.Test
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Integration tests — full pipeline end-to-end
+//
+// With the director/actor split, exact reply wording is LLM-composed and no longer
+// deterministic — these tests inject a TestLlmClient that echoes the actor's system
+// prompt back verbatim, so the response text reveals which branch's directive (and
+// therefore which branch) actually fired. That verifies routing/structure without
+// asserting on legacy canned strings.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class CognitivePipelineIntegrationTest {
 
-    private val pipeline = CognitivePipeline()
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+    private val pipeline = CognitivePipeline(llmClient = echoLlm)
 
     @Test
-    fun `hey routes to SocialBranch and returns a greeting`() = runTest {
+    fun `hey on turn 1 routes to SocialBranch's greeting directive`() = runTest {
         val response = pipeline.process("Hey", "session-1", "user-1")
-        assertTrue(response.isNotBlank(), "Expected a non-blank greeting")
-        assertTrue(
-            "Good" in response,
-            "Expected a time-of-day greeting, got: $response",
+        assertTrue(response.contains("first turn", ignoreCase = true), "Expected greeting directive, got: $response")
+    }
+
+    @Test
+    fun `thanks routes to SocialBranch's receipt directive`() = runTest {
+        val response = pipeline.process("Thanks", "session-2", "user-1")
+        assertTrue(response.contains("thanked you", ignoreCase = true), "Expected thanks directive, got: $response")
+    }
+
+    @Test
+    fun `ambiguous utterance routes to ClarificationBranch's directive`() = runTest {
+        val response = pipeline.process("Blah blorp zam", "session-3", "user-1")
+        assertTrue(response.contains("unclear", ignoreCase = true), "Expected clarification directive, got: $response")
+    }
+
+    @Test
+    fun `task utterance routes to TaskBranch's directive`() = runTest {
+        val response = pipeline.process("Remind me to call the vet", "session-4", "user-1")
+        assertTrue(response.contains("task request", ignoreCase = true), "Expected task directive, got: $response")
+    }
+
+    @Test
+    fun `question utterance routes to QuestionBranch's directive`() = runTest {
+        val response = pipeline.process("What time does school start?", "session-5", "user-1")
+        assertTrue(response.contains("asked a question", ignoreCase = true), "Expected question directive, got: $response")
+    }
+
+    @Test
+    fun `recall question routes to QuestionBranch not MetaBranch's stub directive`() = runTest {
+        val response = pipeline.process("What do you know about me?", "session-6", "user-1")
+        assertFalse(response.contains("capabilities", ignoreCase = true), "Must not dead-end at MetaBranch, got: $response")
+        assertTrue(response.contains("asked a question", ignoreCase = true), "got: $response")
+    }
+
+    // ── Degraded fallback: no LLM configured ──────────────────────────────────
+
+    @Test
+    fun `every branch produces the single centralized degraded message when no LLM is configured`() = runTest {
+        val noLlmPipeline = CognitivePipeline()
+        val utterances = listOf(
+            "Hey", "Thanks", "Blah blorp zam", "Remind me to call the vet", "What time does school start?",
         )
-    }
-
-    @Test
-    fun `thanks routes to SocialBranch and returns acknowledgment`() = runTest {
-        val response = pipeline.process("Thanks", "session-1", "user-1")
-        assertEquals("Of course.", response)
-    }
-
-    @Test
-    fun `ambiguous utterance routes to ClarificationBranch`() = runTest {
-        val response = pipeline.process("Blah blorp zam", "session-1", "user-1")
-        assertEquals("Could you say more about what you mean?", response)
-    }
-
-    @Test
-    fun `task utterance routes to TaskBranch stub`() = runTest {
-        val response = pipeline.process("Remind me to call the vet", "session-1", "user-1")
-        assertTrue("task" in response.lowercase() || "noted" in response.lowercase(),
-            "Expected a task stub response, got: $response")
-    }
-
-    @Test
-    fun `question utterance routes to QuestionBranch stub`() = runTest {
-        val response = pipeline.process("What time does school start?", "session-1", "user-1")
-        assertTrue("question" in response.lowercase() || "wired" in response.lowercase(),
-            "Expected a question stub response, got: $response")
-    }
-
-    @Test
-    fun `recall question routes to QuestionBranch not MetaBranch stub`() = runTest {
-        val response = pipeline.process("What do you know about me?", "session-1", "user-1")
-        assertFalse(
-            "Memory queries aren't available yet." == response,
-            "Recall question must not dead-end at the MetaBranch stub, got: $response",
-        )
+        for ((i, utterance) in utterances.withIndex()) {
+            val response = noLlmPipeline.process(utterance, "degraded-session-$i", "user-1")
+            assertEquals(Actor.DEGRADED_TEXT, response, "Expected the centralized degraded text for \"$utterance\"")
+        }
     }
 }
 
@@ -140,7 +155,8 @@ class ExpressionTest {
     @Test
     fun `SOCIAL strategy produces only the response content`() = runTest {
         val ctx = CognitiveContext(utterance = "Hey", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(content = "Good morning.", responseStrategy = ResponseStrategy.SOCIAL)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SOCIAL)
+        ctx.actorResult = ActorResult(text = "Good morning.", source = "llm")
         expression.evaluate(ctx)
         assertEquals("Good morning.", ctx.responseText)
         assertEquals(listOf("Good morning."), ctx.streamingPhases)
@@ -149,10 +165,8 @@ class ExpressionTest {
     @Test
     fun `SIMPLE strategy prepends acknowledge phrase`() = runTest {
         val ctx = CognitiveContext(utterance = "Remind me to call the vet", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(
-            content = "I've noted that — task execution is coming soon.",
-            responseStrategy = ResponseStrategy.SIMPLE,
-        )
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "I've noted that — task execution is coming soon.", source = "llm")
         expression.evaluate(ctx)
         // responseText carries synthesis only — acknowledge is a separate phase, not prepended
         assertFalse(ctx.responseText.startsWith("Understood."), "responseText must not start with ack phrase")
@@ -169,7 +183,8 @@ class ExpressionTest {
     @Test
     fun `COMPLEX strategy produces three phases`() = runTest {
         val ctx = CognitiveContext(utterance = "some complex query", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(content = "The answer.", responseStrategy = ResponseStrategy.COMPLEX)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.COMPLEX)
+        ctx.actorResult = ActorResult(text = "The answer.", source = "llm")
         expression.evaluate(ctx)
         assertEquals(3, ctx.streamingPhases!!.size) // acknowledge + bridge + synthesis
         assertTrue(ctx.responseText.contains("The answer."))
@@ -178,14 +193,15 @@ class ExpressionTest {
     @Test
     fun `EMOTIONAL strategy produces three phases`() = runTest {
         val ctx = CognitiveContext(utterance = "some emotional remark", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(content = "That matters.", responseStrategy = ResponseStrategy.EMOTIONAL)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.EMOTIONAL)
+        ctx.actorResult = ActorResult(text = "That matters.", source = "llm")
         expression.evaluate(ctx)
         assertEquals(3, ctx.streamingPhases!!.size)
         assertTrue(ctx.responseText.contains("That matters."))
     }
 
     @Test
-    fun `responseText is not set when branchResult is null`() = runTest {
+    fun `responseText is not set when actorResult is null`() = runTest {
         val ctx = CognitiveContext(utterance = "ignored", sessionId = "s", userId = "u")
         expression.evaluate(ctx)
         assertEquals("", ctx.responseText)
@@ -242,43 +258,38 @@ class ComprehensionModalityCheckTest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unit tests — SocialBranch modality-check responses
+// Unit tests — SocialBranch modality-check conditioners
 // ─────────────────────────────────────────────────────────────────────────────
 
 class SocialBranchModalityTest {
 
     private val branch = SocialBranch()
 
-    private val voiceConfirmations = setOf(
-        "Loud and clear.",
-        "I'm here.",
-        "I can hear you.",
-        "Right here \u2014 go ahead.",
-        "Hearing you fine.",
-    )
-
     @Test
-    fun `can you hear me returns a voice-aware confirmation`() = runTest {
+    fun `can you hear me produces no retrieval and a presence-confirmation directive`() = runTest {
         val ctx = CognitiveContext(utterance = "can you hear me?", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        val content = ctx.branchResult!!.content
-        assertTrue(content in voiceConfirmations, "Expected voice confirmation, got: $content")
+        assertEquals(RetrievalIntent.None, ctx.branchResult!!.retrieval)
+        assertTrue(
+            ctx.branchResult!!.directive.contains("present", ignoreCase = true),
+            "Expected a presence-confirmation directive, got: ${ctx.branchResult!!.directive}",
+        )
     }
 
     @Test
-    fun `are you there returns a voice-aware confirmation`() = runTest {
+    fun `are you there produces no retrieval and a presence-confirmation directive`() = runTest {
         val ctx = CognitiveContext(utterance = "are you there?", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        val content = ctx.branchResult!!.content
-        assertTrue(content in voiceConfirmations, "Expected voice confirmation, got: $content")
+        assertEquals(RetrievalIntent.None, ctx.branchResult!!.retrieval)
+        assertTrue(ctx.branchResult!!.directive.contains("present", ignoreCase = true))
     }
 
     @Test
-    fun `is this working returns a voice-aware confirmation`() = runTest {
+    fun `is this working produces no retrieval and a presence-confirmation directive`() = runTest {
         val ctx = CognitiveContext(utterance = "is this working", sessionId = "s", userId = "u")
         branch.execute(ctx)
-        val content = ctx.branchResult!!.content
-        assertTrue(content in voiceConfirmations, "Expected voice confirmation, got: $content")
+        assertEquals(RetrievalIntent.None, ctx.branchResult!!.retrieval)
+        assertTrue(ctx.branchResult!!.directive.contains("present", ignoreCase = true))
     }
 
     @Test
@@ -291,6 +302,10 @@ class SocialBranchModalityTest {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests — VoiceContextLlmClient prompt injection
+//
+// Untouched by the director/actor split — VoiceContextLlmClient is no longer wired
+// into CognitivePipeline (Actor builds its own system prompt via identitySystemPrompt),
+// but the class and VOICE_IDENTITY_SYSTEM_PROMPT stay in place, unmodified.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class VoiceContextLlmClientTest {
@@ -332,7 +347,36 @@ class VoiceContextLlmClientTest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unit tests — Expression modality post-filter
+// Unit tests — identity prompt selection (types.kt)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class IdentitySystemPromptTest {
+
+    @Test
+    fun `voice modality resolves to the voice identity prompt`() {
+        assertEquals(VOICE_IDENTITY_SYSTEM_PROMPT, identitySystemPrompt(Modality.VOICE))
+    }
+
+    @Test
+    fun `text modality resolves to the text identity prompt`() {
+        assertEquals(TEXT_IDENTITY_SYSTEM_PROMPT, identitySystemPrompt(Modality.TEXT))
+    }
+
+    @Test
+    fun `text identity prompt never claims it can hear or speak aloud`() {
+        val lower = TEXT_IDENTITY_SYSTEM_PROMPT.lowercase()
+        // The prompt legitimately mentions "hear"/"speaking" as part of forbidding the claim
+        // ("never say you can hear them...") — so check it never asserts the claim affirmatively,
+        // rather than doing a crude substring check that would also match the negation.
+        assertFalse(lower.startsWith("you can hear"), "Text identity must not open by claiming it can hear")
+        assertFalse(lower.contains("responding with speech"), "Text identity must not claim it speaks aloud")
+        assertTrue(lower.contains("cannot hear or speak aloud"), "Text identity should explicitly disclaim hearing/speaking")
+        assertTrue(lower.contains("never say you can hear"), "Text identity should forbid claiming it can hear")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — Expression modality post-filter (both directions)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ExpressionModalityFilterTest {
@@ -340,46 +384,64 @@ class ExpressionModalityFilterTest {
     private val expression = Expression()
 
     @Test
-    fun `response containing i can't hear is replaced with fallback`() = runTest {
-        val ctx = CognitiveContext(utterance = "say something", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(
-            content = "Sorry, I can't hear audio input directly.",
-            responseStrategy = ResponseStrategy.SIMPLE,
-        )
-        expression.evaluate(ctx)
-        // synthesis-only (no ack prefix) — acknowledge is a separate phase
-        assertEquals("I'm right here. What do you need?", ctx.responseText)
-    }
-
-    @Test
-    fun `response containing i'm a language model is replaced with fallback`() = runTest {
-        val ctx = CognitiveContext(utterance = "can you speak?", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(
-            content = "I'm a language model so I cannot speak or hear.",
-            responseStrategy = ResponseStrategy.SIMPLE,
-        )
+    fun `VOICE response containing i can't hear is replaced with the voice fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "say something", sessionId = "s", userId = "u", modality = Modality.VOICE)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "Sorry, I can't hear audio input directly.", source = "llm")
         expression.evaluate(ctx)
         assertEquals("I'm right here. What do you need?", ctx.responseText)
     }
 
     @Test
-    fun `response containing as a text-based is replaced with fallback`() = runTest {
-        val ctx = CognitiveContext(utterance = "hello?", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(
-            content = "As a text-based assistant I process written input.",
-            responseStrategy = ResponseStrategy.SIMPLE,
-        )
+    fun `VOICE response containing i'm a language model is replaced with the voice fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you speak?", sessionId = "s", userId = "u", modality = Modality.VOICE)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "I'm a language model so I cannot speak or hear.", source = "llm")
         expression.evaluate(ctx)
         assertEquals("I'm right here. What do you need?", ctx.responseText)
     }
 
     @Test
-    fun `clean LLM response passes through post-filter unchanged`() = runTest {
-        val ctx = CognitiveContext(utterance = "what is the capital of France?", sessionId = "s", userId = "u")
-        ctx.branchResult = BranchResult(
-            content = "Paris is the capital of France.",
-            responseStrategy = ResponseStrategy.SIMPLE,
-        )
+    fun `VOICE response containing as a text-based is replaced with the voice fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "hello?", sessionId = "s", userId = "u", modality = Modality.VOICE)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "As a text-based assistant I process written input.", source = "llm")
+        expression.evaluate(ctx)
+        assertEquals("I'm right here. What do you need?", ctx.responseText)
+    }
+
+    @Test
+    fun `clean VOICE response passes through the filter unchanged`() = runTest {
+        val ctx = CognitiveContext(utterance = "what is the capital of France?", sessionId = "s", userId = "u", modality = Modality.VOICE)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "Paris is the capital of France.", source = "llm")
+        expression.evaluate(ctx)
+        assertTrue(ctx.responseText.contains("Paris is the capital of France."))
+    }
+
+    @Test
+    fun `TEXT response falsely claiming it can hear is replaced with the text fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "can you hear me?", sessionId = "s", userId = "u", modality = Modality.TEXT)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "Yes, I can hear you loud and clear!", source = "llm")
+        expression.evaluate(ctx)
+        assertEquals("I'm here — what do you need?", ctx.responseText)
+    }
+
+    @Test
+    fun `TEXT response claiming to be listening is replaced with the text fallback`() = runTest {
+        val ctx = CognitiveContext(utterance = "hello?", sessionId = "s", userId = "u", modality = Modality.TEXT)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "I'm listening — go ahead.", source = "llm")
+        expression.evaluate(ctx)
+        assertEquals("I'm here — what do you need?", ctx.responseText)
+    }
+
+    @Test
+    fun `clean TEXT response passes through the filter unchanged`() = runTest {
+        val ctx = CognitiveContext(utterance = "what is the capital of France?", sessionId = "s", userId = "u", modality = Modality.TEXT)
+        ctx.branchResult = BranchResult(responseStrategy = ResponseStrategy.SIMPLE)
+        ctx.actorResult = ActorResult(text = "Paris is the capital of France.", source = "llm")
         expression.evaluate(ctx)
         assertTrue(ctx.responseText.contains("Paris is the capital of France."))
     }
@@ -391,25 +453,46 @@ class ExpressionModalityFilterTest {
 
 class ModalityCheckIntegrationTest {
 
-    private val pipeline = CognitivePipeline()
-
-    private val voiceConfirmations = setOf(
-        "Loud and clear.",
-        "I'm here.",
-        "I can hear you.",
-        "Right here \u2014 go ahead.",
-        "Hearing you fine.",
-    )
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+    private val pipeline = CognitivePipeline(llmClient = echoLlm)
 
     @Test
-    fun `can you hear me routes to SOCIAL and returns voice confirmation`() = runTest {
+    fun `can you hear me routes to SOCIAL modality-check directive`() = runTest {
         val response = pipeline.process("can you hear me?", "session-1", "user-1")
-        assertTrue(response in voiceConfirmations, "Expected voice confirmation, got: $response")
+        assertTrue(response.contains("present", ignoreCase = true), "Expected presence-confirmation directive, got: $response")
     }
 
     @Test
-    fun `are you there routes to SOCIAL and returns voice confirmation`() = runTest {
-        val response = pipeline.process("are you there?", "session-1", "user-1")
-        assertTrue(response in voiceConfirmations, "Expected voice confirmation, got: $response")
+    fun `are you there routes to SOCIAL modality-check directive`() = runTest {
+        val response = pipeline.process("are you there?", "session-2", "user-1")
+        assertTrue(response.contains("present", ignoreCase = true), "Expected presence-confirmation directive, got: $response")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration tests — no greeting after turn 1
+// ─────────────────────────────────────────────────────────────────────────────
+
+class GreetingTurnGateTest {
+
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+
+    @Test
+    fun `hi on turn 1 gets the greeting directive but hi again later does not`() = runTest {
+        val pipeline = CognitivePipeline(llmClient = echoLlm)
+
+        val turn1 = pipeline.process("hi", "session-1", "user-1")
+        assertTrue(turn1.contains("Greet the user warmly", ignoreCase = true), "Expected greeting directive on turn 1, got: $turn1")
+
+        // Intervening turn so "hi" on turn 3 is unambiguously not turn 1.
+        pipeline.process("what's the weather like", "session-1", "user-1")
+
+        val turn3 = pipeline.process("hi", "session-1", "user-1")
+        assertFalse(turn3.contains("Greet the user warmly", ignoreCase = true), "Must not greet again mid-session, got: $turn3")
+        assertTrue(turn3.contains("NOT the first turn", ignoreCase = true), "Expected the smalltalk directive, got: $turn3")
     }
 }
