@@ -10,9 +10,8 @@ on push per `.do/app.yaml`) are collected by **Better Stack** under the source
 
 ### Access
 
-Log access is via Better Stack's MCP server, registered in the local Claude Code
-user-level MCP config (`~/.claude.json`) — this is machine/environment config, not
-part of this repo:
+Log access is via Better Stack's MCP server, registered project-wide in this repo's
+`.mcp.json`:
 
 ```json
 {
@@ -32,9 +31,17 @@ part of this repo:
   browser to complete an OAuth flow.
 - **Auth**: header-based Bearer token, resolved from the `BETTERSTACK_API_TOKEN`
   environment variable at connect time. The token is never written into the config
-  file or committed anywhere.
-- **Tool permissions** are scoped read-only in this repo's `.claude/settings.local.json`:
-  `mcp__betterstack__sources`, `mcp__betterstack__query_help`, `mcp__betterstack__query`.
+  file or committed anywhere — it must be set as an env var wherever this repo runs
+  (already configured as an environment-level secret in Claude Code on the web).
+- **Trust and tool scoping** live in the committed `.claude/settings.json` (not
+  `.claude/settings.local.json`, which is gitignored and machine-local — Claude Code
+  on the web sessions run in fresh, ephemeral containers each time, so anything
+  needed "next session" must be committed, not left in local/user-level config):
+  `enabledMcpjsonServers: ["betterstack"]` pre-trusts the server so it connects
+  without an interactive approval prompt, and `permissions.allow` scopes usage to
+  the three read-only tools this repo needs: `mcp__betterstack__sources`,
+  `mcp__betterstack__query_help`, `mcp__betterstack__query` (the server exposes many
+  more — incidents, monitors, dashboards, teams, etc. — out of scope here).
 
 ### Querying logs
 

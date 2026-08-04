@@ -1,0 +1,10 @@
+{
+  "enabledMcpjsonServers": ["betterstack"],
+  "permissions": {
+    "allow": [
+      "mcp__betterstack__sources",
+      "mcp__betterstack__query_help",
+      "mcp__betterstack__query"
+    ]
+  }
+}
