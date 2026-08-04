@@ -39,6 +39,13 @@ fun main() {
     val db = dbManager.getDatabase()
     log.info("database ready")
 
+    // Must be registered before the blocking embeddedServer(...).start(wait = true) call below —
+    // once that call returns, the JVM shutdown sequence has already begun and
+    // Runtime.addShutdownHook throws IllegalStateException, so dbManager.close() would never run.
+    Runtime.getRuntime().addShutdownHook(Thread {
+        dbManager.close()
+    })
+
     SchemaBootstrap.bootstrap(db)
     ResponsePhraseSeed.seed(db)
     PhantomUserCleanup.run(db)
@@ -89,8 +96,4 @@ fun main() {
             }
         }
     }.start(wait = true)
-
-    Runtime.getRuntime().addShutdownHook(Thread {
-        dbManager.close()
-    })
 }
