@@ -568,6 +568,14 @@ open class CognitivePipeline(
             responseStrategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE,
             directive        = ctx.branchResult?.directive ?: "Respond naturally and briefly.",
         )
+        val coverage = ctx.retrievalCoverage ?: RetrievalCoverage.NONE_NEEDED
+        logger.info(
+            "retrieval-coverage sessionId=$sessionId userId=$userId turnIndex=$turnIndex " +
+            "coverage=${"%.2f".format(coverage.coverage)} activationMass=${"%.2f".format(coverage.activationMass)} " +
+            "playFired=${coverage.playFired} conceptResolutionRatio=${"%.2f".format(coverage.conceptResolutionRatio)} " +
+            "gaps=${if (coverage.gaps.isEmpty()) "none" else coverage.gaps.joinToString("|")} " +
+            "conditioners=$conditioners"
+        )
         ctx.actorResult = actor.compose(ctx.utterance, retrievedScript, conditioners)
 
         // ── Universal memory ingestion ────────────────────────────────────────
@@ -602,6 +610,14 @@ open class CognitivePipeline(
             val (provider, model) = if (ctx.actorResult?.source == "llm") "anthropic" to ACTOR_MODEL_NAME else null to null
             trace.model.reasonProvider = provider
             trace.model.reasonModel = model
+
+            trace.retrievalCoverage = RetrievalCoverageTrace(
+                coverage = coverage.coverage,
+                activationMass = coverage.activationMass,
+                playFired = coverage.playFired,
+                conceptResolutionRatio = coverage.conceptResolutionRatio,
+                gaps = coverage.gaps,
+            )
 
             val selResult = ctx.selectionResult
             if (selResult != null) {

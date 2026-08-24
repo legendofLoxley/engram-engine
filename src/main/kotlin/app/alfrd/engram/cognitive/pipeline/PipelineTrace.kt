@@ -13,6 +13,7 @@ data class PipelineTrace(
     var responseSelection: ResponseSelectionTrace? = null,
     var candidatePhrases: List<CandidatePhraseTrace> = emptyList(),
     var graphMutations: GraphMutationsTrace = GraphMutationsTrace(),
+    var retrievalCoverage: RetrievalCoverageTrace? = null,
 )
 
 @Serializable
@@ -102,4 +103,17 @@ data class OutcomeEdgeMutationTrace(
     val sessionId: String,
     val signal: String,
     val turnIndex: Int,
+)
+
+/**
+ * Debug-trace mirror of [RetrievalCoverage] — the per-turn retrieval quality readout,
+ * surfaced alongside the conditioners the same turn handed to the actor.
+ */
+@Serializable
+data class RetrievalCoverageTrace(
+    val coverage: Double,
+    val activationMass: Double,
+    val playFired: Boolean,
+    val conceptResolutionRatio: Double,
+    val gaps: List<String>,
 )

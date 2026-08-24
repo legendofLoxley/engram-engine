@@ -134,4 +134,21 @@ class DebugSelectionTraceTest {
         assertTrue(sel.selectionLatencyMs in 0..5_000,
             "selectionLatencyMs ${sel.selectionLatencyMs} should be between 0 and 5000 ms")
     }
+
+    // ── retrievalCoverage populated alongside responseSelection ───────────────
+
+    @Test
+    fun `retrievalCoverage reflects the same phrase-pool pick as responseSelection`() = runTest {
+        val result = pipeline.processForDebug("Hey", "session-cov1", "user-cov1")
+
+        val sel = result.trace.responseSelection
+        assertNotNull(sel)
+        val coverage = result.trace.retrievalCoverage
+        assertNotNull(coverage, "retrievalCoverage should be populated for every turn")
+        coverage!!
+
+        assertTrue(coverage.playFired, "a phrase was selected — playFired should be true")
+        assertEquals(sel!!.compositeScore, coverage.activationMass)
+        assertTrue(coverage.coverage in 0.0..1.0)
+    }
 }

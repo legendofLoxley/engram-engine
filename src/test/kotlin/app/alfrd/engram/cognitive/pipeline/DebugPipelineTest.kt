@@ -59,6 +59,12 @@ class DebugPipelineTest {
 
         // No selection service → responseSelection is absent
         assertNull(result.trace.responseSelection)
+
+        // retrievalCoverage is still populated — telemetry runs even without a selection service
+        val coverage = result.trace.retrievalCoverage
+        assertNotNull(coverage, "retrievalCoverage should be populated on every turn")
+        assertFalse(coverage!!.playFired)
+        assertTrue(coverage.gaps.isNotEmpty())
     }
 
     // ── Ambiguous utterance with LLM: Tier 2 fires ───────────────────────────
@@ -167,5 +173,26 @@ class DebugPipelineTest {
         assertTrue(json.contains("\"contextualFit\""))
         assertTrue(json.contains("\"phaseAppropriateness\""))
         assertTrue(json.contains("\"communicationFit\""))
+    }
+
+    // ── RetrievalCoverageTrace serialization round-trip ───────────────────────
+
+    @Test
+    fun `RetrievalCoverageTrace serializes and deserializes correctly`() {
+        val trace = RetrievalCoverageTrace(
+            coverage = 0.72,
+            activationMass = 0.81,
+            playFired = true,
+            conceptResolutionRatio = 0.6,
+            gaps = listOf("unresolved interpolation keys: lastTopic"),
+        )
+
+        val json = Json.encodeToString(trace)
+        val decoded = Json.decodeFromString<RetrievalCoverageTrace>(json)
+
+        assertEquals(trace, decoded)
+        assertTrue(json.contains("\"coverage\":0.72"))
+        assertTrue(json.contains("\"playFired\":true"))
+        assertTrue(json.contains("\"gaps\""))
     }
 }

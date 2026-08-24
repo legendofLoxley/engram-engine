@@ -80,4 +80,7 @@ data class CognitiveContext(
     var selectionLatencyMs: Long = 0L,
     /** All scored candidates; only populated when trace != null (debug mode). */
     var selectionCandidates: List<ResponseSelectionResult>? = null,
+
+    /** Per-turn retrieval quality readout — telemetry only. Set by [Script.run] on every turn. */
+    var retrievalCoverage: RetrievalCoverage? = null,
 )
