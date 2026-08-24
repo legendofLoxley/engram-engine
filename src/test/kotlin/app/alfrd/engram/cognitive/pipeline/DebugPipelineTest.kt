@@ -39,9 +39,11 @@ class DebugPipelineTest {
         assertNull(r.secondaryIntent)
         assertEquals("SocialBranch", r.branchSelected)
 
-        // Session trace
+        // Session trace — scaffold/trust state is now loaded on the main turn path, so even a
+        // fresh user (InMemoryEngramClient default ScaffoldState) resolves to ORIENTATION (1),
+        // not null.
         val s = result.trace.session
-        assertNull(s.trustPhase)
+        assertEquals(1, s.trustPhase)
         assertTrue(s.turnCount >= 1)
 
         // Latency breakdown

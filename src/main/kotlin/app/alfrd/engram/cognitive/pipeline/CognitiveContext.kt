@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
+import app.alfrd.engram.cognitive.pipeline.posture.PostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
 import app.alfrd.engram.cognitive.providers.TranscriptionResult
@@ -44,6 +45,8 @@ data class CognitiveContext(
     var secondaryIntent: IntentType? = null,
     /** Text-path turn shape, null when no explicit signal was detected. */
     var turnShape: TurnShape? = null,
+    /** Full posture signal read for this turn (turn shape + surface energy + response pressure). */
+    var postureSignals: PostureSignals? = null,
 
     // ── Memory ────────────────────────────────────────────────────────────────
     var scaffoldState: Any? = null,

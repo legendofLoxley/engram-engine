@@ -42,13 +42,26 @@ data class RetrievedScript(
 
 /**
  * Non-linguistic signals handed to the actor alongside the utterance and retrieved script.
- * [directive] is the only free-form field — an instruction to the actor, never user-facing text.
+ *
+ * [directive] is the branch/director's free-form instruction — never user-facing text.
+ * [attunement] is the posture read (turn shape + surface energy), rendered as a short
+ * natural-language directive by [app.alfrd.engram.cognitive.pipeline.posture.attunementDirective] —
+ * never a lookup into a canned-line pool, and computed independent of which branch fired, so it
+ * still reaches the actor even when routing picks the wrong branch for the turn's content.
+ * [persona] and [selfDescription] come from a [PersonaSource] (via [Script]), not a literal
+ * baked into this file.
+ * [trustPhase] deliberately only *conditions the response* here — the deterministic phase
+ * advance rule ([app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService.evaluate])
+ * is untouched but intentionally not invoked from the main turn path; see [CognitivePipeline].
  */
 data class Conditioners(
     val modality: Modality,
     val trustPhase: String?,
     val responseStrategy: ResponseStrategy,
     val directive: String,
+    val attunement: String,
+    val persona: String,
+    val selfDescription: String,
 )
 
 /** Result of a single actor composition. [source] is "llm" for a real completion, "degraded" for the failure fallback. */
@@ -89,7 +102,15 @@ class Actor(private val llmClient: LlmClient?) {
     }
 
     private fun buildSystemPrompt(conditioners: Conditioners, script: RetrievedScript?): String = buildString {
-        append(identitySystemPrompt(conditioners.modality))
+        append(conditioners.persona)
+        append("\n\n")
+        append(conditioners.selfDescription)
+        conditioners.trustPhase?.let { phase ->
+            append("\n\nRelationship stage: ")
+            append(trustPhaseNote(phase))
+        }
+        append("\n\n")
+        append(conditioners.attunement)
         append("\n\n")
         append(conditioners.directive)
         val grounding = script?.lines?.takeIf { it.isNotEmpty() }
@@ -98,5 +119,14 @@ class Actor(private val llmClient: LlmClient?) {
             append(grounding.joinToString("\n") { "- $it" })
             append("\nTreat lower-confidence or tentative items as tentative. Be concise and warm.")
         }
+    }
+
+    /** Short relationship-stage gloss for the scaffold trust phase — prompt formatting only. */
+    private fun trustPhaseNote(phase: String): String = when (phase) {
+        "ORIENTATION"     -> "early days — you're just getting to know this person, don't assume shared history."
+        "WORKING_RHYTHM"  -> "you've settled into a working rhythm together over a few sessions."
+        "CONTEXT"         -> "deep shared context by now — several sessions in, treat them as familiar."
+        "UNDERSTANDING"   -> "a long-standing, well-understood relationship — respond like it."
+        else              -> phase
     }
 }

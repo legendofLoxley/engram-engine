@@ -61,6 +61,13 @@ private val FYI_PATTERN = Regex(
 /** Disfluency restart: a word immediately followed by itself (e.g., "I I want", "the the"). */
 private val RESTART_PATTERN = Regex("""\b(\w+)\s+\1\b""", RegexOption.IGNORE_CASE)
 
+/**
+ * Surface energy above this level is "elevated" — used both by [selectMoveType]'s Disclosure
+ * branch (HOLD vs RECEIPT) and by [attunementDirective] (emotional-weight countermand), so the
+ * two stay in lockstep rather than drifting apart if one is retuned later.
+ */
+private const val ELEVATED_SURFACE_ENERGY_THRESHOLD = 0.3
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -193,9 +200,9 @@ fun selectMoveType(
     }
 
     // 6. Disclosure with elevated surface energy — hold space for the user.
-    //    Threshold at 0.3 so that emotionally charged disclosures (not just extremely dense
+    //    Threshold so that emotionally charged disclosures (not just extremely dense
     //    ones) trigger Hold without requiring pathologically high marker density.
-    if (signals.turnShape == TurnShape.Disclosure && signals.surfaceEnergy > 0.3) {
+    if (signals.turnShape == TurnShape.Disclosure && signals.surfaceEnergy > ELEVATED_SURFACE_ENERGY_THRESHOLD) {
         return PostureMoveType.HOLD
     }
 
@@ -310,4 +317,45 @@ private fun computeResponsePressure(
         FluxSpeechState.StartOfTurn -> 1.0   // barge-in path; kept for completeness
         else -> speechFinalFloor
     }
+}
+
+// ── Prompt conditioner ──────────────────────────────────────────────────────
+
+/**
+ * Turns a posture read into a short natural-language directive for the actor's prompt —
+ * never a lookup into a canned-line pool. Pure text, no I/O.
+ *
+ * Written for the text path: [turnShape] is expected to come from
+ * [classifyTextPathTurnShape] (via [CognitiveContext.turnShape]), whose reachable values are
+ * Question, Correction, TaskRequest, Continuation, Disclosure, FYI, or null — TopicOpener,
+ * Collaborative, Fragmented, and BargeIn are voice-only concepts on that classifier and fall
+ * to the neutral default here.
+ *
+ * @param turnShape     Text-path turn shape for this utterance, or null when no explicit
+ *                      signal was detected.
+ * @param surfaceEnergy Disfluency/emotional-marker intensity for this utterance (0.0–1.0),
+ *                      from [computePostureSignals].
+ */
+fun attunementDirective(turnShape: TurnShape?, surfaceEnergy: Double): String = when {
+    turnShape == TurnShape.Disclosure || surfaceEnergy > ELEVATED_SURFACE_ENERGY_THRESHOLD ->
+        "This turn carries emotional weight. Lead with acknowledgment and warmth before anything " +
+        "else — do not default to a script, a greeting, or small talk."
+
+    turnShape == TurnShape.Correction ->
+        "The user is correcting something. Accept the correction plainly — don't over-apologize or get defensive."
+
+    turnShape == TurnShape.TaskRequest ->
+        "The user wants something done. Be direct and concrete."
+
+    turnShape == TurnShape.Question ->
+        "The user is asking something. Prioritize a clear, direct answer."
+
+    turnShape == TurnShape.Continuation ->
+        "The user is still forming their thought. Give them room — don't interrupt the flow with a new topic."
+
+    turnShape == TurnShape.FYI ->
+        "The user is sharing information, not asking for anything back. A brief acknowledgment is enough."
+
+    else ->
+        "No strong posture signal for this turn — respond naturally."
 }

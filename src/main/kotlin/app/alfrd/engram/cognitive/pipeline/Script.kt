@@ -59,7 +59,15 @@ data class RetrievalCoverage(
 class Script(
     private val engramClient: EngramClient,
     private val selectionService: ResponseSelectionService? = null,
+    private val personaSource: PersonaSource = DefaultPersonaSource(),
 ) {
+
+    /**
+     * Persona + self-description conditioner for [modality] — retrieved via [personaSource]
+     * rather than a string baked into [Actor]'s prompt-building code. Not tied to a
+     * [RetrievalIntent]: every turn needs a persona regardless of which branch fired.
+     */
+    fun persona(modality: Modality): PersonaConditioner = personaSource.describe(modality)
 
     suspend fun run(ctx: CognitiveContext, intent: RetrievalIntent): RetrievedScript = when (intent) {
         is RetrievalIntent.None -> {

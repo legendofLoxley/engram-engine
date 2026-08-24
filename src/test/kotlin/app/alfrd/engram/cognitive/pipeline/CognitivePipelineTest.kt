@@ -304,8 +304,9 @@ class SocialBranchModalityTest {
 // Unit tests — VoiceContextLlmClient prompt injection
 //
 // Untouched by the director/actor split — VoiceContextLlmClient is no longer wired
-// into CognitivePipeline (Actor builds its own system prompt via identitySystemPrompt),
-// but the class and VOICE_IDENTITY_SYSTEM_PROMPT stay in place, unmodified.
+// into CognitivePipeline (Actor sources its identity text from Conditioners.persona, via
+// PersonaSource, which itself reuses identitySystemPrompt), but the class and
+// VOICE_IDENTITY_SYSTEM_PROMPT stay in place, unmodified.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class VoiceContextLlmClientTest {

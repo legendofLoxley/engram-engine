@@ -3,6 +3,7 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
 import app.alfrd.engram.cognitive.pipeline.posture.PostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
+import app.alfrd.engram.cognitive.pipeline.posture.attunementDirective
 import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +52,7 @@ open class CognitivePipeline(
     private val memoryWriteService: MemoryWriteService? = null,
     private val transitionService: TrustPhaseTransitionService? = null,
     private val firstSessionHandler: FirstSessionHandler? = null,
+    private val personaSource: PersonaSource = DefaultPersonaSource(),
 ) {
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
@@ -64,7 +66,7 @@ open class CognitivePipeline(
     private val attention     = Attention()
     private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
     private val router        = Router()
-    private val script        = Script(engramClient, selectionService)
+    private val script        = Script(engramClient, selectionService, personaSource)
     private val actor         = Actor(llmClient)
     private val expression    = Expression()
 
@@ -180,19 +182,7 @@ open class CognitivePipeline(
         priorMoveType: PostureMoveType? = null,
         timestamp: java.time.Instant = java.time.Instant.now(),
     ): FirstResponseResult {
-        val scaffoldState = try {
-            engramClient.getScaffoldState(userId)
-        } catch (_: Exception) {
-            null
-        }
-
-        val trustPhaseString = when (scaffoldState?.trustPhase) {
-            1 -> "ORIENTATION"
-            2 -> "WORKING_RHYTHM"
-            3 -> "CONTEXT"
-            4 -> "UNDERSTANDING"
-            else -> null
-        }
+        val scaffoldState = loadScaffoldState(userId)
 
         val ctx = CognitiveContext(
             utterance = utterance,
@@ -202,7 +192,7 @@ open class CognitivePipeline(
             zoneId = sessionZoneId,
             transcriptionResults = transcriptionResults,
             fluxEvent = fluxEvent,
-            trustPhase = trustPhaseString,
+            trustPhase = trustPhaseIntToString(scaffoldState?.trustPhase),
             sessionCount = scaffoldState?.sessionCount ?: 0,
             lastInteractionAt = scaffoldState?.lastInteractionAt,
         )
@@ -388,11 +378,7 @@ open class CognitivePipeline(
 
         // Load scaffold state for context-aware greeting selection.
         // Failure is non-fatal — selection falls back to phase-neutral scoring.
-        var scaffoldState: ScaffoldState? = try {
-            engramClient.getScaffoldState(userId)
-        } catch (_: Exception) {
-            null
-        }
+        var scaffoldState: ScaffoldState? = loadScaffoldState(userId)
 
         // Evaluate dormancy regression before using state for greeting selection.
         // If the user has been away more than 90 days, regress their phase by one level
@@ -422,13 +408,7 @@ open class CognitivePipeline(
             )
         }
 
-        val trustPhaseString = when (scaffoldState?.trustPhase) {
-            1 -> "ORIENTATION"
-            2 -> "WORKING_RHYTHM"
-            3 -> "CONTEXT"
-            4 -> "UNDERSTANDING"
-            else -> null
-        }
+        val trustPhaseString = trustPhaseIntToString(scaffoldState?.trustPhase)
 
         val ctx = CognitiveContext(
             utterance         = "",
@@ -525,6 +505,15 @@ open class CognitivePipeline(
             turnIndex = turnIndex,
         )
 
+        // Scaffold/trust state, loaded on every turn (previously only loaded by initSession
+        // and the voice first-response fast path) so trust phase can condition the response
+        // and phase-appropriate phrase filtering activates on the main turn path too.
+        val scaffoldState = loadScaffoldState(userId)
+        ctx.scaffoldState = scaffoldState
+        ctx.trustPhase = trustPhaseIntToString(scaffoldState?.trustPhase)
+        ctx.sessionCount = scaffoldState?.sessionCount ?: 0
+        ctx.lastInteractionAt = scaffoldState?.lastInteractionAt
+
         attention.evaluate(ctx)
 
         if (ctx.attentionAction != AttentionAction.PROCESS) {
@@ -534,6 +523,10 @@ open class CognitivePipeline(
         // ── Comprehension ────────────────────────────────────────────────────
         val comprehensionStartNs = if (debug) System.nanoTime() else 0L
         comprehension.evaluate(ctx)
+        // Full posture read for this turn (turn shape already set by Comprehension above via
+        // classifyTextPathTurnShape; this adds surfaceEnergy/responsePressure). Computed for
+        // every turn, independent of which branch/director ends up firing — see attunement below.
+        ctx.postureSignals = computePostureSignals(ctx)
         if (debug) {
             comprehensionNs = System.nanoTime() - comprehensionStartNs
             trace!!.latencyBreakdown.comprehensionMs =
@@ -562,11 +555,25 @@ open class CognitivePipeline(
         // ── Script (retrieval) + Actor (composition) ─────────────────────────
         // The only two components allowed to touch EngramClient/LlmClient for this turn.
         val retrievedScript = script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
+        val persona = script.persona(ctx.modality)
+        // Posture read as a natural-language directive — computed independent of which branch
+        // fired (ctx.postureSignals is set for every turn above), so it still reaches the actor
+        // even when routing/comprehension picks the wrong branch for the turn's actual content.
+        // Uses ctx.turnShape (Comprehension's text-path classifier), not
+        // ctx.postureSignals.turnShape (a separate, voice-tuned classifier that defaults to FYI
+        // rather than null and can disagree on the text path).
+        val attunement = attunementDirective(ctx.turnShape, ctx.postureSignals?.surfaceEnergy ?: 0.0)
+        // trustPhase below only conditions this response — the deterministic phase-advance rule
+        // (TrustPhaseTransitionService.evaluate) is intentionally not invoked from the main turn
+        // path; see the class doc on Conditioners for why.
         val conditioners = Conditioners(
             modality         = ctx.modality,
             trustPhase       = ctx.trustPhase,
             responseStrategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE,
             directive        = ctx.branchResult?.directive ?: "Respond naturally and briefly.",
+            attunement       = attunement,
+            persona          = persona.persona,
+            selfDescription  = persona.selfDescription,
         )
         val coverage = ctx.retrievalCoverage ?: RetrievalCoverage.NONE_NEEDED
         logger.info(
@@ -681,7 +688,9 @@ open class CognitivePipeline(
                 )
 
             trace.session.scaffoldState = null // Serialising arbitrary objects is fragile; null for now
-            trace.session.trustPhase = ctx.trustPhase?.toIntOrNull()
+            // ctx.trustPhase is the scaffold enum name ("ORIENTATION"...); trace.session.trustPhase
+            // wants the underlying 1-4 int, so map it back rather than parsing the name as a number.
+            trace.session.trustPhase = trustPhaseStringToInt(ctx.trustPhase)
             trace.session.turnCount = ctx.priorUtterances.size + 1
             trace.session.sessionAgeMs = 0 // SessionManager doesn't expose creation time to pipeline
         }
@@ -704,6 +713,31 @@ open class CognitivePipeline(
     private fun tier2ModelName(): String? {
         val model = selectTier2Model(llmClient) ?: return null
         return model.name.lowercase().replace('_', '-')
+    }
+
+    /** Loads scaffold state for [userId]. Failure is non-fatal — callers fall back to phase-neutral behavior. */
+    private suspend fun loadScaffoldState(userId: String): ScaffoldState? = try {
+        engramClient.getScaffoldState(userId)
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Maps the persisted trust-phase int (1-4) to its scaffold enum name, or null when absent/unknown. */
+    private fun trustPhaseIntToString(phase: Int?): String? = when (phase) {
+        1 -> "ORIENTATION"
+        2 -> "WORKING_RHYTHM"
+        3 -> "CONTEXT"
+        4 -> "UNDERSTANDING"
+        else -> null
+    }
+
+    /** Inverse of [trustPhaseIntToString] — for debug-trace reporting. */
+    private fun trustPhaseStringToInt(phase: String?): Int? = when (phase) {
+        "ORIENTATION" -> 1
+        "WORKING_RHYTHM" -> 2
+        "CONTEXT" -> 3
+        "UNDERSTANDING" -> 4
+        else -> null
     }
 
     private fun fallbackFirstResponseText(moveType: PostureMoveType): String = when (moveType) {

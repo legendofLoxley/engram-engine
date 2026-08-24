@@ -2,6 +2,7 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
 import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.ResponsePhraseSeed
 import app.alfrd.engram.db.SchemaBootstrap
@@ -22,6 +23,7 @@ import java.io.File
 class DebugSelectionTraceTest {
 
     private lateinit var dbManager: DatabaseManager
+    private lateinit var engramClient: InMemoryEngramClient
     private lateinit var pipeline: CognitivePipeline
 
     @BeforeAll
@@ -32,8 +34,9 @@ class DebugSelectionTraceTest {
         SchemaBootstrap.bootstrap(db)
         ResponsePhraseSeed.seed(db)
         val selectionService = ResponseSelectionService(db)
+        engramClient = InMemoryEngramClient()
         pipeline = CognitivePipeline(
-            engramClient = InMemoryEngramClient(),
+            engramClient = engramClient,
             selectionService = selectionService,
         )
     }
@@ -150,5 +153,31 @@ class DebugSelectionTraceTest {
         assertTrue(coverage.playFired, "a phrase was selected — playFired should be true")
         assertEquals(sel!!.compositeScore, coverage.activationMass)
         assertTrue(coverage.coverage in 0.0..1.0)
+    }
+
+    // ── Trust phase, now loaded on the main turn path, actually gates candidates ──
+
+    @Test
+    fun `trust phase loaded on the main path changes the GREETING candidate pool`() = runTest {
+        // A fresh ORIENTATION user (default InMemoryEngramClient ScaffoldState) vs. a
+        // long-standing UNDERSTANDING (4) user: ResponseSelectionService's phaseAffinity gate
+        // (filterCandidates) only activates when ctx.trustPhase is non-null — before this task,
+        // the main turn path never loaded it, so every user saw the same unfiltered pool. Now
+        // it's loaded, the two phases should see different candidate counts for the same query.
+        engramClient.updateScaffoldState("user-trust-high", ScaffoldState(trustPhase = 4))
+
+        val orientation = pipeline.processForDebug("Hey", "session-trust-low", "user-trust-low")
+        val understanding = pipeline.processForDebug("Hey", "session-trust-high", "user-trust-high")
+
+        val low = orientation.trace.responseSelection
+        val high = understanding.trace.responseSelection
+        assertNotNull(low)
+        assertNotNull(high)
+
+        assertNotEquals(
+            low!!.candidatesConsidered,
+            high!!.candidatesConsidered,
+            "ORIENTATION and UNDERSTANDING should see different GREETING candidate pools now that trust phase is loaded",
+        )
     }
 }

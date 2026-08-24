@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.pipeline.CognitiveContext
 import app.alfrd.engram.cognitive.providers.TranscriptionResult
 import app.alfrd.engram.model.PostureMoveType
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -483,5 +484,72 @@ class PostureComputationTest {
     fun `non-interrogative contraction does not produce Question`() {
         // "i'm" -> root "i" is not in QUESTION_WORDS; sentence should classify as Disclosure.
         assertEquals(TurnShape.Disclosure, classifyTextPathTurnShape("i'm really tired and feeling overwhelmed today"))
+    }
+
+    // ── attunementDirective — posture read as a natural-language directive, never a line pick ──
+
+    @Test
+    fun `Disclosure shape produces an emotional-weight directive regardless of surface energy`() {
+        val directive = attunementDirective(TurnShape.Disclosure, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("emotional weight", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `elevated surface energy without a Disclosure shape still produces the emotional-weight directive`() {
+        // e.g. a null turn shape (classifyTextPathTurnShape found no explicit pattern) but the
+        // utterance is still dense with emotional markers — this is the exact mechanism behind
+        // the "onboarding greeting on an emotionally loaded turn" misfire this task fixes.
+        val directive = attunementDirective(turnShape = null, surfaceEnergy = 0.32)
+        assertTrue(directive.contains("emotional weight", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `surface energy at or below the elevated threshold does not produce the emotional-weight directive`() {
+        val directive = attunementDirective(turnShape = null, surfaceEnergy = 0.3)
+        assertFalse(directive.contains("emotional weight", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `Correction shape produces a plain-acceptance directive`() {
+        val directive = attunementDirective(TurnShape.Correction, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("correcting", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `TaskRequest shape produces a direct-and-concrete directive`() {
+        val directive = attunementDirective(TurnShape.TaskRequest, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("direct", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `Question shape produces a clear-answer directive`() {
+        val directive = attunementDirective(TurnShape.Question, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("answer", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `Continuation shape produces a give-them-room directive`() {
+        val directive = attunementDirective(TurnShape.Continuation, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("room", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `FYI shape produces a brief-acknowledgment directive`() {
+        val directive = attunementDirective(TurnShape.FYI, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("acknowledgment", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `null turn shape with low surface energy produces a neutral directive`() {
+        val directive = attunementDirective(turnShape = null, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("naturally", ignoreCase = true), "got: $directive")
+    }
+
+    @Test
+    fun `voice-only shapes fall through to the neutral directive on the text path`() {
+        // TopicOpener/Collaborative/Fragmented/BargeIn are never produced by
+        // classifyTextPathTurnShape, but attunementDirective still handles them gracefully.
+        val directive = attunementDirective(TurnShape.TopicOpener, surfaceEnergy = 0.0)
+        assertTrue(directive.contains("naturally", ignoreCase = true), "got: $directive")
     }
 }
