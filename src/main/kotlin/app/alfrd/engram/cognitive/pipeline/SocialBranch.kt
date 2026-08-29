@@ -19,7 +19,7 @@ class SocialBranch : Branch {
 
         // expressionPhase matches the pre-split SocialBranch exactly: SIGN_OFF phrases are
         // seeded under SYNTHESIS, RECEIPT/GREETING under FIRST_RESPONSE.
-        val (retrieval, directive) = when {
+        val (retrieval, baseDirective) = when {
             isGoodbye(lower) -> phrasePool(ResponseCategory.SIGN_OFF, ExpressionPhase.SYNTHESIS) to
                 "The user is signing off. Say a brief, warm goodbye."
 
@@ -41,7 +41,7 @@ class SocialBranch : Branch {
         ctx.branchResult = BranchResult(
             responseStrategy = ResponseStrategy.SOCIAL,
             retrieval = retrieval,
-            directive = directive,
+            directive = "$baseDirective ${trustPhaseCalibration(ctx.trustPhase)}",
         )
     }
 

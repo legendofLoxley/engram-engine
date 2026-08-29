@@ -25,7 +25,8 @@ class VerbalMoveBranch(private val turnShape: TurnShape) : Branch {
             responseStrategy = ResponseStrategy.SOCIAL,
             retrieval = RetrievalIntent.PhrasePool(moveType = moveType, expressionPhase = ExpressionPhase.FIRST_RESPONSE),
             directive = "The user made a brief, low-pressure remark (not a question or request). Give a brief, " +
-                "natural acknowledgment — a few words, nothing more. Do not ask a question back unless truly needed.",
+                "natural acknowledgment — a few words, nothing more. Do not ask a question back unless truly needed. " +
+                trustPhaseCalibration(ctx.trustPhase),
         )
     }
 

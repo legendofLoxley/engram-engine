@@ -1,5 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
+import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
@@ -297,6 +300,111 @@ class SocialBranchModalityTest {
         val ctx = CognitiveContext(utterance = "can you hear me?", sessionId = "s", userId = "u")
         branch.execute(ctx)
         assertEquals(ResponseStrategy.SOCIAL, ctx.branchResult!!.responseStrategy)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — trustPhaseCalibration() (Capability #2: relationship deepens)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class TrustPhaseCalibrationTest {
+
+    @Test
+    fun `null trust phase calibrates the same as ORIENTATION`() {
+        assertEquals(trustPhaseCalibration(null), trustPhaseCalibration("ORIENTATION"))
+    }
+
+    @Test
+    fun `unknown trust phase string falls back to the ORIENTATION calibration`() {
+        assertEquals(trustPhaseCalibration(null), trustPhaseCalibration("not-a-real-phase"))
+    }
+
+    @Test
+    fun `each known trust phase produces a distinct calibration`() {
+        val calibrations = listOf("ORIENTATION", "WORKING_RHYTHM", "CONTEXT", "UNDERSTANDING")
+            .map { trustPhaseCalibration(it) }
+        assertEquals(calibrations.size, calibrations.toSet().size, "Expected all four phases to calibrate distinctly")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests — SocialBranch + VerbalMoveBranch carry trust-phase calibration
+// into their directive (narrow rollout — other branches untouched for now)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class BranchTrustPhaseCalibrationTest {
+
+    @Test
+    fun `SocialBranch directive carries the trust-phase calibration for a returning user`() = runTest {
+        val branch = SocialBranch()
+        val ctx = CognitiveContext(utterance = "hey", sessionId = "s", userId = "u", turnIndex = 2, trustPhase = "UNDERSTANDING")
+        branch.execute(ctx)
+        assertTrue(
+            ctx.branchResult!!.directive.contains("deep familiarity", ignoreCase = true),
+            "Expected UNDERSTANDING calibration in directive, got: ${ctx.branchResult!!.directive}",
+        )
+    }
+
+    @Test
+    fun `SocialBranch directive falls back to the measured calibration when trust phase is unknown`() = runTest {
+        val branch = SocialBranch()
+        val ctx = CognitiveContext(utterance = "hey", sessionId = "s", userId = "u", turnIndex = 2, trustPhase = null)
+        branch.execute(ctx)
+        assertTrue(
+            ctx.branchResult!!.directive.contains("keep it warm but measured", ignoreCase = true),
+            "Expected ORIENTATION-equivalent calibration in directive, got: ${ctx.branchResult!!.directive}",
+        )
+    }
+
+    @Test
+    fun `VerbalMoveBranch directive carries the trust-phase calibration`() = runTest {
+        val branch = VerbalMoveBranch(turnShape = TurnShape.FYI)
+        val ctx = CognitiveContext(utterance = "FYI I pushed the branch", sessionId = "s", userId = "u", trustPhase = "CONTEXT")
+        branch.execute(ctx)
+        assertTrue(
+            ctx.branchResult!!.directive.contains("established rapport", ignoreCase = true),
+            "Expected CONTEXT calibration in directive, got: ${ctx.branchResult!!.directive}",
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration test — trust phase flows from scaffold state through to the actor's
+// prompt on the live /cognitive/chat path (CognitivePipeline.process against a real
+// EngramClient), not just a hand-constructed CognitiveContext.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class CognitivePipelineTrustPhaseIntegrationTest {
+
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+
+    @Test
+    fun `scaffold trust phase reaches SocialBranch's directive on the live chat path`() = runTest {
+        val engram = InMemoryEngramClient()
+        engram.updateScaffoldState("user-deep", ScaffoldState(trustPhase = 4)) // UNDERSTANDING
+        val pipeline = CognitivePipeline(engramClient = engram, llmClient = echoLlm)
+
+        val response = pipeline.process("hey", "session-trust", "user-deep")
+
+        assertTrue(
+            response.contains("deep familiarity", ignoreCase = true),
+            "Expected UNDERSTANDING calibration to reach the actor's prompt, got: $response",
+        )
+    }
+
+    @Test
+    fun `a brand-new user (no scaffold state) calibrates as measured, not familiar`() = runTest {
+        val engram = InMemoryEngramClient()
+        val pipeline = CognitivePipeline(engramClient = engram, llmClient = echoLlm)
+
+        val response = pipeline.process("hey", "session-new", "brand-new-user")
+
+        assertTrue(
+            response.contains("keep it warm but measured", ignoreCase = true),
+            "Expected ORIENTATION-equivalent calibration for a new user, got: $response",
+        )
     }
 }
 

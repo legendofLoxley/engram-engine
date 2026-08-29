@@ -555,6 +555,22 @@ open class CognitivePipeline(
             trace.routing.route = routeNameFor(ctx.intent, ctx.turnShape)
         }
 
+        // ── Trust phase (relationship-phase conditioner for the director/actor) ─
+        // Scaffold-state read failure is non-fatal — the turn proceeds with trustPhase = null,
+        // which trustPhaseCalibration() treats the same as ORIENTATION (measured, not presumptive).
+        val scaffoldState = try {
+            engramClient.getScaffoldState(userId)
+        } catch (_: Exception) {
+            null
+        }
+        ctx.trustPhase = when (scaffoldState?.trustPhase) {
+            1 -> "ORIENTATION"
+            2 -> "WORKING_RHYTHM"
+            3 -> "CONTEXT"
+            4 -> "UNDERSTANDING"
+            else -> null
+        }
+
         // ── Reason (Branch execution — director) ─────────────────────────────
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)

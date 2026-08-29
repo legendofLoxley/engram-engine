@@ -56,3 +56,16 @@ const val TEXT_IDENTITY_SYSTEM_PROMPT =
 /** Single source of truth for identity-prompt selection — used by [Actor]. */
 fun identitySystemPrompt(modality: Modality): String =
     if (modality == Modality.VOICE) VOICE_IDENTITY_SYSTEM_PROMPT else TEXT_IDENTITY_SYSTEM_PROMPT
+
+/**
+ * One-line relationship-phase calibration appended to a branch's directive — never user-facing.
+ * Tells the actor how much familiarity is earned so far. Null/unknown trust phase (including
+ * scaffold-state read failure) calibrates the same as ORIENTATION: cold start stays measured,
+ * never presumes closeness.
+ */
+fun trustPhaseCalibration(trustPhase: String?): String = when (trustPhase) {
+    "WORKING_RHYTHM" -> "Relationship phase: still getting acquainted — friendly but not yet casual."
+    "CONTEXT" -> "Relationship phase: established rapport — comfortable referencing shared history, casual tone is fine."
+    "UNDERSTANDING" -> "Relationship phase: deep familiarity — talk like you know them well, casual and warm."
+    else -> "Relationship phase: early — keep it warm but measured, don't presume familiarity yet."
+}
