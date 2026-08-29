@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.affect.Mood
 import kotlinx.serialization.Serializable
 
 enum class AttentionAction { PROCESS, IGNORE, INTERRUPT, CONTEXT_SWITCH }
@@ -18,6 +19,8 @@ data class AffectConfig(
     val warmth: Double = 0.7,
     val dryness: Double = 0.4,
     val energy: EnergyLevel = EnergyLevel.MEDIUM,
+    /** Session-level, slow-moving tone layer. See [Mood]. */
+    val mood: Mood = Mood.NEUTRAL,
 )
 
 /**

@@ -1,10 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline.scaffold
 
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldPhaseTransition
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
-import app.alfrd.engram.model.OutcomeEdge
 import java.time.Clock
 import java.util.concurrent.TimeUnit
 
@@ -26,23 +24,22 @@ sealed class TransitionDecision {
 // ── Service ───────────────────────────────────────────────────────────────────
 
 /**
- * Evaluates and applies trust-phase transitions per the Onboarding Scaffold Specification §4.
+ * Applies dormancy-based regression to the relationship-wide scaffold trust phase
+ * ([ScaffoldState.trustPhase]) per the Onboarding Scaffold Specification §4's narrow regression
+ * rule. This is a distinct, older mechanism from the per-topic confidence model in
+ * [app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService] — `ctx.trustPhase`
+ * still feeds [app.alfrd.engram.cognitive.pipeline.selection.SelectionScorer] for phrase-pool
+ * phase-appropriateness scoring, which is out of scope for the per-topic redesign (flagged as
+ * not-yet-topic-aware by the Response Architecture design doc itself).
  *
- * **Evaluate** — pure logic; reads [ScaffoldState] and returns a [TransitionDecision].
- *   Does NOT write to storage; callers decide whether to apply.
+ * The session/category-counting *advancement* rule that used to live here has been removed —
+ * it was never invoked on the live turn path, and is superseded entirely by per-topic
+ * confidence, driven by demonstrated competence and explicit user feedback rather than counting.
  *
  * **Apply** — writes the updated [ScaffoldState.trustPhase] and appends a
  *   [ScaffoldPhaseTransition] record to [ScaffoldState.phaseTransitions].
  *   Idempotent: re-applying a decision whose `to` phase already matches the
  *   stored phase is a no-op (prevents duplicate history entries on concurrent writes).
- *
- * ### Advancement rules
- *
- * | From             | To               | Criteria                                                              |
- * |------------------|------------------|-----------------------------------------------------------------------|
- * | ORIENTATION (1)  | WORKING_RHYTHM (2)| ≥3 answered categories **and** IDENTITY or EXPERTISE answered         |
- * | WORKING_RHYTHM (2)| CONTEXT (3)      | ≥5 answered categories **and** sessionCount ≥ 3                       |
- * | CONTEXT (3)      | UNDERSTANDING (4) | ≥6 answered categories **and** sessionCount ≥ 10 **and** CORRECTED edge exists |
  *
  * ### Dormancy regression (§4 — narrow regression rules)
  * If `lastInteractionAt` is more than 90 days ago, the phase regresses by one level.
@@ -55,26 +52,7 @@ class TrustPhaseTransitionService(
 ) {
 
     /**
-     * Evaluates advancement criteria. Pass [outcomeEdges] if the OUTCOME edge writer is
-     * deployed; pass an empty list (default) to gracefully degrade — UNDERSTANDING
-     * advancement simply never fires without a CORRECTED edge.
-     */
-    fun evaluate(
-        state: ScaffoldState,
-        outcomeEdges: List<OutcomeEdge> = emptyList(),
-    ): TransitionDecision {
-        val nextPhase = computeNextPhase(state, outcomeEdges) ?: return TransitionDecision.NoChange
-        return TransitionDecision.Transition(
-            from      = state.trustPhase,
-            to        = nextPhase,
-            evidence  = buildEvidence(state, nextPhase),
-            timestamp = clock.millis(),
-        )
-    }
-
-    /**
-     * Evaluates dormancy-based regression. Separate from [evaluate] to keep the
-     * advancement and regression logic branches cleanly separated.
+     * Evaluates dormancy-based regression.
      *
      * Returns [TransitionDecision.NoChange] when:
      *   - [ScaffoldState.lastInteractionAt] is null (never seen before)
@@ -124,35 +102,6 @@ class TrustPhaseTransitionService(
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
-
-    private fun computeNextPhase(
-        state: ScaffoldState,
-        outcomeEdges: List<OutcomeEdge>,
-    ): Int? = when (state.trustPhase) {
-        1 -> { // ORIENTATION → WORKING_RHYTHM
-            val hasFundamental = PhraseCategory.IDENTITY in state.answeredCategories ||
-                PhraseCategory.EXPERTISE in state.answeredCategories
-            if (state.answeredCategories.size >= 3 && hasFundamental) 2 else null
-        }
-        2 -> { // WORKING_RHYTHM → CONTEXT
-            if (state.answeredCategories.size >= 5 && state.sessionCount >= 3) 3 else null
-        }
-        3 -> { // CONTEXT → UNDERSTANDING
-            val hasCorrected = outcomeEdges.any { it.signal == "CORRECTED" }
-            if (state.answeredCategories.size >= 6 &&
-                state.sessionCount >= 10 &&
-                hasCorrected
-            ) 4 else null
-        }
-        else -> null // UNDERSTANDING (4) has no further advancement
-    }
-
-    private fun buildEvidence(state: ScaffoldState, nextPhase: Int): String = when (nextPhase) {
-        2 -> "Answered ${state.answeredCategories.size} scaffold categories including foundational identity."
-        3 -> "5+ categories answered across ${state.sessionCount} sessions — sustained engagement."
-        4 -> "Full scaffold + ${state.sessionCount} sessions + user has corrected alfrd — collaborative refinement relationship."
-        else -> "Phase advanced from ${state.trustPhase} to $nextPhase."
-    }
 
     internal fun phaseIntToString(phase: Int): String = when (phase) {
         1 -> "ORIENTATION"

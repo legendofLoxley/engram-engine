@@ -60,6 +60,54 @@ data class ScaffoldPhaseTransition(
 )
 
 /**
+ * Per-topic confidence phases — regions of accumulated confidence on a given topic, per the
+ * Onboarding Scaffold Specification §4 (amended). Deliberately a separate enum from
+ * [app.alfrd.engram.model.TrustPhase]: that enum still governs the older, relationship-wide
+ * dormancy-regression/phrase-pool-phase-gating mechanism ([app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService]),
+ * which this task does not touch. Reusing it here would re-couple the two mechanisms this
+ * redesign is meant to separate.
+ */
+enum class ConfidencePhase { ORIENTATION, WORKING_RHYTHM, CONTEXT, UNDERSTANDING }
+
+/** What kind of evidence moved a [TopicConfidence] score. */
+@Serializable
+enum class ConfidenceEvidenceKind { COMPETENCE, FEEDBACK_AFFIRMED, CORRECTION_CONFIRMED }
+
+/**
+ * A single evidence event that moved a [TopicConfidence] score. [delta] is always >= 0 —
+ * confidence never decreases from evidence; see [TopicConfidence.hasUnresolvedContradiction]
+ * for the only non-monotonic state.
+ */
+@Serializable
+data class ConfidenceEvidenceEntry(
+    val kind: ConfidenceEvidenceKind,
+    val delta: Double,
+    val timestamp: Long,
+    val note: String = "",
+)
+
+/**
+ * alfrd's earned confidence in its own memory/knowledge on a specific topic — per-topic,
+ * monotonic (score only ever increases), evidence-driven. Attached to a [Concept] vertex on the
+ * graph via a `CONFIDENT_IN` edge from the User vertex (see [DatabaseEngramClient]), not a flat
+ * per-user field — per Onboarding Scaffold Specification §4: trust/confidence lives "attached to
+ * the same Concepts the knowledge itself is organized around, not bolted on as a separate global
+ * score."
+ *
+ * @param hasUnresolvedContradiction The only non-monotonic state: true while a correction has
+ *   been detected but not yet confirmed written. Resolves upward (cleared + score raised) via
+ *   [ConfidenceEvidenceKind.CORRECTION_CONFIRMED] — never downward.
+ */
+data class TopicConfidence(
+    val topic: String,
+    val score: Double = 0.0,
+    val phase: ConfidencePhase = ConfidencePhase.ORIENTATION,
+    val hasUnresolvedContradiction: Boolean = false,
+    val evidence: List<ConfidenceEvidenceEntry> = emptyList(),
+    val updatedAt: Long = 0L,
+)
+
+/**
  * Snapshot of a user's onboarding progress.
  *
  * @param trustPhase             Current trust phase (1–4).
@@ -119,4 +167,10 @@ interface EngramClient {
 
     /** Update the content of an existing phrase by its ID. */
     suspend fun amendPhrase(phraseId: String, newContent: String)
+
+    /** Get per-topic confidence for [userEmail] on [topic], initialising a fresh value if none exists. */
+    suspend fun getTopicConfidence(userEmail: String, topic: String): TopicConfidence
+
+    /** Persist updated per-topic confidence for [userEmail] on [topic]. */
+    suspend fun updateTopicConfidence(userEmail: String, topic: String, confidence: TopicConfidence)
 }

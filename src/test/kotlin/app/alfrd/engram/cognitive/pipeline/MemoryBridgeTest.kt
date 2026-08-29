@@ -110,6 +110,11 @@ class MemoryBridgeIntegrationTest {
             override suspend fun getScaffoldState(userId: String) = ScaffoldState()
             override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = Unit
             override suspend fun amendPhrase(phraseId: String, newContent: String) = Unit
+            override suspend fun getTopicConfidence(userEmail: String, topic: String) =
+                app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence(topic = topic)
+            override suspend fun updateTopicConfidence(
+                userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
+            ) = Unit
         }
         val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
         val pipeline = CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
@@ -135,6 +140,11 @@ class MemoryBridgeIntegrationTest {
             override suspend fun getScaffoldState(userId: String) = ScaffoldState()
             override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = Unit
             override suspend fun amendPhrase(phraseId: String, newContent: String) = Unit
+            override suspend fun getTopicConfidence(userEmail: String, topic: String) =
+                app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence(topic = topic)
+            override suspend fun updateTopicConfidence(
+                userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
+            ) = Unit
         }
         val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
 
@@ -227,6 +237,11 @@ class MemoryBridgeIntegrationTest {
                 throw RuntimeException("db down")
             override suspend fun amendPhrase(phraseId: String, newContent: String) =
                 throw RuntimeException("db down")
+            override suspend fun getTopicConfidence(userEmail: String, topic: String): app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence =
+                throw RuntimeException("db down")
+            override suspend fun updateTopicConfidence(
+                userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
+            ): Unit = throw RuntimeException("db down")
         }
         val llm = TestLlmClient { LlmResponse(text = "Still here.", latencyMs = 0, retryCount = 0) }
         val pipeline = CognitivePipeline(engramClient = brokenEngram, llmClient = llm)

@@ -11,6 +11,7 @@ class InMemoryEngramClient : EngramClient {
 
     private val phrases = mutableListOf<Phrase>()
     private val scaffoldStates = mutableMapOf<String, ScaffoldState>()
+    private val topicConfidences = mutableMapOf<Pair<String, String>, TopicConfidence>()
 
     // ── Decompose ─────────────────────────────────────────────────────────────
 
@@ -127,6 +128,15 @@ class InMemoryEngramClient : EngramClient {
     override suspend fun amendPhrase(phraseId: String, newContent: String) {
         val idx = phrases.indexOfFirst { it.id == phraseId }
         if (idx >= 0) phrases[idx] = phrases[idx].copy(content = newContent)
+    }
+
+    // ── Topic confidence ──────────────────────────────────────────────────────
+
+    override suspend fun getTopicConfidence(userEmail: String, topic: String): TopicConfidence =
+        topicConfidences.getOrDefault(userEmail to topic, TopicConfidence(topic = topic))
+
+    override suspend fun updateTopicConfidence(userEmail: String, topic: String, confidence: TopicConfidence) {
+        topicConfidences[userEmail to topic] = confidence
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────

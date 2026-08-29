@@ -1,5 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
+import app.alfrd.engram.cognitive.pipeline.confidence.TopicResolver
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
@@ -60,6 +62,7 @@ class Script(
     private val engramClient: EngramClient,
     private val selectionService: ResponseSelectionService? = null,
     private val personaSource: PersonaSource = DefaultPersonaSource(),
+    private val confidenceService: TopicConfidenceService? = null,
 ) {
 
     /**
@@ -197,8 +200,17 @@ class Script(
             existingPhrases.firstOrNull { it.text.lowercase().contains(sv.lowercase()) }
         }
 
+        // A correction is a detected contradiction until the write below actually succeeds —
+        // flag it first so a failed write correctly leaves the topic "unresolved" rather than
+        // silently confirmed (see the success paths, where the flag is cleared).
+        val topic = TopicResolver.resolve(intent.newFact)
+        confidenceService?.recordContradictionDetected(ctx.userEmail, topic)
+
         return if (phraseToAmend != null) {
-            try { engramClient.amendPhrase(phraseToAmend.uid, intent.newFact) } catch (_: Exception) { }
+            try {
+                engramClient.amendPhrase(phraseToAmend.uid, intent.newFact)
+                confidenceService?.recordCorrectionConfirmed(ctx.userEmail, topic)
+            } catch (_: Exception) { }
             ctx.retrievalCoverage = RetrievalCoverage.of(
                 activationMass = 1.0, playFired = true, conceptResolutionRatio = 1.0, gaps = emptyList(),
             )
@@ -207,6 +219,7 @@ class Script(
             try {
                 val candidates = engramClient.decompose(intent.newFact, ctx.priorUtterances)
                 if (candidates.isNotEmpty()) engramClient.ingest(candidates, ctx.userEmail)
+                confidenceService?.recordCorrectionConfirmed(ctx.userEmail, topic)
             } catch (_: Exception) { }
             ctx.retrievalCoverage = RetrievalCoverage.of(
                 activationMass = 0.5, playFired = true, conceptResolutionRatio = 0.0,

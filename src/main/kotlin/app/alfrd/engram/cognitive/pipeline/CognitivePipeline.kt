@@ -1,5 +1,14 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.affect.Mood
+import app.alfrd.engram.cognitive.pipeline.affect.MoodDrift
+import app.alfrd.engram.cognitive.pipeline.affect.MoodOverrideDetector
+import app.alfrd.engram.cognitive.pipeline.affect.MoodState
+import app.alfrd.engram.cognitive.pipeline.affect.moodDirective
+import app.alfrd.engram.cognitive.pipeline.confidence.AffirmationClassifier
+import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
+import app.alfrd.engram.cognitive.pipeline.confidence.TopicResolver
+import app.alfrd.engram.cognitive.pipeline.confidence.topicConfidenceDirective
 import app.alfrd.engram.cognitive.pipeline.posture.FluxEvent
 import app.alfrd.engram.cognitive.pipeline.posture.PostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.TurnShape
@@ -53,6 +62,7 @@ open class CognitivePipeline(
     private val transitionService: TrustPhaseTransitionService? = null,
     private val firstSessionHandler: FirstSessionHandler? = null,
     private val personaSource: PersonaSource = DefaultPersonaSource(),
+    private val confidenceService: TopicConfidenceService? = null,
 ) {
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
@@ -66,7 +76,7 @@ open class CognitivePipeline(
     private val attention     = Attention()
     private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
     private val router        = Router()
-    private val script        = Script(engramClient, selectionService, personaSource)
+    private val script        = Script(engramClient, selectionService, personaSource, confidenceService)
     private val actor         = Actor(llmClient)
     private val expression    = Expression()
 
@@ -79,6 +89,17 @@ open class CognitivePipeline(
      */
     @Volatile var pendingOutcome: PendingOutcome? = null
         internal set
+
+    /**
+     * Session-level Mood state (Affect's v2 layer) — slow-moving, overridable by explicit
+     * instruction, and deliberately never read from or written to by [confidenceService].
+     * Same session-scoped-instance-field pattern as [pendingOutcome]: one [CognitivePipeline]
+     * per session, reused for its lifetime, per [app.alfrd.engram.cognitive.SessionManager].
+     */
+    @Volatile private var moodState: MoodState = MoodState()
+
+    /** Small rolling window of already-computed [OutcomeSignal] history, feeding [MoodDrift] only. */
+    @Volatile private var recentOutcomeSignals: List<OutcomeSignal> = emptyList()
 
     /**
      * First-session state recorded when an invited user is greeted with the warm provenance
@@ -490,7 +511,28 @@ open class CognitivePipeline(
                     turnIndex = priorPending.turnIndex,
                 )
             }
+
+            // Per-topic confidence evidence — resolved from the *user's prior utterance*
+            // (priorContext.utterance), not the selected response phrase text, since short
+            // posture phrases ("Got it.") carry no topic. Deliberately reuses this
+            // already-computed OutcomeSignal for "demonstrated competence" rather than a
+            // separate classification — distinct concern (phrase effectiveness) from the
+            // first-class explicit-feedback signal below, per the confidence model's spec.
+            val priorTopic = TopicResolver.resolve(priorPending.priorContext.utterance)
+            confidenceService?.recordDemonstratedCompetence(userId, priorTopic, classification.signal)
+            if (AffirmationClassifier.isAffirmation(utterance)) {
+                confidenceService?.recordExplicitAffirmation(userId, priorTopic)
+            }
+
+            // Mood drift (Affect, not Confidence) — reuses the same already-computed
+            // OutcomeSignal history, capped to a small rolling window.
+            recentOutcomeSignals = (recentOutcomeSignals + classification.signal).takeLast(5)
         }
+
+        // Mood override — a direct instruction ("stop being so formal") wins over drift and is
+        // sticky for the rest of the session until changed again.
+        moodState = MoodOverrideDetector.detect(utterance)?.let { MoodState(mood = it, overrideActive = true) }
+            ?: if (moodState.overrideActive) moodState else moodState.copy(mood = MoodDrift.next(moodState.mood, recentOutcomeSignals))
 
         val ctx = CognitiveContext(
             utterance = utterance,
@@ -503,6 +545,7 @@ open class CognitivePipeline(
             trace     = trace,
             modality  = modality,
             turnIndex = turnIndex,
+            affect    = AffectConfig(mood = moodState.mood),
         )
 
         // Scaffold/trust state, loaded on every turn (previously only loaded by initSession
@@ -563,17 +606,22 @@ open class CognitivePipeline(
         // ctx.postureSignals.turnShape (a separate, voice-tuned classifier that defaults to FYI
         // rather than null and can disagree on the text path).
         val attunement = attunementDirective(ctx.turnShape, ctx.postureSignals?.surfaceEnergy ?: 0.0)
-        // trustPhase below only conditions this response — the deterministic phase-advance rule
-        // (TrustPhaseTransitionService.evaluate) is intentionally not invoked from the main turn
-        // path; see the class doc on Conditioners for why.
+        // Per-topic confidence conditioner — resolved from *this turn's* utterance (a distinct,
+        // forward-looking use from the backward-looking evidence resolution above). Epistemic
+        // confidence only, never tone — see the class doc on Conditioners.
+        val currentTopic = TopicResolver.resolve(ctx.utterance)
+        val currentTopicPhase = currentTopic?.let {
+            try { engramClient.getTopicConfidence(ctx.userEmail, it).phase } catch (_: Exception) { null }
+        }
         val conditioners = Conditioners(
             modality         = ctx.modality,
-            trustPhase       = ctx.trustPhase,
             responseStrategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE,
             directive        = ctx.branchResult?.directive ?: "Respond naturally and briefly.",
             attunement       = attunement,
             persona          = persona.persona,
             selfDescription  = persona.selfDescription,
+            topicConfidence  = topicConfidenceDirective(currentTopicPhase),
+            mood             = moodDirective(moodState.mood),
         )
         val coverage = ctx.retrievalCoverage ?: RetrievalCoverage.NONE_NEEDED
         logger.info(

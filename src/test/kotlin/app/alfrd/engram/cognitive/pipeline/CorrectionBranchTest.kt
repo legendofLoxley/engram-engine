@@ -1,11 +1,15 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
+import app.alfrd.engram.cognitive.pipeline.memory.ConfidencePhase
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -89,6 +93,7 @@ class CorrectionBranchTest {
 // Script — correction resolution (the amend/ingest behavior moved here from the branch)
 // ─────────────────────────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ScriptCorrectionTest {
 
     @Test
@@ -130,6 +135,26 @@ class ScriptCorrectionTest {
 
         val phrases = engram.queryPhrases("user-1", "alex")
         assertTrue(phrases.isNotEmpty(), "Expected corrected fact to be stored, got: $phrases")
+    }
+
+    @Test
+    fun `a successful correction confirms and raises topic confidence, never lowers it`() = runTest {
+        val engram = InMemoryEngramClient()
+        val confidenceService = TopicConfidenceService(engram, scope = this)
+        val script = Script(engram, confidenceService = confidenceService)
+        val ctx = CognitiveContext(
+            utterance = "Actually my dog's name is Newton, not Neutron",
+            sessionId = "s", userId = "user-1", userEmail = "user-1",
+        )
+
+        script.run(ctx, RetrievalIntent.Correction(supersededValue = "Neutron", newFact = "my dog's name is Newton"))
+        advanceUntilIdle()
+
+        // TopicResolver picks the longest keyword from "my dog's name is Newton" — "newton".
+        val confidence = engram.getTopicConfidence("user-1", "newton")
+        assertFalse(confidence.hasUnresolvedContradiction, "Confirmed correction must clear the contradiction flag")
+        assertTrue(confidence.score > 0.0, "Confirmed correction must raise confidence above the default")
+        assertEquals(ConfidencePhase.WORKING_RHYTHM, confidence.phase, "A single confirmation crosses the WORKING_RHYTHM threshold")
     }
 }
 

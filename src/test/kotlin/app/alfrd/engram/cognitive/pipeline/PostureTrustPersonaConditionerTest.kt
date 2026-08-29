@@ -1,7 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.memory.ConfidencePhase
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
+import app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.TestLlmClient
@@ -10,8 +11,8 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 /**
- * Integration tests for posture, trust-phase, and persona reaching the actor's prompt as
- * conditioners. Uses the echo-LLM pattern already established by
+ * Integration tests for posture, per-topic confidence, mood, and persona reaching the actor's
+ * prompt as conditioners. Uses the echo-LLM pattern already established by
  * [CognitivePipelineIntegrationTest] / `GreetingTurnGateTest` (TestLlmClient echoes the composed
  * systemPrompt back as the response text), so prompt CONTENT can be asserted without a real model.
  */
@@ -21,31 +22,62 @@ class PostureTrustPersonaConditionerTest {
         LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
     }
 
-    // ── Scaffold/trust state loaded on the main turn path ──────────────────────
+    // ── Per-topic confidence reaches the prompt as an epistemic note, never tone ──
 
     @Test
-    fun `trust phase note appears in the composed prompt once scaffold state is seeded`() = runTest {
+    fun `topic confidence note appears in the composed prompt once seeded for the turn's topic`() = runTest {
         val engramClient = InMemoryEngramClient()
-        engramClient.updateScaffoldState("user-wr", ScaffoldState(trustPhase = 2))
+        // "What's the plan for today?" resolves to topic "today" via TopicResolver (longest
+        // extracted keyword) — seed confidence for that exact topic.
+        engramClient.updateTopicConfidence(
+            "user-wr", "today",
+            TopicConfidence(topic = "today", score = 0.6, phase = ConfidencePhase.WORKING_RHYTHM),
+        )
         val pipeline = CognitivePipeline(engramClient = engramClient, llmClient = echoLlm)
 
         val response = pipeline.process("What's the plan for today?", "session-wr", "user-wr")
 
         assertTrue(
-            response.contains("working rhythm", ignoreCase = true),
-            "Expected the WORKING_RHYTHM relationship-stage note in the prompt, got: $response",
+            response.contains("working familiarity", ignoreCase = true),
+            "Expected the WORKING_RHYTHM topic-confidence note in the prompt, got: $response",
         )
     }
 
     @Test
-    fun `fresh user defaults to the ORIENTATION relationship note`() = runTest {
+    fun `fresh user defaults to the ORIENTATION topic confidence note`() = runTest {
         val pipeline = CognitivePipeline(llmClient = echoLlm)
 
         val response = pipeline.process("What's the plan for today?", "session-o1", "user-o1")
 
         assertTrue(
-            response.contains("early days", ignoreCase = true),
-            "Expected the ORIENTATION relationship-stage note in the prompt, got: $response",
+            response.contains("don't yet have earned confidence", ignoreCase = true),
+            "Expected the ORIENTATION topic-confidence note in the prompt, got: $response",
+        )
+    }
+
+    // ── Mood override reaches the prompt as a tone directive, never confidence ───
+
+    @Test
+    fun `explicit mood override reaches the prompt as a tone directive`() = runTest {
+        val pipeline = CognitivePipeline(llmClient = echoLlm)
+
+        val response = pipeline.process("Lighten up a bit, would you?", "session-mood-1", "user-mood-1")
+
+        assertTrue(
+            response.contains("playfulness", ignoreCase = true),
+            "Expected the PLAYFUL mood directive in the prompt after an explicit override, got: $response",
+        )
+    }
+
+    @Test
+    fun `fresh session defaults to the NEUTRAL mood tone`() = runTest {
+        val pipeline = CognitivePipeline(llmClient = echoLlm)
+
+        val response = pipeline.process("What's the plan for today?", "session-mood-2", "user-mood-2")
+
+        assertTrue(
+            response.contains("warm and professional", ignoreCase = true),
+            "Expected the NEUTRAL mood directive by default, got: $response",
         )
     }
 
@@ -133,6 +165,7 @@ class PostureTrustPersonaConditionerTest {
             "What time does school start?",
             "Remind me to call the vet",
             "Actually, no I meant the dentist",
+            "You nailed it, thanks!",
             "Thanks",
             "I feel really overwhelmed today",
             "FYI I pushed the branch",

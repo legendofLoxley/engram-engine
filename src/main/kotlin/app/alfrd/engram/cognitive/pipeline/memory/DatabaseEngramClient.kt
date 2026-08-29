@@ -5,8 +5,13 @@ import app.alfrd.engram.api.ScaffoldStateResponse
 import app.alfrd.engram.api.ScaffoldStateStore
 import app.alfrd.engram.api.queryPhrases
 import com.arcadedb.database.Database
+import com.arcadedb.graph.Edge
+import com.arcadedb.graph.Vertex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.security.MessageDigest
 import java.util.UUID
 import org.slf4j.LoggerFactory
@@ -36,6 +41,7 @@ class DatabaseEngramClient(
     private val scaffoldStore = ScaffoldStateStore(db)
     private val heuristicDecompose = InMemoryEngramClient()
     private val logger = LoggerFactory.getLogger(DatabaseEngramClient::class.java)
+    private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
         const val SOURCE_TYPE = "onboarding_conversation"
@@ -163,7 +169,111 @@ class DatabaseEngramClient(
         scaffoldStore.upsert(userId, state.toResponse(userId))
     }
 
+    // ── Topic confidence ─────────────────────────────────────────────────────
+    //
+    // Attached to the graph via User -CONFIDENT_IN-> Concept, not a flat per-user field — the
+    // Concept vertex is find-or-created by normalized topic name (mirroring the Source
+    // find-or-create block in ingest() above), and the CONFIDENT_IN edge between User and
+    // Concept carries the evolving TopicConfidence state as edge properties.
+
+    override suspend fun getTopicConfidence(userEmail: String, topic: String): TopicConfidence {
+        val normalized = normalizeTopic(topic)
+        if (userEmail.isBlank() || normalized.isBlank()) return TopicConfidence(topic = normalized)
+        return withContext(Dispatchers.IO) {
+            try {
+                val userVertex = findUserVertex(userEmail) ?: return@withContext TopicConfidence(topic = normalized)
+                val conceptVertex = findConceptVertex(normalized) ?: return@withContext TopicConfidence(topic = normalized)
+                val edge = findConfidentInEdge(userVertex, conceptVertex)
+                    ?: return@withContext TopicConfidence(topic = normalized)
+                edge.toTopicConfidence(normalized)
+            } catch (e: Exception) {
+                logger.warn("getTopicConfidence failed for userEmail=$userEmail topic=$topic: ${e.message}")
+                TopicConfidence(topic = normalized)
+            }
+        }
+    }
+
+    override suspend fun updateTopicConfidence(
+        userEmail: String,
+        topic: String,
+        confidence: TopicConfidence,
+    ) = withContext(Dispatchers.IO) {
+        val normalized = normalizeTopic(topic)
+        if (userEmail.isBlank() || normalized.isBlank()) return@withContext
+        try {
+            db.transaction {
+                val userVertex = findUserVertex(userEmail)
+                if (userVertex == null) {
+                    logger.warn("updateTopicConfidence: no User vertex for email=$userEmail — skipping")
+                    return@transaction
+                }
+                val conceptVertex = findOrCreateConceptVertex(normalized)
+                val existingEdge = findConfidentInEdge(userVertex, conceptVertex)
+                val edge = existingEdge?.modify() ?: userVertex.newEdge("CONFIDENT_IN", conceptVertex, false)
+                edge.set("score", confidence.score)
+                edge.set("phase", confidence.phase.name)
+                edge.set("hasUnresolvedContradiction", confidence.hasUnresolvedContradiction)
+                edge.set("evidence", json.encodeToString(confidence.evidence.takeLast(20)))
+                edge.set("updatedAt", confidence.updatedAt)
+                edge.save()
+            }
+        } catch (e: Exception) {
+            logger.warn("updateTopicConfidence failed for userEmail=$userEmail topic=$topic: ${e.message}")
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun normalizeTopic(topic: String): String = topic.trim().lowercase()
+
+    private fun findUserVertex(userEmail: String): Vertex? = db.query(
+        "sql",
+        "SELECT FROM User WHERE email = :email",
+        mapOf("email" to userEmail),
+    ).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+
+    private fun findConceptVertex(normalizedName: String): Vertex? = db.query(
+        "sql",
+        "SELECT FROM Concept WHERE normalizedName = :name",
+        mapOf("name" to normalizedName),
+    ).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+
+    private fun findOrCreateConceptVertex(normalizedName: String): Vertex =
+        findConceptVertex(normalizedName) ?: db.newVertex("Concept").apply {
+            set("uid", UUID.randomUUID().toString())
+            set("name", normalizedName)
+            set("type", "topic")
+            set("normalizedName", normalizedName)
+            save()
+        }
+
+    private fun findConfidentInEdge(userVertex: Vertex, conceptVertex: Vertex): Edge? {
+        val conceptUid = conceptVertex.get("uid")
+        return userVertex.getEdges(Vertex.DIRECTION.OUT, "CONFIDENT_IN")
+            .firstOrNull { it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == conceptUid }
+    }
+
+    private fun Edge.toTopicConfidence(topic: String): TopicConfidence {
+        val phaseStr = get("phase") as? String ?: "ORIENTATION"
+        val evidenceJson = get("evidence") as? String ?: "[]"
+        val evidence = try {
+            json.decodeFromString<List<ConfidenceEvidenceEntry>>(evidenceJson)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return TopicConfidence(
+            topic = topic,
+            score = (get("score") as? Number)?.toDouble() ?: 0.0,
+            phase = try {
+                ConfidencePhase.valueOf(phaseStr)
+            } catch (_: Exception) {
+                ConfidencePhase.ORIENTATION
+            },
+            hasUnresolvedContradiction = get("hasUnresolvedContradiction") as? Boolean ?: false,
+            evidence = evidence,
+            updatedAt = (get("updatedAt") as? Number)?.toLong() ?: 0L,
+        )
+    }
 
     private fun sha256(text: String): String {
         val bytes = MessageDigest.getInstance("SHA-256")

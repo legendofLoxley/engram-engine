@@ -226,6 +226,11 @@ class CognitiveInitTest {
             override suspend fun getScaffoldState(userId: String): ScaffoldState = error("scaffold unavailable")
             override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) {}
             override suspend fun amendPhrase(phraseId: String, newContent: String) {}
+            override suspend fun getTopicConfidence(userEmail: String, topic: String) =
+                app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence(topic = topic)
+            override suspend fun updateTopicConfidence(
+                userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
+            ) {}
         }
         val p = CognitivePipeline(engramClient = brokenClient, selectionService = service)
         val result = p.initSession(

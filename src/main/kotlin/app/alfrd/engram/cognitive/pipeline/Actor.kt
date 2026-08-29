@@ -50,18 +50,22 @@ data class RetrievedScript(
  * still reaches the actor even when routing picks the wrong branch for the turn's content.
  * [persona] and [selfDescription] come from a [PersonaSource] (via [Script]), not a literal
  * baked into this file.
- * [trustPhase] deliberately only *conditions the response* here — the deterministic phase
- * advance rule ([app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService.evaluate])
- * is untouched but intentionally not invoked from the main turn path; see [CognitivePipeline].
+ * [topicConfidence] is an epistemic-confidence-only note for the *current turn's* resolved
+ * topic — see [app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService] and
+ * [app.alfrd.engram.cognitive.pipeline.confidence.topicConfidenceDirective]. It deliberately
+ * never carries tone/warmth wording — confidence must never govern tone. [mood] is the separate,
+ * session-level tone layer that does that job — see [app.alfrd.engram.cognitive.pipeline.affect.Mood].
+ * Neither reads from nor writes to the other.
  */
 data class Conditioners(
     val modality: Modality,
-    val trustPhase: String?,
     val responseStrategy: ResponseStrategy,
     val directive: String,
     val attunement: String,
     val persona: String,
     val selfDescription: String,
+    val topicConfidence: String?,
+    val mood: String,
 )
 
 /** Result of a single actor composition. [source] is "llm" for a real completion, "degraded" for the failure fallback. */
@@ -105,10 +109,13 @@ class Actor(private val llmClient: LlmClient?) {
         append(conditioners.persona)
         append("\n\n")
         append(conditioners.selfDescription)
-        conditioners.trustPhase?.let { phase ->
-            append("\n\nRelationship stage: ")
-            append(trustPhaseNote(phase))
+        conditioners.topicConfidence?.let { note ->
+            append("\n\nTopic confidence: ")
+            append(note)
         }
+        append("\n\n")
+        append("Tone: ")
+        append(conditioners.mood)
         append("\n\n")
         append(conditioners.attunement)
         append("\n\n")
@@ -119,14 +126,5 @@ class Actor(private val llmClient: LlmClient?) {
             append(grounding.joinToString("\n") { "- $it" })
             append("\nTreat lower-confidence or tentative items as tentative. Be concise and warm.")
         }
-    }
-
-    /** Short relationship-stage gloss for the scaffold trust phase — prompt formatting only. */
-    private fun trustPhaseNote(phase: String): String = when (phase) {
-        "ORIENTATION"     -> "early days — you're just getting to know this person, don't assume shared history."
-        "WORKING_RHYTHM"  -> "you've settled into a working rhythm together over a few sessions."
-        "CONTEXT"         -> "deep shared context by now — several sessions in, treat them as familiar."
-        "UNDERSTANDING"   -> "a long-standing, well-understood relationship — respond like it."
-        else              -> phase
     }
 }

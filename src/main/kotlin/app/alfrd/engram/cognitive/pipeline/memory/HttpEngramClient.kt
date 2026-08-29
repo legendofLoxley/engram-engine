@@ -22,6 +22,7 @@ import java.util.logging.Logger
  * - `GET  /scaffold/state/{userId}`  — available
  * - `PUT  /scaffold/state/{userId}`  — available
  * - `decompose`                      — not yet available; falls back to the naive keyword heuristic
+ * - topic confidence (get/update)    — not yet available; falls back to a local in-memory instance
  *
  * Any network failure leads to a logged warning and a graceful degradation —
  * branches continue producing responses using LLM general knowledge.
@@ -38,6 +39,21 @@ class HttpEngramClient(
 
     override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> =
         InMemoryEngramClient().decompose(text, context)
+
+    // ── Topic confidence (local fallback — no server endpoint yet) ────────────
+    //
+    // This class is unused in production wiring today (CognitivePipelineFactory chooses
+    // between DatabaseEngramClient and InMemoryEngramClient only). Delegating to a shared
+    // in-memory instance keeps it a valid EngramClient without inventing endpoints nothing
+    // calls — same precedent as decompose() above.
+
+    private val fallbackConfidence = InMemoryEngramClient()
+
+    override suspend fun getTopicConfidence(userEmail: String, topic: String): TopicConfidence =
+        fallbackConfidence.getTopicConfidence(userEmail, topic)
+
+    override suspend fun updateTopicConfidence(userEmail: String, topic: String, confidence: TopicConfidence) =
+        fallbackConfidence.updateTopicConfidence(userEmail, topic, confidence)
 
     // ── Ingest ────────────────────────────────────────────────────────────────
 

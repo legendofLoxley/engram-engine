@@ -159,6 +159,17 @@ object SchemaBootstrap {
                 et.createProperty("timestamp", Type.LONG)
             }
 
+            // User -CONFIDENT_IN-> Concept — per-topic confidence (replaces the old global
+            // session/category-counting trust model). One edge per (user, topic); properties
+            // hold the evolving TopicConfidence state.
+            ensureEdge(schema, "CONFIDENT_IN") { et ->
+                et.createProperty("score", Type.DOUBLE)
+                et.createProperty("phase", Type.STRING)
+                et.createProperty("hasUnresolvedContradiction", Type.BOOLEAN)
+                et.createProperty("evidence", Type.STRING)   // JSON array, capped
+                et.createProperty("updatedAt", Type.LONG)
+            }
+
             // ── Additive migrations — safe to run on pre-existing types ──
             ensureProperty(schema, "User",    "email",               Type.STRING)
             ensureProperty(schema, "User",    "updatedAt",           Type.LONG)
