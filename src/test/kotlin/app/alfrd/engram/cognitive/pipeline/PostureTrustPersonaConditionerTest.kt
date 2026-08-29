@@ -127,6 +127,75 @@ class PostureTrustPersonaConditionerTest {
         // negation clause ("Never say you can hear them").
     }
 
+    // ── Recent conversational continuity ──────────────────────────────────────
+    // Reproduces the bug observed live in production on 2026-08-29: a warm-intro greeting sent
+    // via initSession() was never recorded anywhere, so the very next turn ("what do you
+    // mean?") had zero awareness alfrd had already spoken.
+
+    @Test
+    fun `warm-intro greeting reaches the next turn's prompt as recent-conversation context`() = runTest {
+        val pipeline = CognitivePipeline(llmClient = echoLlm)
+        val init = pipeline.initSession("session-continuity-1", "user-continuity-1")
+
+        val response = pipeline.process("what do you mean?", "session-continuity-1", "user-continuity-1")
+
+        assertTrue(
+            response.contains(init.greeting),
+            "Expected the initSession greeting to reach the next turn's prompt as recent-conversation context, got: $response",
+        )
+        assertTrue(
+            response.contains("Recent conversation", ignoreCase = true),
+            "Expected the recent-conversation block to be present, got: $response",
+        )
+    }
+
+    @Test
+    fun `first turn of a brand-new session has no recent-conversation block`() = runTest {
+        val pipeline = CognitivePipeline(llmClient = echoLlm)
+
+        val response = pipeline.process("Hey", "session-continuity-2", "user-continuity-2")
+
+        assertFalse(
+            response.contains("Recent conversation", ignoreCase = true),
+            "Expected no recent-conversation block on a truly fresh turn with no prior history, got: $response",
+        )
+    }
+
+    @Test
+    fun `recent-turns buffer stays capped and drops the oldest entries`() = runTest {
+        // A distinct LLM double from echoLlm: setup turns get a short fixed reply (keeping
+        // buffer entries small and predictable), and only the final "probe" turn echoes the
+        // composed system prompt back, so we can inspect the buffer's state as of that turn.
+        val countingLlm = TestLlmClient { req: LlmRequest ->
+            if (req.prompt == "probe") {
+                LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+            } else {
+                LlmResponse(text = "ack", latencyMs = 0L, retryCount = 0)
+            }
+        }
+        val pipeline = CognitivePipeline(llmClient = countingLlm)
+        val sessionId = "session-continuity-3"
+        val userId = "user-continuity-3"
+
+        // MAX_RECENT_TURNS caps at 6 entries (3 exchanges) — 4 exchanges here should evict the
+        // first by the time we probe.
+        pipeline.process("zzzfirstmarker", sessionId, userId)
+        pipeline.process("second turn", sessionId, userId)
+        pipeline.process("third turn", sessionId, userId)
+        pipeline.process("fourth turn", sessionId, userId)
+
+        val probe = pipeline.process("probe", sessionId, userId)
+
+        assertFalse(
+            probe.contains("zzzfirstmarker"),
+            "Expected the oldest turn to have been evicted from the buffer, got: $probe",
+        )
+        assertTrue(
+            probe.contains("fourth turn"),
+            "Expected a recent turn to still be present in the buffer, got: $probe",
+        )
+    }
+
     // ── Misfire regression ──────────────────────────────────────────────────────
 
     @Test

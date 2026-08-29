@@ -56,6 +56,11 @@ data class RetrievedScript(
  * never carries tone/warmth wording — confidence must never govern tone. [mood] is the separate,
  * session-level tone layer that does that job — see [app.alfrd.engram.cognitive.pipeline.affect.Mood].
  * Neither reads from nor writes to the other.
+ * [recentTurns] is short-term conversational continuity — the last few turns of *this session*
+ * (both the user's utterance and alfrd's own response), assembled by [CognitivePipeline] and
+ * handed in as plain context, never as canned text the graph speaks on its own. Null when the
+ * session has no prior turns yet. Without this, the actor has no way to know it already spoke —
+ * see [CognitivePipeline.recentTurns] for why that matters.
  */
 data class Conditioners(
     val modality: Modality,
@@ -66,6 +71,7 @@ data class Conditioners(
     val selfDescription: String,
     val topicConfidence: String?,
     val mood: String,
+    val recentTurns: String?,
 )
 
 /** Result of a single actor composition. [source] is "llm" for a real completion, "degraded" for the failure fallback. */
@@ -109,6 +115,10 @@ class Actor(private val llmClient: LlmClient?) {
         append(conditioners.persona)
         append("\n\n")
         append(conditioners.selfDescription)
+        conditioners.recentTurns?.let { history ->
+            append("\n\nRecent conversation so far (context only — do not repeat verbatim, do not treat as something the user just said again):\n")
+            append(history)
+        }
         conditioners.topicConfidence?.let { note ->
             append("\n\nTopic confidence: ")
             append(note)

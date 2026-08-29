@@ -102,6 +102,19 @@ open class CognitivePipeline(
     @Volatile private var recentOutcomeSignals: List<OutcomeSignal> = emptyList()
 
     /**
+     * Short-term conversational continuity — a small rolling window of this session's own
+     * recent turns (both the user's utterance and alfrd's own response), capped at
+     * [MAX_RECENT_TURNS]. Seeded by every greeting [initSession] can send (via
+     * [buildInitResponse]) and by every ordinary turn in [processInternal]. Surfaced to the
+     * [Actor] as [Conditioners.recentTurns] so it knows what it already said — the gap that let
+     * "what do you mean?" misfire right after a warm-intro greeting, since neither the greeting
+     * nor alfrd's own responses were ever recorded anywhere. Deliberately separate from
+     * long-term memory (the graph) — this is short-term-only, session-scoped state, same
+     * instance-field pattern as [pendingOutcome]/[moodState].
+     */
+    @Volatile private var recentTurns: List<RecentTurn> = emptyList()
+
+    /**
      * First-session state recorded when an invited user is greeted with the warm provenance
      * intro. Set during [initSession]; null when first-session handling is disabled or not triggered.
      */
@@ -124,6 +137,12 @@ open class CognitivePipeline(
     companion object {
         /** Human-readable name of the model [Actor] uses, for debug-trace reporting. Keep in sync with [Actor]. */
         private const val ACTOR_MODEL_NAME = "claude-sonnet-4-5"
+
+        /** Cap on [recentTurns] — 3 exchanges (user + alfrd per exchange). Short-term only, not a durable log. */
+        private const val MAX_RECENT_TURNS = 6
+
+        /** Per-entry text cap in [recentTurns] — see [recordTurn]. */
+        private const val MAX_TURN_TEXT_LENGTH = 280
 
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
             if (llmClient == null) return null
@@ -302,7 +321,7 @@ open class CognitivePipeline(
         }
 
         if (userEmail == "yardkup@gmail.com") {
-            return InitResponse(
+            return buildInitResponse(
                 greeting  = "[debug] engram-engine ok · session=$sessionId",
                 phraseId  = "debug",
                 sessionId = sessionId,
@@ -338,7 +357,7 @@ open class CognitivePipeline(
                             "initSession: seeding error for userId=$userId email=$userEmail — " +
                             "openingContext is blank on INVITED edge"
                         )
-                        return InitResponse(
+                        return buildInitResponse(
                             greeting  = turn1.response,
                             phraseId  = "first-session-seeding-error",
                             sessionId = sessionId,
@@ -372,7 +391,7 @@ open class CognitivePipeline(
                             "initSession userId=$userId email=$userEmail path=first-session-warm-intro " +
                             "trustPhase=${edge.trustPhase}"
                         )
-                        return InitResponse(
+                        return buildInitResponse(
                             greeting  = turn1.response,
                             phraseId  = "first-session-turn1",
                             sessionId = sessionId,
@@ -390,7 +409,7 @@ open class CognitivePipeline(
         }
 
         if (selectionService == null) {
-            return InitResponse(
+            return buildInitResponse(
                 greeting  = fallbackGreeting(),
                 phraseId  = "fallback",
                 sessionId = sessionId,
@@ -422,7 +441,7 @@ open class CognitivePipeline(
                 "initSession userId=$userId email=$userEmail path=warm-intro " +
                 "scaffoldTrustPhase=${scaffoldState?.trustPhase} firstSessionState=$firstSessionState"
             )
-            return InitResponse(
+            return buildInitResponse(
                 greeting  = warmIntroText,
                 phraseId  = "invited-warm-intro",
                 sessionId = sessionId,
@@ -460,13 +479,13 @@ open class CognitivePipeline(
                 "phraseId=$phraseId scaffoldTrustPhase=${scaffoldState?.trustPhase} " +
                 "firstSessionState=$firstSessionState"
             )
-            InitResponse(
+            buildInitResponse(
                 greeting  = greeting,
                 phraseId  = phraseId,
                 sessionId = sessionId,
             )
         } catch (_: Exception) {
-            InitResponse(
+            buildInitResponse(
                 greeting  = fallbackGreeting(),
                 phraseId  = "fallback",
                 sessionId = sessionId,
@@ -622,6 +641,7 @@ open class CognitivePipeline(
             selfDescription  = persona.selfDescription,
             topicConfidence  = topicConfidenceDirective(currentTopicPhase),
             mood             = moodDirective(moodState.mood),
+            recentTurns      = recentTurnsConditioner(),
         )
         val coverage = ctx.retrievalCoverage ?: RetrievalCoverage.NONE_NEEDED
         logger.info(
@@ -743,6 +763,12 @@ open class CognitivePipeline(
             trace.session.sessionAgeMs = 0 // SessionManager doesn't expose creation time to pipeline
         }
 
+        // Short-term conversational continuity — record both sides of this turn for the *next*
+        // turn's Conditioners.recentTurns. Conditioners for THIS turn were already built above
+        // (before actor.compose), so this can never leak the current turn into its own prompt.
+        recordTurn("user", utterance)
+        recordTurn("alfrd", ctx.responseText)
+
         stages.forEach { it.onCycleEnd(ctx) }
 
         logger.info(
@@ -841,6 +867,34 @@ open class CognitivePipeline(
 
     // ── Internal helpers ────────────────────────────────────────────────────
 
+    /**
+     * Appends to [recentTurns], capped at [MAX_RECENT_TURNS]. No-ops on blank text. Each entry's
+     * text is truncated to [MAX_TURN_TEXT_LENGTH] — this is a short-term continuity buffer, not
+     * a transcript, so nothing should let one turn's text balloon it (a genuine reply is a
+     * couple of short sentences per the Actor's own prompt guidance; this is the enforcement).
+     */
+    private fun recordTurn(role: String, text: String) {
+        if (text.isBlank()) return
+        val truncated = if (text.length > MAX_TURN_TEXT_LENGTH) text.take(MAX_TURN_TEXT_LENGTH) + "…" else text
+        recentTurns = (recentTurns + RecentTurn(role, truncated)).takeLast(MAX_RECENT_TURNS)
+    }
+
+    /** Renders [recentTurns] for [Conditioners.recentTurns]; null when empty (fresh session). */
+    private fun recentTurnsConditioner(): String? =
+        recentTurns.takeIf { it.isNotEmpty() }?.joinToString("\n") { "${it.role}: ${it.text}" }
+
+    /**
+     * Every greeting [initSession] can send goes through here so [recordTurn] never misses one —
+     * `initSession` has several early-return paths (debug shortcut, seeding error, first-session
+     * warm intro, no-selectionService fallback, returning-invited-user warm intro, normal
+     * selection), and this was the exact gap that let "what do you mean?" misfire right after a
+     * warm-intro greeting today.
+     */
+    private fun buildInitResponse(greeting: String, phraseId: String, sessionId: String): InitResponse {
+        recordTurn("alfrd", greeting)
+        return InitResponse(greeting = greeting, phraseId = phraseId, sessionId = sessionId)
+    }
+
     private fun buildContextSnapshot(utterance: String, confidence: Double, reason: String?): String {
         val escaped = utterance.replace("\\", "\\\\").replace("\"", "\\\"")
         return if (reason != null) {
@@ -861,4 +915,7 @@ open class CognitivePipeline(
         val turnIndex: Int,
         val priorContext: OutcomeSignalClassifier.PriorTurnContext,
     )
+
+    /** One turn in [recentTurns]. [role] is `"user"` or `"alfrd"`. */
+    data class RecentTurn(val role: String, val text: String)
 }
