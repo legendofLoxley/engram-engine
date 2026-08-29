@@ -216,6 +216,60 @@ class CognitiveInitTest {
         )
     }
 
+    // ── sessionCount wiring ──────────────────────────────────────────────────
+
+    @Test
+    fun `INIT increments sessionCount across repeated calls for the same user`() = runTest {
+        val engram = InMemoryEngramClient()
+        val p = CognitivePipeline(engramClient = engram, selectionService = service)
+
+        p.initSession(sessionId = "s-count-1", userId = "user-count", timestamp = MORNING_UTC)
+        p.initSession(sessionId = "s-count-2", userId = "user-count", timestamp = MORNING_UTC)
+
+        assertEquals(
+            2,
+            engram.getScaffoldState("user-count").sessionCount,
+            "Expected sessionCount to increment once per initSession call",
+        )
+    }
+
+    @Test
+    fun `INIT sessionCount increment does not disturb this call's own greeting selection`() = runTest {
+        // The sessionCount bump is for the *next* session, not this one — SelectionScorer
+        // gates the ORIENTATION "meet you"/"acquainted"/"work best when" phrases on
+        // sessionCount == 0 (see SelectionScorer.kt), so the increment write must happen
+        // without reassigning the local `scaffoldState` that `ctx.sessionCount` is later built
+        // from (see the comment at the increment site in CognitivePipeline.initSession).
+        // Composite scoring mixes in other dimensions (time of day, freshness), so this can't
+        // assert which literal phrase wins — it checks the two things a wrong placement would
+        // actually break: cold-start selection still succeeds (not the fallback), and the
+        // increment still lands correctly for next time.
+        val engram = InMemoryEngramClient()
+        kotlinx.coroutines.runBlocking {
+            engram.updateScaffoldState(
+                "scaffold-user",
+                ScaffoldState(trustPhase = 1, answeredCategories = emptySet(), sessionCount = 0),
+            )
+        }
+        val p = CognitivePipeline(engramClient = engram, selectionService = service)
+        val result = p.initSession(
+            sessionId = "s-first-regression",
+            userId    = "scaffold-user",
+            timestamp = MORNING_UTC,
+        )
+        assertTrue(result.greeting.isNotBlank())
+        assertNotEquals(
+            "fallback",
+            result.phraseId,
+            "Cold-start selection must still succeed, got phraseId='${result.phraseId}'",
+        )
+        assertEquals(
+            1,
+            engram.getScaffoldState("scaffold-user").sessionCount,
+            "Expected sessionCount to persist as incremented for the next session",
+        )
+    }
+
     @Test
     fun `INIT when scaffold state unavailable falls back gracefully`() = runTest {
         // A pipeline with a broken EngramClient: getScaffoldState throws

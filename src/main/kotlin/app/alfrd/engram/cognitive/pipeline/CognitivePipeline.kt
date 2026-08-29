@@ -340,7 +340,10 @@ open class CognitivePipeline(
                         }
                         try {
                             val current = engramClient.getScaffoldState(userId)
-                            engramClient.updateScaffoldState(userId, current.copy(trustPhase = trustPhaseInt))
+                            engramClient.updateScaffoldState(
+                                userId,
+                                current.copy(trustPhase = trustPhaseInt, sessionCount = current.sessionCount + 1),
+                            )
                         } catch (_: Exception) { /* non-fatal */ }
                         firstSessionState = FirstSessionState(
                             isFirstSession   = true,
@@ -392,6 +395,22 @@ open class CognitivePipeline(
                 } catch (_: Exception) {
                     // Regression write failure is non-fatal — greet with stale phase
                 }
+            }
+        }
+
+        // Increment sessionCount for the *next* time this user starts a session. Deliberately
+        // does not mutate the local `scaffoldState` var used below — greeting selection for
+        // *this* call must still see the pre-increment count (SelectionScorer gates the
+        // ORIENTATION "meet you" / "acquainted" phrase on sessionCount == 0; incrementing
+        // before that read would make it impossible for any brand-new user to ever see it).
+        if (scaffoldState != null) {
+            try {
+                engramClient.updateScaffoldState(
+                    userId,
+                    scaffoldState.copy(sessionCount = scaffoldState.sessionCount + 1),
+                )
+            } catch (_: Exception) {
+                // Non-fatal — a greeting must never fail because of this bookkeeping.
             }
         }
 

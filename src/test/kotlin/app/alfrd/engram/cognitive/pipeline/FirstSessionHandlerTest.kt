@@ -240,6 +240,8 @@ class FirstSessionHandlerTest {
         assertEquals(1, graphService.verifiedEdgeWrites.size)
         // Scaffold state seeded immediately with trustPhase 1 (Acquaintance → ORIENTATION).
         assertEquals(1, engram.getScaffoldState("user-new").trustPhase)
+        // First session counts as session 1.
+        assertEquals(1, engram.getScaffoldState("user-new").sessionCount)
     }
 
     @Test
