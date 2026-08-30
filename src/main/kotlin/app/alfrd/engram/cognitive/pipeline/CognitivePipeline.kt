@@ -649,7 +649,11 @@ open class CognitivePipeline(
             "coverage=${"%.2f".format(coverage.coverage)} activationMass=${"%.2f".format(coverage.activationMass)} " +
             "playFired=${coverage.playFired} conceptResolutionRatio=${"%.2f".format(coverage.conceptResolutionRatio)} " +
             "gaps=${if (coverage.gaps.isEmpty()) "none" else coverage.gaps.joinToString("|")} " +
-            "conditioners=$conditioners"
+            // Conditioners.recentTurns joins entries with real newlines (correct for the LLM
+            // prompt — see recentTurnsConditioner) but embedding that in a single logger.info
+            // call splits into multiple physical lines at the log shipper, fragmenting this
+            // statement into orphaned rows in Better Stack. Sanitize for the log line only.
+            "conditioners=${conditioners.toString().replace('\n', ' ')}"
         )
         ctx.actorResult = actor.compose(ctx.utterance, retrievedScript, conditioners)
 
