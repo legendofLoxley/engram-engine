@@ -12,6 +12,7 @@ class InMemoryEngramClient : EngramClient {
     private val phrases = mutableListOf<Phrase>()
     private val scaffoldStates = mutableMapOf<String, ScaffoldState>()
     private val topicConfidences = mutableMapOf<Pair<String, String>, TopicConfidence>()
+    private val episodicTurns = mutableListOf<EpisodicTurn>()
 
     // ── Decompose ─────────────────────────────────────────────────────────────
 
@@ -139,8 +140,62 @@ class InMemoryEngramClient : EngramClient {
         topicConfidences[userEmail to topic] = confidence
     }
 
+    // ── Episodic conversation log ────────────────────────────────────────────
+
+    override suspend fun appendEpisodicTurn(
+        sessionId: String,
+        userId: String,
+        turnIndex: Int,
+        userUtterance: String,
+        alfrdResponse: String,
+    ) {
+        val now = System.currentTimeMillis()
+        episodicTurns.add(
+            EpisodicTurn(
+                uid = UUID.randomUUID().toString(),
+                sessionId = sessionId,
+                userId = userId,
+                turnIndex = turnIndex,
+                role = "user",
+                text = userUtterance,
+                createdAt = now,
+            )
+        )
+        episodicTurns.add(
+            EpisodicTurn(
+                uid = UUID.randomUUID().toString(),
+                sessionId = sessionId,
+                userId = userId,
+                turnIndex = turnIndex,
+                role = "alfrd",
+                text = alfrdResponse,
+                createdAt = now,
+            )
+        )
+    }
+
+    override suspend fun getEpisodicLog(
+        userId: String,
+        sinceMillis: Long?,
+        untilMillis: Long?,
+        keyword: String?,
+        limit: Int,
+    ): List<EpisodicTurn> {
+        val lowerKeyword = keyword?.lowercase()
+        return episodicTurns
+            .filter { it.userId == userId }
+            .filter { sinceMillis == null || it.createdAt >= sinceMillis }
+            .filter { untilMillis == null || it.createdAt <= untilMillis }
+            .filter { lowerKeyword == null || it.text.lowercase().contains(lowerKeyword) }
+            .sortedBy { it.createdAt }
+            .takeLast(limit)
+    }
+
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     /** Expose stored phrases for assertions in tests. */
     fun allPhrases(): List<Phrase> = phrases.toList()
+
+    /** Expose stored episodic turns for assertions in tests. */
+    fun allEpisodicTurns(): List<EpisodicTurn> = episodicTurns.toList()
 }

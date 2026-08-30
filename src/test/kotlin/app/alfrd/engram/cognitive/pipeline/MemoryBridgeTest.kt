@@ -115,6 +115,12 @@ class MemoryBridgeIntegrationTest {
             override suspend fun updateTopicConfidence(
                 userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
             ) = Unit
+            override suspend fun appendEpisodicTurn(
+                sessionId: String, userId: String, turnIndex: Int, userUtterance: String, alfrdResponse: String,
+            ) = Unit
+            override suspend fun getEpisodicLog(
+                userId: String, sinceMillis: Long?, untilMillis: Long?, keyword: String?, limit: Int,
+            ) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.EpisodicTurn>()
         }
         val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
         val pipeline = CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
@@ -145,6 +151,12 @@ class MemoryBridgeIntegrationTest {
             override suspend fun updateTopicConfidence(
                 userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
             ) = Unit
+            override suspend fun appendEpisodicTurn(
+                sessionId: String, userId: String, turnIndex: Int, userUtterance: String, alfrdResponse: String,
+            ) = Unit
+            override suspend fun getEpisodicLog(
+                userId: String, sinceMillis: Long?, untilMillis: Long?, keyword: String?, limit: Int,
+            ) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.EpisodicTurn>()
         }
         val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
 
@@ -242,6 +254,12 @@ class MemoryBridgeIntegrationTest {
             override suspend fun updateTopicConfidence(
                 userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
             ): Unit = throw RuntimeException("db down")
+            override suspend fun appendEpisodicTurn(
+                sessionId: String, userId: String, turnIndex: Int, userUtterance: String, alfrdResponse: String,
+            ): Unit = throw RuntimeException("db down")
+            override suspend fun getEpisodicLog(
+                userId: String, sinceMillis: Long?, untilMillis: Long?, keyword: String?, limit: Int,
+            ): List<app.alfrd.engram.cognitive.pipeline.memory.EpisodicTurn> = throw RuntimeException("db down")
         }
         val llm = TestLlmClient { LlmResponse(text = "Still here.", latencyMs = 0, retryCount = 0) }
         val pipeline = CognitivePipeline(engramClient = brokenEngram, llmClient = llm)
@@ -314,5 +332,55 @@ class InMemoryEngramClientTest {
             candidates.any { it.category == PhraseCategory.EXPERTISE },
             "Expected EXPERTISE category for 'I use Kotlin and Python'",
         )
+    }
+
+    @Test
+    fun `appendEpisodicTurn then getEpisodicLog returns both sides of the turn in order`() = runTest {
+        val client = InMemoryEngramClient()
+        client.appendEpisodicTurn(
+            sessionId = "s1", userId = "user-1", turnIndex = 0,
+            userUtterance = "What do you mean?", alfrdResponse = "Sorry for the confusion.",
+        )
+
+        val log = client.getEpisodicLog(userId = "user-1")
+        assertEquals(2, log.size)
+        assertEquals("user", log[0].role)
+        assertEquals("What do you mean?", log[0].text)
+        assertEquals("alfrd", log[1].role)
+        assertEquals("Sorry for the confusion.", log[1].text)
+    }
+
+    @Test
+    fun `getEpisodicLog filters by keyword`() = runTest {
+        val client = InMemoryEngramClient()
+        client.appendEpisodicTurn(
+            sessionId = "s1", userId = "user-1", turnIndex = 0,
+            userUtterance = "Remind me to call the vet", alfrdResponse = "Noted!",
+        )
+        client.appendEpisodicTurn(
+            sessionId = "s1", userId = "user-1", turnIndex = 1,
+            userUtterance = "What's the weather like?", alfrdResponse = "I don't have that.",
+        )
+
+        val log = client.getEpisodicLog(userId = "user-1", keyword = "vet")
+        assertEquals(1, log.size, "Expected only the vet-related turn to match")
+        assertTrue(log.first().text.contains("vet"))
+    }
+
+    @Test
+    fun `getEpisodicLog scopes turns to the requesting user`() = runTest {
+        val client = InMemoryEngramClient()
+        client.appendEpisodicTurn(
+            sessionId = "s1", userId = "alice@example.com", turnIndex = 0,
+            userUtterance = "Alice's turn", alfrdResponse = "Ack.",
+        )
+        client.appendEpisodicTurn(
+            sessionId = "s2", userId = "bob@example.com", turnIndex = 0,
+            userUtterance = "Bob's turn", alfrdResponse = "Ack.",
+        )
+
+        val aliceLog = client.getEpisodicLog(userId = "alice@example.com")
+        assertEquals(2, aliceLog.size, "Expected both sides of alice's turn, none of bob's")
+        assertEquals("Alice's turn", aliceLog.first().text)
     }
 }

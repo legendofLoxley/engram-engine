@@ -222,6 +222,114 @@ class DatabaseEngramClient(
         }
     }
 
+    // ── Episodic conversation log ────────────────────────────────────────────
+    //
+    // Structurally separate from Phrase/Concept: Utterance vertices are never deduplicated by
+    // content hash (every literal occurrence is preserved, in order) and never participate in
+    // ASSERTS/CONFIDENT_IN. Chained via the existing FOLLOWS edge — the same edge type used for
+    // Phrase-to-Phrase provenance chains in OnboardingService — reused as-is rather than adding
+    // a parallel edge type, since every traversal here starts from a known Utterance vertex and
+    // can never cross into a Phrase chain.
+
+    override suspend fun appendEpisodicTurn(
+        sessionId: String,
+        userId: String,
+        turnIndex: Int,
+        userUtterance: String,
+        alfrdResponse: String,
+    ) = withContext(Dispatchers.IO) {
+        try {
+            db.transaction {
+                val tailVertex = db.query(
+                    "sql",
+                    "SELECT FROM Utterance WHERE sessionId = :sessionId ORDER BY createdAt DESC LIMIT 1",
+                    mapOf("sessionId" to sessionId),
+                ).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+
+                val userTimestamp = System.currentTimeMillis()
+                val userVertex = db.newVertex("Utterance").apply {
+                    set("uid", UUID.randomUUID().toString())
+                    set("sessionId", sessionId)
+                    set("userId", userId)
+                    set("turnIndex", turnIndex)
+                    set("role", "user")
+                    set("text", userUtterance)
+                    set("createdAt", userTimestamp)
+                    save()
+                }
+                tailVertex?.newEdge("FOLLOWS", userVertex, false)?.apply {
+                    set("attributions", "[]")
+                    set("scores", "[]")
+                    save()
+                }
+
+                val alfrdVertex = db.newVertex("Utterance").apply {
+                    set("uid", UUID.randomUUID().toString())
+                    set("sessionId", sessionId)
+                    set("userId", userId)
+                    set("turnIndex", turnIndex)
+                    set("role", "alfrd")
+                    set("text", alfrdResponse)
+                    set("createdAt", userTimestamp + 1) // strictly after the user turn, even at millis granularity
+                    save()
+                }
+                userVertex.newEdge("FOLLOWS", alfrdVertex, false).apply {
+                    set("attributions", "[]")
+                    set("scores", "[]")
+                    save()
+                }
+            }
+        } catch (e: Exception) {
+            logger.warn("appendEpisodicTurn failed for sessionId=$sessionId userId=$userId turn=$turnIndex: ${e.message}")
+        }
+    }
+
+    override suspend fun getEpisodicLog(
+        userId: String,
+        sinceMillis: Long?,
+        untilMillis: Long?,
+        keyword: String?,
+        limit: Int,
+    ): List<EpisodicTurn> = withContext(Dispatchers.IO) {
+        if (userId.isBlank()) return@withContext emptyList()
+        try {
+            val conditions = mutableListOf("userId = :userId")
+            val params = mutableMapOf<String, Any>("userId" to userId)
+            if (sinceMillis != null) {
+                conditions += "createdAt >= :since"
+                params["since"] = sinceMillis
+            }
+            if (untilMillis != null) {
+                conditions += "createdAt <= :until"
+                params["until"] = untilMillis
+            }
+            if (!keyword.isNullOrBlank()) {
+                conditions += "text like :keyword"
+                params["keyword"] = "%$keyword%"
+            }
+            val sql = "SELECT FROM Utterance WHERE ${conditions.joinToString(" AND ")} ORDER BY createdAt"
+            db.query("sql", sql, params).use { rs ->
+                val results = mutableListOf<EpisodicTurn>()
+                while (rs.hasNext()) {
+                    val v = rs.next().toElement().asVertex()
+                    results += EpisodicTurn(
+                        uid = v.get("uid") as? String ?: "",
+                        sessionId = v.get("sessionId") as? String ?: "",
+                        userId = v.get("userId") as? String ?: "",
+                        turnIndex = (v.get("turnIndex") as? Number)?.toInt() ?: 0,
+                        role = v.get("role") as? String ?: "",
+                        text = v.get("text") as? String ?: "",
+                        createdAt = (v.get("createdAt") as? Number)?.toLong() ?: 0L,
+                    )
+                }
+                results
+            }.takeLast(limit)
+        } catch (e: Exception) {
+            logger.warn("getEpisodicLog failed for userId=$userId: ${e.message}")
+            emptyList()
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun normalizeTopic(topic: String): String = topic.trim().lowercase()

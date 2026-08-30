@@ -18,6 +18,7 @@ import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.EpisodicLogService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.ScaffoldState
@@ -63,6 +64,7 @@ open class CognitivePipeline(
     private val firstSessionHandler: FirstSessionHandler? = null,
     private val personaSource: PersonaSource = DefaultPersonaSource(),
     private val confidenceService: TopicConfidenceService? = null,
+    private val episodicLogService: EpisodicLogService? = null,
 ) {
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
@@ -772,6 +774,11 @@ open class CognitivePipeline(
         // (before actor.compose), so this can never leak the current turn into its own prompt.
         recordTurn("user", utterance)
         recordTurn("alfrd", ctx.responseText)
+
+        // Durable episodic conversation log — structurally separate from the short-term
+        // recentTurns buffer above and from the Phrase/Concept fact graph. Write-only: nothing
+        // here feeds back into Conditioners or the Actor.
+        episodicLogService?.recordTurn(sessionId, userId, turnIndex, utterance, ctx.responseText)
 
         stages.forEach { it.onCycleEnd(ctx) }
 

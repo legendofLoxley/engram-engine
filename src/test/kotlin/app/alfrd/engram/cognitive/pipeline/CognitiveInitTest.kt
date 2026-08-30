@@ -231,6 +231,12 @@ class CognitiveInitTest {
             override suspend fun updateTopicConfidence(
                 userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
             ) {}
+            override suspend fun appendEpisodicTurn(
+                sessionId: String, userId: String, turnIndex: Int, userUtterance: String, alfrdResponse: String,
+            ) {}
+            override suspend fun getEpisodicLog(
+                userId: String, sinceMillis: Long?, untilMillis: Long?, keyword: String?, limit: Int,
+            ) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.EpisodicTurn>()
         }
         val p = CognitivePipeline(engramClient = brokenClient, selectionService = service)
         val result = p.initSession(

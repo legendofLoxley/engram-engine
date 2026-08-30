@@ -23,6 +23,7 @@ import java.util.logging.Logger
  * - `PUT  /scaffold/state/{userId}`  — available
  * - `decompose`                      — not yet available; falls back to the naive keyword heuristic
  * - topic confidence (get/update)    — not yet available; falls back to a local in-memory instance
+ * - episodic log (append/get)        — not yet available; falls back to a local in-memory instance
  *
  * Any network failure leads to a logged warning and a graceful degradation —
  * branches continue producing responses using LLM general knowledge.
@@ -54,6 +55,29 @@ class HttpEngramClient(
 
     override suspend fun updateTopicConfidence(userEmail: String, topic: String, confidence: TopicConfidence) =
         fallbackConfidence.updateTopicConfidence(userEmail, topic, confidence)
+
+    // ── Episodic conversation log (local fallback — no server endpoint yet) ───
+    //
+    // Same precedent as topic confidence above: falls back to a shared in-memory instance so
+    // this remains a valid EngramClient without inventing an endpoint nothing calls yet.
+
+    private val fallbackEpisodicLog = InMemoryEngramClient()
+
+    override suspend fun appendEpisodicTurn(
+        sessionId: String,
+        userId: String,
+        turnIndex: Int,
+        userUtterance: String,
+        alfrdResponse: String,
+    ) = fallbackEpisodicLog.appendEpisodicTurn(sessionId, userId, turnIndex, userUtterance, alfrdResponse)
+
+    override suspend fun getEpisodicLog(
+        userId: String,
+        sinceMillis: Long?,
+        untilMillis: Long?,
+        keyword: String?,
+        limit: Int,
+    ): List<EpisodicTurn> = fallbackEpisodicLog.getEpisodicLog(userId, sinceMillis, untilMillis, keyword, limit)
 
     // ── Ingest ────────────────────────────────────────────────────────────────
 

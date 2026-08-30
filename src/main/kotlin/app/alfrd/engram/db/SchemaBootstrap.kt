@@ -81,6 +81,16 @@ object SchemaBootstrap {
                 vt.createProperty("interpolationKeys", Type.STRING) // JSON array, nullable
             }
 
+            ensureVertex(schema, "Utterance") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("sessionId", Type.STRING)
+                vt.createProperty("userId", Type.STRING)
+                vt.createProperty("turnIndex", Type.INTEGER)
+                vt.createProperty("role", Type.STRING)      // user | alfrd
+                vt.createProperty("text", Type.STRING)
+                vt.createProperty("createdAt", Type.LONG)
+            }
+
             ensureVertex(schema, "UserScaffoldState") { vt ->
                 vt.createProperty("userId", Type.STRING)
                 vt.createProperty("trustPhase", Type.STRING)         // ORIENTATION | WORKING_RHYTHM | CONTEXT | UNDERSTANDING

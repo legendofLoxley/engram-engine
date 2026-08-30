@@ -108,6 +108,26 @@ data class TopicConfidence(
 )
 
 /**
+ * A single recorded turn in the durable, searchable episodic conversation log — structurally
+ * separate from the Phrase/Concept fact graph and its confidence/trust scoring (see
+ * [DatabaseEngramClient] for how `Utterance` vertices are chained via `FOLLOWS`). Unlike
+ * [Phrase], nothing here is deduplicated by content hash — every literal occurrence of a turn,
+ * including exact repeats across sessions, is preserved in order.
+ *
+ * @param role "user" or "alfrd".
+ */
+@Serializable
+data class EpisodicTurn(
+    val uid: String,
+    val sessionId: String,
+    val userId: String,
+    val turnIndex: Int,
+    val role: String,
+    val text: String,
+    val createdAt: Long,
+)
+
+/**
  * Snapshot of a user's onboarding progress.
  *
  * @param trustPhase             Current trust phase (1–4).
@@ -173,4 +193,34 @@ interface EngramClient {
 
     /** Persist updated per-topic confidence for [userEmail] on [topic]. */
     suspend fun updateTopicConfidence(userEmail: String, topic: String, confidence: TopicConfidence)
+
+    /**
+     * Append one conversational turn (both the user's utterance and alfrd's response) to the
+     * durable episodic log, chained onto the session's existing turns via `FOLLOWS`.
+     *
+     * Structurally separate from [ingest]/[queryPhrases] — never routes through the Phrase/Concept
+     * fact graph. Implementations must degrade gracefully: a failure here must never propagate to
+     * the caller (mirrors the fire-and-forget contract of [app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService]).
+     */
+    suspend fun appendEpisodicTurn(
+        sessionId: String,
+        userId: String,
+        turnIndex: Int,
+        userUtterance: String,
+        alfrdResponse: String,
+    )
+
+    /**
+     * Retrieve episodic turns for [userId], most-recent-last, optionally bounded by
+     * [sinceMillis]/[untilMillis] (epoch-millis, inclusive) and filtered by a case-insensitive
+     * substring match on turn text via [keyword]. Returns an empty list — never throws — when
+     * [userId] is blank or no turns are found.
+     */
+    suspend fun getEpisodicLog(
+        userId: String,
+        sinceMillis: Long? = null,
+        untilMillis: Long? = null,
+        keyword: String? = null,
+        limit: Int = 200,
+    ): List<EpisodicTurn>
 }

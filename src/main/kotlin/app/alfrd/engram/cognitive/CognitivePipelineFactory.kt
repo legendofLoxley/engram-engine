@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.pipeline.CognitivePipeline
 import app.alfrd.engram.cognitive.pipeline.FirstSessionHandler
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.EpisodicLogService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
@@ -38,6 +39,7 @@ object CognitivePipelineFactory {
         val engramClient      = if (db != null) DatabaseEngramClient(db) else InMemoryEngramClient()
         val transitionService = TrustPhaseTransitionService(engramClient)
         val confidenceService = TopicConfidenceService(engramClient)
+        val episodicLogService = EpisodicLogService(engramClient)
 
         val firstSessionHandler = if (db != null && sessionManager != null) {
             FirstSessionHandler(
@@ -54,6 +56,7 @@ object CognitivePipelineFactory {
             transitionService   = transitionService,
             firstSessionHandler = firstSessionHandler,
             confidenceService   = confidenceService,
+            episodicLogService  = episodicLogService,
         )
     }
 }
