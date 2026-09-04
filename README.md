@@ -111,8 +111,17 @@ docker run -p 8080:8080 -e ANTHROPIC_API_KEY=sk-ant-... engram-engine
 | GOOGLE_AI_API_KEY | Gemini classification fallback |
 | DEEPGRAM_API_KEY | Deepgram STT |
 | ELEVENLABS_API_KEY | ElevenLabs TTS |
+| DB_PATH | ArcadeDB path (default: `./data/engram-db`) |
+| SPACES_ACCESS_KEY | DigitalOcean Spaces access key, for hosted graph persistence |
+| SPACES_SECRET_KEY | DigitalOcean Spaces secret key |
+| SPACES_BUCKET | DigitalOcean Spaces bucket name for snapshots |
+| SPACES_ENDPOINT | DigitalOcean Spaces endpoint, e.g. `https://nyc3.digitaloceanspaces.com` |
+| SPACES_REGION | Region passed to the S3 SDK (default: `us-east-1`; DO Spaces ignores the value but the SDK requires one) |
+| SNAPSHOT_ENCRYPTION_KEY | Base64 AES-256 key for snapshot encryption — generate with `openssl rand -base64 32` |
 
 If no LLM provider is configured, the actor returns one explicit degraded response rather than allowing branches or phrase pools to write a substitute reply.
+
+Hosted graph persistence (restore-on-boot + periodic snapshots to DigitalOcean Spaces) requires all five `SPACES_*`/`SNAPSHOT_ENCRYPTION_KEY` variables to be set together. If any are missing, persistence is disabled and the app runs exactly as it did before this feature existed — an embedded ArcadeDB with no durability across redeploys. See `GraphBackupCoordinator.kt`/`GraphRestore.kt` and the [Memory Custody & Portability](https://app.notion.com/p/3ccd0721d4e48105adaafa52a86855bf) design doc for the durability guarantee (5-minute recovery-point objective, bounded-loss recovery, hard-fail on an invalid-but-present snapshot rather than a silent empty-graph fallback).
 
 ## API
 

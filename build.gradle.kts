@@ -15,6 +15,8 @@ repositories {
 dependencies {
     // ArcadeDB embedded (no server, no Docker)
     implementation("com.arcadedb:arcadedb-engine:25.1.1")
+    // BACKUP DATABASE is implemented in a separate module, loaded reflectively by arcadedb-engine.
+    implementation("com.arcadedb:arcadedb-integration:25.1.1")
 
     // Ktor server
     implementation("io.ktor:ktor-server-core:3.1.1")
@@ -34,6 +36,9 @@ dependencies {
 
     // OkHttp (TTS streaming)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // S3-compatible object storage client (DigitalOcean Spaces snapshot repository)
+    implementation("software.amazon.awssdk:s3:2.54.12")
 
     // Logging: SLF4J + Logback (routes JUL from ArcadeDB/Ktor through Logback too)
     implementation("org.slf4j:slf4j-api:2.0.17")

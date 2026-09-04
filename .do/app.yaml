@@ -18,6 +18,11 @@ services:
       period_seconds: 15
       success_threshold: 1
       failure_threshold: 3
+    termination:
+      # Headroom for the shutdown-triggered snapshot to finish before SIGKILL. Best-effort only —
+      # see the hosted-durability decision record in the Memory Custody & Portability design doc;
+      # the periodic snapshot (every 5 min), not this, is the actual guarantee.
+      grace_period_seconds: 300
     envs:
       - key: PORT
         scope: RUN_AND_BUILD_TIME
@@ -30,3 +35,28 @@ services:
         scope: RUN_TIME
         type: SECRET
         value: ""                  # Set via DO dashboard or doctl
+      # Hosted graph persistence (restore-on-boot + periodic/shutdown snapshots). All five must be
+      # set together, or persistence is disabled and the app runs ephemeral (see Application.kt).
+      - key: SPACES_ACCESS_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # Set via DO dashboard or doctl
+      - key: SPACES_SECRET_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # Set via DO dashboard or doctl
+      - key: SPACES_BUCKET
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # Set via DO dashboard or doctl
+      - key: SPACES_ENDPOINT
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # e.g. https://nyc3.digitaloceanspaces.com
+      - key: SPACES_REGION
+        scope: RUN_TIME
+        value: "us-east-1"         # DO Spaces ignores region but the S3 SDK requires one set
+      - key: SNAPSHOT_ENCRYPTION_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: ""                  # openssl rand -base64 32 — set via DO dashboard or doctl

@@ -1,5 +1,6 @@
 package app.alfrd.engram.api
 
+import app.alfrd.engram.db.GraphBackupCoordinator
 import com.arcadedb.database.Database
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -18,6 +19,11 @@ data class HealthResponse(
     val service: String,
     val anthropicKeySet: Boolean,
     val googleKeySet: Boolean,
+    /** Null when hosted persistence is disabled (e.g. local dev) or no backup has completed yet. */
+    val lastBackupAgeSeconds: Long? = null,
+    val lastBackupDurationMs: Long? = null,
+    val lastBackupSizeBytes: Long? = null,
+    val lastBackupError: String? = null,
 )
 
 @Serializable
@@ -32,20 +38,25 @@ data class TypeInfo(
     val properties: List<String>
 )
 
-fun Application.configureRoutes(database: Database) {
+fun Application.configureRoutes(database: Database, backupCoordinator: GraphBackupCoordinator? = null) {
     val startMs = System.currentTimeMillis()
     routing {
         get("/health") {
+            val backup = backupCoordinator?.lastResult()
             call.respond(
                 HttpStatusCode.OK,
                 HealthResponse(
-                    status          = "ok",
-                    version         = APP_VERSION,
-                    uptimeSeconds   = (System.currentTimeMillis() - startMs) / 1000,
-                    database        = if (database.isOpen) "open" else "closed",
-                    service         = "engram-engine",
-                    anthropicKeySet = System.getenv("ANTHROPIC_API_KEY").isNullOrBlank().not(),
-                    googleKeySet    = System.getenv("GOOGLE_AI_API_KEY").isNullOrBlank().not(),
+                    status               = "ok",
+                    version              = APP_VERSION,
+                    uptimeSeconds        = (System.currentTimeMillis() - startMs) / 1000,
+                    database             = if (database.isOpen) "open" else "closed",
+                    service              = "engram-engine",
+                    anthropicKeySet      = System.getenv("ANTHROPIC_API_KEY").isNullOrBlank().not(),
+                    googleKeySet         = System.getenv("GOOGLE_AI_API_KEY").isNullOrBlank().not(),
+                    lastBackupAgeSeconds = backup?.let { (System.currentTimeMillis() - it.atMillis) / 1000 },
+                    lastBackupDurationMs = backup?.durationMs,
+                    lastBackupSizeBytes  = backup?.sizeBytes,
+                    lastBackupError      = backup?.error,
                 )
             )
         }
