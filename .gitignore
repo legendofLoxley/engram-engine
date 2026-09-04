@@ -18,3 +18,6 @@ frontend/.env
 
 .vscode/
 .kotlin/
+
+# Personal/session-local Claude Code overrides — not shared team policy
+.claude/settings.local.json
