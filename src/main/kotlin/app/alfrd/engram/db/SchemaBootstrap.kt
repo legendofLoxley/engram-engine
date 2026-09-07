@@ -190,6 +190,20 @@ object SchemaBootstrap {
             ensureProperty(schema, "INVITED", "tier",                Type.INTEGER)
             ensureProperty(schema, "INVITED", "openingContext",      Type.STRING)
 
+            // Context Horizon state — additive only, no new vertex/edge types. See
+            // app.alfrd.engram.cognitive.pipeline.horizon for the read/write contract these back.
+            // `status`/`statusHistory` deliberately live outside ASSERTS.scores: scores entries are
+            // parsed as {"type","value":<Double>} by PhrasesRoutes.parseEdgeScores, and a
+            // non-numeric "value" (e.g. a string status) throws inside that parse, which is caught
+            // by its outer try/catch and silently zeroes out every score on the edge — degrading
+            // queryPhrases for any phrase that ever received a status. Separate properties avoid
+            // that entirely.
+            ensureProperty(schema, "ASSERTS",   "status",        Type.STRING)  // current value: "open" | "resolved"; absent = not intention-shaped
+            ensureProperty(schema, "ASSERTS",   "statusHistory", Type.STRING)  // JSON array of {"state","at"}, append-only, latest "at" wins
+            ensureProperty(schema, "ASSERTS",   "cycleSeq",      Type.LONG)    // caller-supplied per-user monotonic cycle number — identity, not a timestamp
+            ensureProperty(schema, "RELATED_TO", "createdAt",    Type.LONG)    // audit timestamp only — never used for identity/decay comparisons
+            ensureProperty(schema, "RELATED_TO", "cycleSeq",     Type.LONG)    // cycle the edge was asserted in — drives reactivation decay
+
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
@@ -206,6 +220,16 @@ object SchemaBootstrap {
             ensureIndex(schema, "ResponsePhrase", "hash")
             ensureIndex(schema, "ResponsePhrase", "moveType")
             ensureIndex(schema, "UserScaffoldState", "userId")
+            // Context Horizon retrieval — see HorizonAssembler. Bounds the "status=open" and
+            // "cycleSeq=currentCycleSeq" filters so they don't degrade into a full scan as ASSERTS
+            // edges accumulate on a long-lived Source; whether the query planner actually uses these
+            // for the WHERE+ORDER BY shapes HorizonAssembler issues is verified empirically by its
+            // scale test, not assumed.
+            ensureIndex(schema, "ASSERTS", "status")
+            ensureIndex(schema, "ASSERTS", "cycleSeq")
+            // Bounds the relevant_to reactivation-window lookup, which is otherwise a global scan
+            // of every RELATED_TO edge regardless of relationType.
+            ensureCompositeIndex(schema, "RELATED_TO", "relationType", "cycleSeq")
             // SELECTED edge indexes — freshness queries (phraseUid+userId) and session analytics (sessionId)
             ensureIndex(schema, "SELECTED", "sessionId")
             ensureCompositeIndex(schema, "SELECTED", "phraseUid", "userId")
@@ -227,11 +251,17 @@ object SchemaBootstrap {
     /**
      * Adds a property to an existing type if it is not already present.
      * Safe to call on types created before the property was added to the schema definition.
+     *
+     * `DocumentType.getProperty` throws rather than returning null for a genuinely missing
+     * property, so existence must be checked via try/catch — every property this helper was
+     * previously called for also happened to be defined inline in its type's `ensureVertex`/
+     * `ensureEdge` block, so `getProperty` never actually hit the missing case before.
      */
     private fun ensureProperty(schema: Schema, typeName: String, propName: String, propType: Type) {
         if (schema.existsType(typeName)) {
             val t = schema.getType(typeName)
-            if (t.getProperty(propName) == null) {
+            val exists = try { t.getProperty(propName) != null } catch (_: Exception) { false }
+            if (!exists) {
                 t.createProperty(propName, propType)
             }
         }

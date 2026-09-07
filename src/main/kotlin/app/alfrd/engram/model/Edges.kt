@@ -19,12 +19,21 @@ data class AssertsEdge(
     val context: String,
     val timestamp: Long,
     val scores: String = "[]",
+    // Context Horizon state (app.alfrd.engram.cognitive.pipeline.horizon) — deliberately separate
+    // from `scores`, not a numeric score entry; see SchemaBootstrap for why.
+    val status: String? = null,        // "open" | "resolved"; absent = not intention-shaped
+    val statusHistory: String = "[]",  // JSON array of {"state","at"}, append-only
+    val cycleSeq: Long? = null,        // caller-supplied per-user monotonic cycle number
 )
 
 @Serializable
 data class RelatedToEdge(
     val relationType: String,
-    val strength: Double
+    val strength: Double,
+    // Context Horizon state — see HorizonAssembler for the cycleSeq-based reactivation lifecycle
+    // this backs. createdAt is an audit timestamp only, never used for identity/decay comparisons.
+    val createdAt: Long? = null,
+    val cycleSeq: Long? = null,
 )
 
 @Serializable
