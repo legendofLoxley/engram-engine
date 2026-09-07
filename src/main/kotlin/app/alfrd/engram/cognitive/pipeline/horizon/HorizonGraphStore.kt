@@ -32,6 +32,16 @@ data class StatusHistoryEntry(val state: String, val at: Long)
  *
  * [cycleSeq] is a caller-supplied, per-user monotonic cycle number — identity, never a wall-clock
  * timestamp. This store does not own or persist the counter itself, only accepts and stamps it.
+ *
+ * **Caller sequence-continuity obligations.** [cycleSeq] must be non-decreasing across calls for
+ * the same user: a mutation stamped with a lower `cycleSeq` than one already committed for that
+ * user represents evidence "from the past" relative to state the caller has already advanced
+ * beyond, and [HorizonAssembler] treats anything with a `cycleSeq`/`statusCycleSeq` greater than
+ * the `currentCycleSeq` it is asked about as **future evidence, and excludes it** rather than
+ * surfacing or misclassifying it. [markAssertionStatus] additionally rejects (per-edge, logged) a
+ * `cycleSeq` older than the phrase's own original assertion — a status cannot predate the claim it
+ * describes. Enforcement beyond these two checks (e.g. a global monotonic counter) is the caller's
+ * responsibility; this store does not track "the last cycleSeq seen for this user" itself.
  */
 interface HorizonGraphStore {
 
@@ -120,15 +130,32 @@ class ArcadeHorizonGraphStore(private val db: Database) : HorizonGraphStore {
                 val now = System.currentTimeMillis()
                 val stateValue = status.name.lowercase()
                 for (edge in ownedAssertsEdges) {
+                    // Sequence-continuity guard: a status can never be marked for a cycle before the
+                    // phrase's own original assertion — that would be evidence from before the claim
+                    // existed. Skip (not corrupt) that edge rather than silently accepting it; other
+                    // owned edges are still processed.
+                    val originalCycleSeq = (edge.get("cycleSeq") as? Number)?.toLong()
+                    if (originalCycleSeq != null && cycleSeq < originalCycleSeq) {
+                        logger.warn(
+                            "markAssertionStatus: cycleSeq=$cycleSeq precedes phrase's own original " +
+                                "assertion cycleSeq=$originalCycleSeq for phraseUid=$phraseUid — skipping",
+                        )
+                        continue
+                    }
                     val mutableEdge = edge.modify()
                     val history = parseStatusHistory(mutableEdge.get("statusHistory") as? String)
                     val updated = (history + StatusHistoryEntry(stateValue, now)).takeLast(MAX_STATUS_HISTORY_ENTRIES)
                     mutableEdge.set("status", stateValue)
                     mutableEdge.set("statusHistory", json.encodeToString(updated))
-                    mutableEdge.set("cycleSeq", cycleSeq)
+                    // statusCycleSeq tracks the MOST RECENT status change — deliberately distinct
+                    // from `cycleSeq` (the phrase's original assertion, set once at creation and
+                    // never touched here). Conflating the two previously made a phrase whose status
+                    // changed in a later cycle misclassify as JustAsserted in that later cycle, even
+                    // though its content wasn't newly stated then.
+                    mutableEdge.set("statusCycleSeq", cycleSeq)
                     mutableEdge.save()
+                    success = true
                 }
-                success = true
             }
             success
         } catch (e: Exception) {

@@ -23,7 +23,8 @@ data class AssertsEdge(
     // from `scores`, not a numeric score entry; see SchemaBootstrap for why.
     val status: String? = null,        // "open" | "resolved"; absent = not intention-shaped
     val statusHistory: String = "[]",  // JSON array of {"state","at"}, append-only
-    val cycleSeq: Long? = null,        // caller-supplied per-user monotonic cycle number
+    val cycleSeq: Long? = null,        // ORIGINAL assertion cycle — set once, never overwritten by a status change
+    val statusCycleSeq: Long? = null,  // cycle of the MOST RECENT status change — distinct from cycleSeq
 )
 
 @Serializable

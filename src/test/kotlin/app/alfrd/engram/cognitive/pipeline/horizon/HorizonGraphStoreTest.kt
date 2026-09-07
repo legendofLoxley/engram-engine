@@ -116,7 +116,7 @@ class HorizonGraphStoreTest {
 
         val edge = findAssertsEdgeForPhrase(phraseUid)
         assertEquals("open", edge.get("status") as? String, "latest transition must win")
-        assertEquals(9L, (edge.get("cycleSeq") as? Number)?.toLong())
+        assertEquals(9L, (edge.get("statusCycleSeq") as? Number)?.toLong(), "statusCycleSeq tracks the most recent status change")
 
         val history = Json { ignoreUnknownKeys = true }
             .decodeFromString<List<StatusHistoryEntry>>(edge.get("statusHistory") as String)
@@ -126,6 +126,35 @@ class HorizonGraphStoreTest {
         val phraseText = db.query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to phraseUid))
             .use { rs -> rs.next().toElement().asVertex().get("text") as String }
         assertEquals("Getting Alfrd running on Arx is a priority for me.", phraseText, "status writes must never touch Phrase.text")
+    }
+
+    @Test
+    fun `original assertion cycleSeq is never overwritten by a later status change`() = runBlocking {
+        val email = "horizon-store-cycle-identity-${UUID.randomUUID()}@test.alfrd.internal"
+        seedConversationalPhrase(email, "unrelated seed so the User vertex exists")
+        // The environment-signal path is the only HorizonGraphStore write that stamps an original
+        // cycleSeq at creation — conversational ingestion (DatabaseEngramClient, untouched this
+        // increment) does not, so it can't demonstrate this distinction on its own.
+        val phraseUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:x", text = "event")!!
+
+        assertTrue(store.markAssertionStatus(email, cycleSeq = 5, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        assertEquals(1L, (edge.get("cycleSeq") as? Number)?.toLong(), "the original assertion cycle must survive a status change made in a later cycle")
+        assertEquals(5L, (edge.get("statusCycleSeq") as? Number)?.toLong(), "the status change's own cycle is tracked separately")
+    }
+
+    @Test
+    fun `markAssertionStatus rejects a cycleSeq that precedes the phrase's own original assertion`() = runBlocking {
+        val email = "horizon-store-cycle-order-${UUID.randomUUID()}@test.alfrd.internal"
+        seedConversationalPhrase(email, "unrelated seed so the User vertex exists")
+        val phraseUid = store.ingestEnvironmentSignal(email, cycleSeq = 10, sourceName = "environment:x", text = "event")!!
+
+        val result = store.markAssertionStatus(email, cycleSeq = 3, phraseUid = phraseUid, status = AssertionStatus.OPEN)
+        assertFalse(result, "a status cannot be marked for a cycle before the phrase's own original assertion")
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        assertNull(edge.get("status") as? String, "a rejected out-of-order call must leave status untouched")
     }
 
     // ── Environment signal ingestion ─────────────────────────────────────────

@@ -211,6 +211,61 @@ class HorizonAssemblerTest {
         )
     }
 
+    // ── Cycle identity: original assertion distinct from later status changes ────────────────────
+
+    @Test
+    fun `a status change in a later cycle does not make an old phrase read as JustAsserted`() = runBlocking {
+        val email = "horizon-cycle-identity-${UUID.randomUUID()}@test.alfrd.internal"
+        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
+        // Status is set FOUR cycles after the phrase's own original assertion.
+        store.markAssertionStatus(email, cycleSeq = 5, phraseUid = arxUid, status = AssertionStatus.OPEN)
+
+        val horizon = assembler.assemble(email, currentCycleSeq = 5)
+        val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
+        assertTrue(
+            item.surfacing !is SurfacingReason.JustAsserted,
+            "the CONTENT was asserted in cycle 1, not cycle 5 — a status edit must not read as a fresh statement",
+        )
+        assertEquals(
+            SurfacingReason.DormantOpen(5), item.surfacing,
+            "surfacing should reflect the status's own recency (cycle 5), not claim the content is fresh",
+        )
+    }
+
+    @Test
+    fun `future-cycle evidence is excluded from the Horizon, not misclassified`() = runBlocking {
+        val email = "horizon-future-exclusion-${UUID.randomUUID()}@test.alfrd.internal"
+        // Simulates a caller sequencing bug: content whose own assertion cycle is ahead of the
+        // cycle assemble() is being asked about.
+        val futureUid = seedConversationalPhraseWithCycle(email, "This claims to be from the future.", cycleSeq = 100)
+        val horizon = assembler.assemble(email, currentCycleSeq = 5)
+        assertTrue(
+            horizon.items.none { it.sourceRefs.first().phraseUid == futureUid },
+            "evidence whose cycleSeq is ahead of currentCycleSeq must be excluded, never surfaced as JustAsserted/DormantOpen",
+        )
+    }
+
+    @Test
+    fun `an open item whose status was marked in a future cycle is excluded until that cycle arrives`() = runBlocking {
+        val email = "horizon-future-status-${UUID.randomUUID()}@test.alfrd.internal"
+        val openUid = seedConversationalPhraseWithCycle(email, "Old open item.", cycleSeq = 1)
+        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = openUid, status = AssertionStatus.OPEN)
+        // Simulate an out-of-order write bypassing the store's own guard (e.g. a bad migration):
+        // push statusCycleSeq into the future directly.
+        val db = dbManager.getDatabase()
+        db.transaction {
+            db.query("sql", "SELECT FROM ASSERTS WHERE @in.uid = :u", mapOf("u" to openUid)).use { rs ->
+                rs.next().toElement().asEdge().modify().apply { set("statusCycleSeq", 999L); save() }
+            }
+        }
+
+        val horizon = assembler.assemble(email, currentCycleSeq = 5)
+        assertTrue(
+            horizon.items.none { it.sourceRefs.first().phraseUid == openUid },
+            "an item whose status was (incorrectly) marked in a future cycle must not be surfaced yet",
+        )
+    }
+
     // ── Consistent, committed read ────────────────────────────────────────────────────────────
 
     @Test
@@ -221,6 +276,78 @@ class HorizonAssemblerTest {
 
         val horizon = assembler.assemble(email, currentCycleSeq = 1)
         assertTrue(horizon.items.any { it.sourceRefs.first().phraseUid == phraseUid && it.status == AssertionStatus.OPEN })
+    }
+
+    /**
+     * A sequential await-then-read (the test above) only proves ordering between two calls made
+     * one after another by the SAME caller — it says nothing about what a concurrent writer, from
+     * a different thread, racing an in-progress `assemble()` call, can do to the result. This test
+     * uses `ArcadeHorizonAssembler.testMidAssemblySync` to deterministically land a real,
+     * separately-committed write (on its own thread, joined before returning) strictly between
+     * `assemble()`'s candidate-pool fetch and its reactivation fetch.
+     *
+     * **Empirical result (reproduced deterministically across repeated runs):** `assemble()`'s
+     * `db.transaction { }` does **not** provide snapshot isolation across the queries inside it —
+     * the reactivation query, run after the concurrent write commits, DOES observe it. Each
+     * statement reads the latest committed state at the moment it runs; there is no single frozen
+     * point-in-time view fixed at transaction start. This corrects the original design doc's claim
+     * that wrapping multiple queries in one transaction yields "one consistent instant" — it does
+     * not, and this test is the regression guard: if ArcadeDB's behavior or this code's transaction
+     * handling ever changes, asserting the wrong branch here fails loudly instead of silently
+     * drifting from documented reality.
+     *
+     * This is accepted, not fixed: true snapshot isolation would need an ArcadeDB-specific
+     * mechanism nothing else in this codebase uses (every existing `db.transaction { }` here is for
+     * write atomicity, never a declared read-isolation level). It does not corrupt any single
+     * fact — the reactivation this test observes is a real, fully-formed, committed edge, correctly
+     * attributed — it only means two sub-queries within one `assemble()` call are not guaranteed to
+     * reflect the identical instant when a writer is concurrently active.
+     */
+    @Test
+    fun `a concurrent write landing mid-assembly is observed by the later query, not isolated away`() = runBlocking {
+        val email = "horizon-concurrency-${UUID.randomUUID()}@test.alfrd.internal"
+        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
+        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:concurrency", text = "event")!!
+        // No relevant_to edge yet — the concurrent writer below creates it mid-assembly.
+
+        val arcadeAssembler = assembler as ArcadeHorizonAssembler
+        var concurrentWriteCommitted = false
+        arcadeAssembler.testMidAssemblySync = {
+            val writer = Thread {
+                concurrentWriteCommitted = runBlocking {
+                    store.markRelevant(email, cycleSeq = 1, fromPhraseUid = eventUid, toPhraseUid = arxUid)
+                }
+            }
+            writer.start()
+            writer.join(10_000)
+        }
+
+        val horizon = try {
+            assembler.assemble(email, currentCycleSeq = 1, activeRelevanceCycles = 3)
+        } finally {
+            arcadeAssembler.testMidAssemblySync = null
+        }
+
+        assertTrue(concurrentWriteCommitted, "the concurrent write itself must have succeeded and committed")
+        val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
+        val surfacing = item.surfacing
+        assertTrue(
+            surfacing is SurfacingReason.ActiveReactivation,
+            "empirically, ArcadeDB's per-statement read-committed behavior means the reactivation " +
+                "query DOES see a write committed after the pool-fetch but before it runs — if this " +
+                "ever comes back DormantOpen instead, isolation behavior has changed and the KDoc " +
+                "on ArcadeHorizonAssembler.assemble must be revisited",
+        )
+        surfacing as SurfacingReason.ActiveReactivation
+        // Whatever the isolation model, the surfaced fact itself must be whole and correctly
+        // attributed — a real, committed edge, not a torn or partially-applied write.
+        assertEquals(eventUid, surfacing.info.triggeringPhraseUid)
+        assertEquals(
+            eventUid,
+            dbManager.getDatabase().query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to surfacing.info.triggeringPhraseUid))
+                .use { it.next().toElement().asVertex().get("uid") as String },
+        )
     }
 
     // ── Adversarial cross-user read: defense in depth even if a bad edge already exists ─────────
@@ -319,7 +446,127 @@ class HorizonAssemblerTest {
         assertTrue(info.triggeringPhraseText.text.length <= HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1)
     }
 
+    /**
+     * Individual per-field caps (item text, triggering text, item/omitted counts) were each tested
+     * in isolation above, but never the COMPLETE structure at once — including the variable-length
+     * metadata (`sourceUid`, `sourceType`, `phraseUid`, `userEmail`) that rides along every item,
+     * source ref, and omitted entry. This forces every bounding mechanism to its worst case in one
+     * snapshot and measures the total text volume of the whole [ContextHorizon] against a fixed,
+     * calculable ceiling derived from [HorizonLimits] — not merely each field's own cap in
+     * isolation, which could still combine into an unbounded total if any one of them were missed.
+     */
+    @Test
+    fun `the complete serialized Horizon stays within a fixed, calculable ceiling at worst-case population`() = runBlocking {
+        val email = "horizon-budget-${UUID.randomUUID()}@test.alfrd.internal"
+        val longText = "x".repeat(HorizonLimits.MAX_ITEM_TEXT_LENGTH + 500)
+
+        // Force every bounding mechanism at once: more open items than the budget allows (forces
+        // omittedSample to its cap), every item's text over the truncation cap, and a reactivation
+        // whose own triggering text is also over the cap.
+        val overflowCount = HorizonBudget.DEFAULT.maxItems + HorizonLimits.OMITTED_SAMPLE_CAP + 5
+        val uids = (1..overflowCount).map { i ->
+            val uid = seedConversationalPhraseWithCycle(email, "$longText-item-$i", cycleSeq = i.toLong())
+            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            uid
+        }
+        val eventUid = store.ingestEnvironmentSignal(
+            email, cycleSeq = overflowCount.toLong(), sourceName = "environment:budget-test", text = "$longText-event",
+        )!!
+        store.markRelevant(email, cycleSeq = overflowCount.toLong(), fromPhraseUid = eventUid, toPhraseUid = uids.last())
+
+        val horizon = assembler.assemble(email, currentCycleSeq = overflowCount.toLong())
+
+        // Per-field caps, individually, at worst-case population:
+        assertTrue(horizon.items.size <= HorizonBudget.DEFAULT.maxItems)
+        assertTrue(horizon.omittedSample.size <= HorizonLimits.OMITTED_SAMPLE_CAP)
+        horizon.items.forEach { item ->
+            assertTrue(item.text.text.length <= HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1)
+            assertTrue(item.sourceRefs.size <= HorizonLimits.MAX_SOURCE_REFS_PER_ITEM)
+            (item.surfacing as? SurfacingReason.ActiveReactivation)?.info?.triggeringPhraseText?.let {
+                assertTrue(it.text.length <= HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1)
+            }
+        }
+
+        // The COMPLETE structure's total text volume — including the variable metadata that rides
+        // along every reference (sourceUid/sourceType/phraseUid), not just headline item text —
+        // stays under a fixed ceiling regardless of how long the underlying graph content was.
+        val totalChars = totalTextLength(horizon)
+        val ceiling = worstCaseCeiling(email)
+        assertTrue(
+            totalChars <= ceiling,
+            "total=$totalChars ceiling=$ceiling — the complete Horizon exceeded its calculable worst-case bound",
+        )
+    }
+
+    /** Sums every String field reachable from a [ContextHorizon] — the graph-derived evidence collections, plus the one caller-supplied identifier. */
+    private fun totalTextLength(h: ContextHorizon): Int {
+        var total = h.userEmail.length
+        h.items.forEach { item ->
+            total += item.text.text.length
+            item.sourceRefs.forEach { total += it.sourceUid.length + it.sourceType.length + it.phraseUid.length }
+            (item.surfacing as? SurfacingReason.ActiveReactivation)?.info?.let {
+                total += it.triggeringPhraseText.text.length + it.triggeringPhraseUid.length
+            }
+        }
+        h.omittedSample.forEach {
+            total += it.sourceRef.sourceUid.length + it.sourceRef.sourceType.length + it.sourceRef.phraseUid.length + it.reason.length
+        }
+        return total
+    }
+
+    /**
+     * The worst-case bound this design commits to: `userEmail` is a single, caller-supplied
+     * identifier (O(1) per call, not a collection that scales with graph/history size, so it's
+     * counted honestly here but isn't part of the "bounded for a growing graph" claim — that claim
+     * is about the collections below, which all have a fixed cardinality regardless of graph size).
+     * `refFieldCeiling` is a generous per-reference allowance (uid + type + phraseUid at realistic
+     * lengths — UUIDs are 36 chars, source types are short fixed strings in this codebase).
+     */
+    private fun worstCaseCeiling(email: String): Int {
+        val refFieldCeiling = 120
+        val perItemCeiling = HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1 +           // item text
+            HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1 +                            // reactivation triggering text, worst case
+            HorizonLimits.MAX_SOURCE_REFS_PER_ITEM * refFieldCeiling            // capped source refs
+        return email.length + HorizonBudget.DEFAULT.maxItems * perItemCeiling + HorizonLimits.OMITTED_SAMPLE_CAP * refFieldCeiling
+    }
+
     // ── Scale/index verification: not merely assumed bounded ─────────────────────────────────────
+
+    /**
+     * A timing comparison alone can't distinguish "uses the index" from "just happens to be fast
+     * enough at this N" — this asserts on the actual [com.arcadedb.query.sql.executor.ExecutionPlan]
+     * ArcadeDB produces for the real open-item query, via
+     * [ArcadeHorizonAssembler.debugOpenPoolExecutionSteps], which runs the exact same SQL/params
+     * [ArcadeHorizonAssembler] itself uses.
+     */
+    @Test
+    fun `the open-item query's execution plan shows an index-based fetch, not a full type scan`() = runBlocking {
+        val email = "horizon-plan-${UUID.randomUUID()}@test.alfrd.internal"
+        seedManyOpenItemsInOneTransaction(dbManager.getDatabase(), email, count = 200)
+
+        val sourceUids = HorizonOwnership.trustedSourceUids(dbManager.getDatabase(), email)
+        assertTrue(sourceUids.isNotEmpty(), "test setup: the seeded user must have a trusted source")
+
+        val steps = (assembler as ArcadeHorizonAssembler)
+            .debugOpenPoolExecutionSteps(sourceUids, currentCycleSeq = 1_000_000, limit = 36)
+        val planDescription = steps.joinToString(" | ")
+
+        // Confirmed by direct inspection: ArcadeDB's plan for this query is
+        // "FetchFromIndexStep: + FETCH FROM INDEX ASSERTS[status] status = :status" followed by
+        // GetValueFromIndexEntryStep/FilterStep/FilterByTypeStep/OrderByStep/LimitExecutionStep —
+        // the remaining conditions (@out.uid IN ..., statusCycleSeq <= ...) are applied as a filter
+        // over the index-selected rows, not a scan of the whole ASSERTS type. Checking for the
+        // specific index name (not just "any index step") rules out a false positive from some
+        // unrelated index appearing incidentally in the plan.
+        assertTrue(
+            steps.any { it.contains("FetchFromIndexStep") && it.contains("ASSERTS[status]") },
+            "expected a FetchFromIndexStep naming the ASSERTS[status] index; got: $planDescription",
+        )
+        assertFalse(
+            steps.any { it.contains("FetchFromTypeExecutionStep") },
+            "plan includes a full type-scan step (FetchFromTypeExecutionStep) — the status index is not actually being used: $planDescription",
+        )
+    }
 
     @Test
     fun `open-item query does not regress into an unindexed full scan at 5000+ edges`() = runBlocking {

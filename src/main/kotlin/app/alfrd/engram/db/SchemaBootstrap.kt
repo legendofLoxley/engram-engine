@@ -200,7 +200,8 @@ object SchemaBootstrap {
             // that entirely.
             ensureProperty(schema, "ASSERTS",   "status",        Type.STRING)  // current value: "open" | "resolved"; absent = not intention-shaped
             ensureProperty(schema, "ASSERTS",   "statusHistory", Type.STRING)  // JSON array of {"state","at"}, append-only, latest "at" wins
-            ensureProperty(schema, "ASSERTS",   "cycleSeq",      Type.LONG)    // caller-supplied per-user monotonic cycle number — identity, not a timestamp
+            ensureProperty(schema, "ASSERTS",   "cycleSeq",      Type.LONG)    // ORIGINAL assertion cycle — set once at creation, never overwritten by a later status change
+            ensureProperty(schema, "ASSERTS",   "statusCycleSeq", Type.LONG)   // cycle of the MOST RECENT status change — distinct from cycleSeq; see HorizonGraphStore.markAssertionStatus
             ensureProperty(schema, "RELATED_TO", "createdAt",    Type.LONG)    // audit timestamp only — never used for identity/decay comparisons
             ensureProperty(schema, "RELATED_TO", "cycleSeq",     Type.LONG)    // cycle the edge was asserted in — drives reactivation decay
 
@@ -222,11 +223,13 @@ object SchemaBootstrap {
             ensureIndex(schema, "UserScaffoldState", "userId")
             // Context Horizon retrieval — see HorizonAssembler. Bounds the "status=open" and
             // "cycleSeq=currentCycleSeq" filters so they don't degrade into a full scan as ASSERTS
-            // edges accumulate on a long-lived Source; whether the query planner actually uses these
-            // for the WHERE+ORDER BY shapes HorizonAssembler issues is verified empirically by its
-            // scale test, not assumed.
+            // edges accumulate on a long-lived Source. Confirmed by direct execution-plan
+            // inspection (ArcadeHorizonAssemblerTest's plan-evidence test), not inferred from
+            // timing alone: ArcadeDB's planner does select "FETCH FROM INDEX ASSERTS[status]" for
+            // the open-item query.
             ensureIndex(schema, "ASSERTS", "status")
             ensureIndex(schema, "ASSERTS", "cycleSeq")
+            ensureIndex(schema, "ASSERTS", "statusCycleSeq")
             // Bounds the relevant_to reactivation-window lookup, which is otherwise a global scan
             // of every RELATED_TO edge regardless of relationType.
             ensureCompositeIndex(schema, "RELATED_TO", "relationType", "cycleSeq")

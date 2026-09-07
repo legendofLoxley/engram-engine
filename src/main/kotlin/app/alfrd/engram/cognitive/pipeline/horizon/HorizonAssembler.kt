@@ -22,10 +22,29 @@ interface HorizonAssembler {
      * [SurfacingReason.ActiveReactivation] (cycle-count based, correct at any turn spacing);
      * [activeRelevanceWallClock] is an optional, additional real-time cap, unused unless supplied.
      *
-     * Executes inside a single transaction/read scope, so one snapshot reflects one consistent
-     * instant. A [HorizonGraphStore] mutation this same caller has already `await`ed is guaranteed
-     * visible (ordinary single-process ACID read-after-write) — an unrelated, still-in-flight
+     * A [HorizonGraphStore] mutation this same caller has already `await`ed is guaranteed visible
+     * (ordinary single-process ACID read-after-write) — an unrelated, still-in-flight
      * fire-and-forget writer (e.g. `MemoryWriteService.captureUtterance`) is not covered.
+     *
+     * **Concurrency (verified empirically, not assumed):** [ArcadeHorizonAssembler] wraps its
+     * internal queries in one `db.transaction { }`, but this does **not** provide snapshot
+     * isolation against a *concurrent* writer on another thread — confirmed by a controlled test
+     * that lands a real, separately-committed write strictly between the candidate-pool fetch and
+     * the reactivation fetch: the later query observes it. Each statement reads the latest
+     * committed state as of when it runs, not a single frozen instant fixed at transaction start.
+     * A concurrent write can therefore be reflected in one `assemble()` call's reactivation
+     * classification even though it landed after that call's pool-fetch began. This never produces
+     * a torn or partially-applied single fact — every surfaced item is still a whole, correctly
+     * attributed, committed record — it only means two internal sub-queries of one call are not
+     * guaranteed to reflect the identical instant under concurrent writes.
+     *
+     * **Future-cycle evidence is excluded, not misclassified.** Per [HorizonGraphStore]'s
+     * sequence-continuity contract, [currentCycleSeq] is assumed to be at or after every `cycleSeq`
+     * already committed for [userEmail]. Any candidate whose original assertion or most recent
+     * status change is nonetheless ahead of [currentCycleSeq] (a caller sequencing bug, or a write
+     * that bypassed [HorizonGraphStore]) is dropped from the snapshot entirely, both by the
+     * underlying query and defensively again after — never surfaced as `JustAsserted` or any other
+     * classification it would otherwise get by falling through.
      */
     suspend fun assemble(
         userEmail: String,
@@ -53,13 +72,24 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
 
     private val logger = LoggerFactory.getLogger(ArcadeHorizonAssembler::class.java)
 
+    /**
+     * Test-only synchronization point, invoked once per [assemble] call inside the read
+     * transaction, strictly between fetching the candidate pools and fetching reactivations.
+     * No-op (`null`) in production and never set by any production code path. Exists so a test can
+     * deterministically land a real, separately-committed concurrent write at that exact point and
+     * observe — rather than assume — what isolation the wrapping transaction actually provides.
+     * See `HorizonAssemblerTest`'s concurrency test for the empirical result this documents.
+     */
+    internal var testMidAssemblySync: (() -> Unit)? = null
+
     private data class RawCandidate(
         val phraseUid: String,
         val phraseText: String,
         val sourceUid: String,
         val sourceType: String,
         val assertedAt: Long,
-        val cycleSeq: Long,
+        val cycleSeq: Long,           // ORIGINAL assertion cycle — never touched by a status change
+        val statusCycleSeq: Long?,    // cycle of the most recent status change, if any — distinct from cycleSeq
         val status: String?,
     )
 
@@ -89,17 +119,28 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
                 if (sourceUids.isEmpty()) return@transaction
 
                 // Bounded over-fetch pools — cost is a function of poolLimit and sourceUids (small,
-                // one per source type per user), not total graph size. See SchemaBootstrap for the
-                // supporting indexes and the class doc on how this is verified, not merely assumed.
+                // one per source type per user), not total graph size. The open-status branch is
+                // confirmed (by direct execution-plan inspection, not timing alone — see
+                // debugOpenPoolExecutionSteps and its test) to use the ASSERTS[status] index rather
+                // than a full type scan.
                 val poolLimit = budget.maxItems * HorizonLimits.CANDIDATE_POOL_OVERFETCH
-                val openPool = queryAsserts(sourceUids, statusFilter = "open", cycleSeqFilter = null, limit = poolLimit)
-                val freshPool = queryAsserts(sourceUids, statusFilter = null, cycleSeqFilter = currentCycleSeq, limit = poolLimit)
+                val openPool = queryAsserts(sourceUids, statusFilter = "open", cycleSeqFilter = null, currentCycleSeq = currentCycleSeq, limit = poolLimit)
+                val freshPool = queryAsserts(sourceUids, statusFilter = null, cycleSeqFilter = currentCycleSeq, currentCycleSeq = currentCycleSeq, limit = poolLimit)
                 val moreCandidatesAvailable = openPool.size >= poolLimit || freshPool.size >= poolLimit
 
                 val byUid = LinkedHashMap<String, RawCandidate>()
                 for (c in openPool) byUid[c.phraseUid] = c
                 for (c in freshPool) byUid.putIfAbsent(c.phraseUid, c)
+                // Defense in depth alongside the SQL-level exclusion in queryAsserts: any candidate
+                // whose original assertion or last status change is somehow ahead of the cycle being
+                // assembled (a caller sequencing bug, or a write that bypassed HorizonGraphStore) is
+                // dropped here too, rather than being misclassified as JustAsserted/DormantOpen.
+                byUid.entries.removeAll { (_, c) ->
+                    c.cycleSeq > currentCycleSeq || (c.statusCycleSeq != null && c.statusCycleSeq > currentCycleSeq)
+                }
                 val candidateUids = byUid.keys.toList()
+
+                testMidAssemblySync?.invoke()
 
                 // Reactivation is checked only among this already-bounded pool, not the whole
                 // graph — a fresh `relevant_to` edge targeting something outside the pool (e.g. a
@@ -201,31 +242,78 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
     private fun trustedSourceUids(userVertex: Vertex): List<String> =
         userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS").mapNotNull { it.get("uid") as? String }
 
-    private fun queryAsserts(sourceUids: List<String>, statusFilter: String?, cycleSeqFilter: Long?, limit: Int): List<RawCandidate> {
-        if (sourceUids.isEmpty()) return emptyList()
+    /** SQL text + bound params for the `ASSERTS` candidate-pool query — extracted so a test can obtain the exact production query's execution plan without duplicating the SQL. */
+    private data class AssertsQuery(val sql: String, val params: Map<String, Any>)
+
+    /**
+     * [currentCycleSeq] is always required and bounds every branch — future evidence (whose
+     * `cycleSeq` for the fresh-pool branch, or `statusCycleSeq` for the open-status branch, is
+     * ahead of the cycle being assembled) is excluded at the query level. [toHorizonItem] repeats
+     * this exclusion defensively so a caller bug elsewhere can't smuggle future evidence through.
+     */
+    private fun buildAssertsQuery(
+        sourceUids: List<String>, statusFilter: String?, cycleSeqFilter: Long?, currentCycleSeq: Long, limit: Int,
+    ): AssertsQuery {
         val conditions = mutableListOf("@out.uid IN :sourceUids")
-        val params = mutableMapOf<String, Any>("sourceUids" to sourceUids, "limit" to limit)
+        val params = mutableMapOf<String, Any>("sourceUids" to sourceUids, "limit" to limit, "currentCycleSeq" to currentCycleSeq)
+        val orderBy: String
         if (statusFilter != null) {
+            // Open-status pool: ordered and bounded by the RECENCY OF THE STATUS ITSELF
+            // (statusCycleSeq), not the phrase's original assertion — an item reopened recently
+            // must sort ahead of one that has simply been open longer. Distinct from cycleSeq per
+            // the class doc; conflating them previously ordered by the wrong recency signal.
             conditions += "status = :status"
+            conditions += "statusCycleSeq <= :currentCycleSeq"
             params["status"] = statusFilter
+            orderBy = "ORDER BY statusCycleSeq DESC"
+        } else {
+            orderBy = ""
         }
         if (cycleSeqFilter != null) {
+            // Fresh pool: exact match already bounds this to currentCycleSeq itself — no separate
+            // future-exclusion needed, an equality filter can't select a future value.
             conditions += "cycleSeq = :cycleSeq"
             params["cycleSeq"] = cycleSeqFilter
         }
-        // Ordering by cycleSeq only makes sense (and is only needed for "most recent first"
-        // over-fetch truncation) for the open-status pool — the fresh-pool filter already pins to
-        // one exact cycleSeq value.
-        val orderBy = if (statusFilter != null) "ORDER BY cycleSeq DESC" else ""
         val sql = """
             SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, @in.text as phraseText,
-                   timestamp, cycleSeq, status
+                   timestamp, cycleSeq, statusCycleSeq, status
             FROM ASSERTS
             WHERE ${conditions.joinToString(" AND ")}
             $orderBy
             LIMIT :limit
         """.trimIndent()
-        return db.query("sql", sql, params).use { rs ->
+        return AssertsQuery(sql, params)
+    }
+
+    /**
+     * Test-only: runs the exact SQL/params [queryAsserts] would for the open-status pool, and
+     * returns the flattened list of `getType()`/`getName()` from the resulting
+     * [com.arcadedb.query.sql.executor.ExecutionPlan] (walked recursively through
+     * `getSubSteps()`). Lets a test assert on real query-plan evidence — e.g. a
+     * `FetchFromIndexStep` — instead of inferring index use from timing alone.
+     */
+    internal fun debugOpenPoolExecutionSteps(sourceUids: List<String>, currentCycleSeq: Long, limit: Int): List<String> {
+        val query = buildAssertsQuery(sourceUids, statusFilter = "open", cycleSeqFilter = null, currentCycleSeq = currentCycleSeq, limit = limit)
+        return db.query("sql", query.sql, query.params).use { rs ->
+            while (rs.hasNext()) rs.next() // the plan is only fully populated once the result is produced
+            val plan = rs.getExecutionPlan().orElse(null) ?: return@use listOf("<no execution plan available>")
+            val steps = mutableListOf<String>()
+            fun walk(step: com.arcadedb.query.sql.executor.ExecutionStep) {
+                steps += "${step.getType()}: ${step.getDescription()}"
+                step.subSteps.forEach { walk(it) }
+            }
+            plan.steps.forEach { walk(it) }
+            steps
+        }
+    }
+
+    private fun queryAsserts(
+        sourceUids: List<String>, statusFilter: String?, cycleSeqFilter: Long?, currentCycleSeq: Long, limit: Int,
+    ): List<RawCandidate> {
+        if (sourceUids.isEmpty()) return emptyList()
+        val query = buildAssertsQuery(sourceUids, statusFilter, cycleSeqFilter, currentCycleSeq, limit)
+        return db.query("sql", query.sql, query.params).use { rs ->
             val out = mutableListOf<RawCandidate>()
             while (rs.hasNext()) {
                 val row = rs.next().toMap()
@@ -236,6 +324,7 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
                     sourceType = row["sourceType"] as? String ?: "",
                     assertedAt = (row["timestamp"] as? Number)?.toLong() ?: 0L,
                     cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
+                    statusCycleSeq = (row["statusCycleSeq"] as? Number)?.toLong(),
                     status = row["status"] as? String,
                 )
             }
@@ -297,10 +386,13 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
     }
 
     private fun toHorizonItem(c: RawCandidate, currentCycleSeq: Long, reactivation: ReactivationInfo?): HorizonItem {
+        // JustAsserted is about the phrase's CONTENT being newly stated — the original assertion
+        // cycleSeq, never statusCycleSeq. A status change in a later cycle must not make an old
+        // phrase read as freshly stated in that cycle.
         val surfacing = when {
             reactivation != null -> SurfacingReason.ActiveReactivation(reactivation)
             c.cycleSeq == currentCycleSeq -> SurfacingReason.JustAsserted(c.cycleSeq)
-            else -> SurfacingReason.DormantOpen(c.cycleSeq)
+            else -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
         }
         val status = c.status?.let { s -> runCatching { AssertionStatus.valueOf(s.uppercase()) }.getOrNull() }
         return HorizonItem(
