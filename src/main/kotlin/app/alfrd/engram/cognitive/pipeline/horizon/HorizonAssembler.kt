@@ -8,6 +8,17 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 
 /**
+ * The result of [HorizonAssembler.assemble] — success carries the snapshot; failure is explicit
+ * and distinguishable from "the user has no data yet". A caller must not treat [ConsistencyFailure]
+ * as an empty [ContextHorizon] — no read was actually taken.
+ */
+sealed interface AssembleOutcome {
+    data class Assembled(val horizon: ContextHorizon) : AssembleOutcome
+    /** The [HorizonConsistencyLock] read lock could not be acquired within the bounded timeout — no snapshot was read, consistent or otherwise. */
+    data class ConsistencyFailure(val reason: String) : AssembleOutcome
+}
+
+/**
  * Read-side interface through which a future response-context assembly step consumes the Context
  * Horizon. Standalone and unwired — no [app.alfrd.engram.cognitive.pipeline.CognitivePipeline] call
  * site exists yet; propagation judgment is out of scope, every `relevant_to` edge assembly finds
@@ -26,17 +37,14 @@ interface HorizonAssembler {
      * (ordinary single-process ACID read-after-write) — an unrelated, still-in-flight
      * fire-and-forget writer (e.g. `MemoryWriteService.captureUtterance`) is not covered.
      *
-     * **Concurrency (verified empirically, not assumed):** [ArcadeHorizonAssembler] wraps its
-     * internal queries in one `db.transaction { }`, but this does **not** provide snapshot
-     * isolation against a *concurrent* writer on another thread — confirmed by a controlled test
-     * that lands a real, separately-committed write strictly between the candidate-pool fetch and
-     * the reactivation fetch: the later query observes it. Each statement reads the latest
-     * committed state as of when it runs, not a single frozen instant fixed at transaction start.
-     * A concurrent write can therefore be reflected in one `assemble()` call's reactivation
-     * classification even though it landed after that call's pool-fetch began. This never produces
-     * a torn or partially-applied single fact — every surfaced item is still a whole, correctly
-     * attributed, committed record — it only means two internal sub-queries of one call are not
-     * guaranteed to reflect the identical instant under concurrent writes.
+     * **Consistency is enforced, not merely observed.** [ArcadeHorizonAssembler] acquires
+     * [HorizonConsistencyLock]'s read lock for the entire duration of its internal queries,
+     * excluding every [HorizonGraphStore] writer for that window — see that lock's doc for which
+     * writers this covers, and for the concrete evidence (a reproduced deadlock) that ruled out an
+     * ArcadeDB-native lock/isolation level in favor of this one. If the lock cannot be acquired
+     * within the bounded timeout (a single `tryLock`, never a retry loop), this returns
+     * [AssembleOutcome.ConsistencyFailure] rather than a possibly-mixed snapshot — no read is taken
+     * at all in that case, so there is nothing to be inconsistent.
      *
      * **Future-cycle evidence is excluded, not misclassified.** Per [HorizonGraphStore]'s
      * sequence-continuity contract, [currentCycleSeq] is assumed to be at or after every `cycleSeq`
@@ -52,7 +60,7 @@ interface HorizonAssembler {
         activeRelevanceCycles: Int = HorizonLimits.DEFAULT_RELEVANCE_CYCLES,
         activeRelevanceWallClock: Duration? = null,
         budget: HorizonBudget = HorizonBudget.DEFAULT,
-    ): ContextHorizon
+    ): AssembleOutcome
 
     /**
      * Full, explicitly paginated enumeration beyond what [assemble] inlines — walk with [cursor]
@@ -68,7 +76,10 @@ interface HorizonAssembler {
     ): CandidatePage
 }
 
-class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
+class ArcadeHorizonAssembler(
+    private val db: Database,
+    private val lockTimeoutMs: Long = HorizonConsistencyLock.DEFAULT_TIMEOUT_MS,
+) : HorizonAssembler {
 
     private val logger = LoggerFactory.getLogger(ArcadeHorizonAssembler::class.java)
 
@@ -99,7 +110,7 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
         activeRelevanceCycles: Int,
         activeRelevanceWallClock: Duration?,
         budget: HorizonBudget,
-    ): ContextHorizon = withContext(Dispatchers.IO) {
+    ): AssembleOutcome = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val empty = ContextHorizon(
             userEmail = userEmail,
@@ -111,9 +122,16 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
             omittedAtLeast = 0,
             moreCandidatesAvailable = false,
         )
-        try {
+        // Held for the entire read, excluding every HorizonGraphStore writer for that window — see
+        // HorizonConsistencyLock for which writers this covers and why a hand-rolled lock rather
+        // than an ArcadeDB-native isolation level/lock. A lock-acquisition timeout is an explicit
+        // AssembleOutcome.ConsistencyFailure below, never a silently-returned possibly-mixed
+        // snapshot — an internal query exception (caught inside the lock) still degrades to the
+        // existing "empty" behavior, a separate, unrelated failure mode.
+        val horizonOrNull: ContextHorizon? = withHorizonReadLock(db, lockTimeoutMs) {
             var result = empty
-            db.transaction {
+            try {
+                db.transaction {
                 val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@transaction
                 val sourceUids = trustedSourceUids(userVertex)
                 if (sourceUids.isEmpty()) return@transaction
@@ -172,11 +190,17 @@ class ArcadeHorizonAssembler(private val db: Database) : HorizonAssembler {
                     omittedAtLeast = overflow.size,
                     moreCandidatesAvailable = moreCandidatesAvailable,
                 )
+                }
+            } catch (e: Exception) {
+                logger.warn("assemble failed for userEmail=$userEmail: ${e.message}")
             }
             result
-        } catch (e: Exception) {
-            logger.warn("assemble failed for userEmail=$userEmail: ${e.message}")
-            empty
+        }
+        if (horizonOrNull != null) {
+            AssembleOutcome.Assembled(horizonOrNull)
+        } else {
+            logger.warn("assemble: could not acquire the Horizon read lock within ${lockTimeoutMs}ms for userEmail=$userEmail")
+            AssembleOutcome.ConsistencyFailure("could not acquire the Horizon read lock within ${lockTimeoutMs}ms — a writer may be holding it")
         }
     }
 

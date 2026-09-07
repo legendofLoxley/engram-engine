@@ -4,6 +4,8 @@ import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.SchemaBootstrap
 import com.arcadedb.database.Database
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -104,6 +106,12 @@ class HorizonAssemblerTest {
     private fun seedConversationalPhraseWithCycle(email: String, text: String, cycleSeq: Long): String =
         seedConversationalPhraseWithCycle(dbManager.getDatabase(), email, text, cycleSeq)
 
+    /** Unwraps a successful assembly, failing loudly (not silently) on an unexpected ConsistencyFailure. */
+    private fun AssembleOutcome.expectSuccess(): ContextHorizon {
+        check(this is AssembleOutcome.Assembled) { "expected a successful assembly, got: $this" }
+        return horizon
+    }
+
     private fun phraseExists(db: Database, phraseUid: String): Boolean =
         db.query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to phraseUid)).use { it.hasNext() }
 
@@ -121,7 +129,7 @@ class HorizonAssemblerTest {
         )
         assertTrue(store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN))
 
-        val afterTurn1 = assembler.assemble(email, currentCycleSeq = 1)
+        val afterTurn1 = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val arxAtTurn1 = afterTurn1.items.single { it.sourceRefs.first().phraseUid == arxUid }
         assertEquals(HorizonItemCategory.INTENTION, arxAtTurn1.category)
         assertEquals(AssertionStatus.OPEN, arxAtTurn1.status)
@@ -133,7 +141,7 @@ class HorizonAssemblerTest {
             email, "Anyway — what's a good way to structure the data model for my grocery list app?", cycleSeq = 2,
         )
 
-        val afterTurn2 = assembler.assemble(email, currentCycleSeq = 2)
+        val afterTurn2 = assembler.assemble(email, currentCycleSeq = 2).expectSuccess()
         val groceryItem = afterTurn2.items.single { it.sourceRefs.first().phraseUid == groceryUid }
         assertEquals(HorizonItemCategory.FACT, groceryItem.category)
         assertNull(groceryItem.status)
@@ -151,7 +159,7 @@ class HorizonAssemblerTest {
             text = "Arx developer build v0.9.2 finished compiling and is ready to flash — no errors.",
         )!!
 
-        val beforePropagation = assembler.assemble(email, currentCycleSeq = 2)
+        val beforePropagation = assembler.assemble(email, currentCycleSeq = 2).expectSuccess()
         val eventItem = beforePropagation.items.single { it.sourceRefs.first().phraseUid == eventUid }
         assertEquals(HorizonItemCategory.ENVIRONMENT_EVENT, eventItem.category)
         assertEquals(ProvenanceKind.ENVIRONMENT_SIGNAL, eventItem.provenance)
@@ -172,7 +180,7 @@ class HorizonAssemblerTest {
             cycleSeq = 3,
         )
 
-        val afterTurn3 = assembler.assemble(email, currentCycleSeq = 3)
+        val afterTurn3 = assembler.assemble(email, currentCycleSeq = 3).expectSuccess()
         val arxReactivated = afterTurn3.items.single { it.sourceRefs.first().phraseUid == arxUid }
         assertTrue(arxReactivated.surfacing is SurfacingReason.ActiveReactivation)
         val info = (arxReactivated.surfacing as SurfacingReason.ActiveReactivation).info
@@ -200,10 +208,10 @@ class HorizonAssemblerTest {
         val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:x", text = "event")!!
         store.markRelevant(email, cycleSeq = 1, fromPhraseUid = eventUid, toPhraseUid = arxUid)
 
-        val within = assembler.assemble(email, currentCycleSeq = 3, activeRelevanceCycles = 3)
+        val within = assembler.assemble(email, currentCycleSeq = 3, activeRelevanceCycles = 3).expectSuccess()
         assertTrue(within.items.single { it.sourceRefs.first().phraseUid == arxUid }.surfacing is SurfacingReason.ActiveReactivation)
 
-        val past = assembler.assemble(email, currentCycleSeq = 10, activeRelevanceCycles = 3)
+        val past = assembler.assemble(email, currentCycleSeq = 10, activeRelevanceCycles = 3).expectSuccess()
         assertEquals(
             SurfacingReason.DormantOpen(1),
             past.items.single { it.sourceRefs.first().phraseUid == arxUid }.surfacing,
@@ -220,7 +228,7 @@ class HorizonAssemblerTest {
         // Status is set FOUR cycles after the phrase's own original assertion.
         store.markAssertionStatus(email, cycleSeq = 5, phraseUid = arxUid, status = AssertionStatus.OPEN)
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 5)
+        val horizon = assembler.assemble(email, currentCycleSeq = 5).expectSuccess()
         val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
         assertTrue(
             item.surfacing !is SurfacingReason.JustAsserted,
@@ -238,7 +246,7 @@ class HorizonAssemblerTest {
         // Simulates a caller sequencing bug: content whose own assertion cycle is ahead of the
         // cycle assemble() is being asked about.
         val futureUid = seedConversationalPhraseWithCycle(email, "This claims to be from the future.", cycleSeq = 100)
-        val horizon = assembler.assemble(email, currentCycleSeq = 5)
+        val horizon = assembler.assemble(email, currentCycleSeq = 5).expectSuccess()
         assertTrue(
             horizon.items.none { it.sourceRefs.first().phraseUid == futureUid },
             "evidence whose cycleSeq is ahead of currentCycleSeq must be excluded, never surfaced as JustAsserted/DormantOpen",
@@ -259,7 +267,7 @@ class HorizonAssemblerTest {
             }
         }
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 5)
+        val horizon = assembler.assemble(email, currentCycleSeq = 5).expectSuccess()
         assertTrue(
             horizon.items.none { it.sourceRefs.first().phraseUid == openUid },
             "an item whose status was (incorrectly) marked in a future cycle must not be surfaced yet",
@@ -274,7 +282,7 @@ class HorizonAssemblerTest {
         val phraseUid = seedConversationalPhraseWithCycle(email, "some fact", cycleSeq = 1)
         assertTrue(store.markAssertionStatus(email, cycleSeq = 1, phraseUid = phraseUid, status = AssertionStatus.OPEN))
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 1)
+        val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         assertTrue(horizon.items.any { it.sourceRefs.first().phraseUid == phraseUid && it.status == AssertionStatus.OPEN })
     }
 
@@ -282,72 +290,107 @@ class HorizonAssemblerTest {
      * A sequential await-then-read (the test above) only proves ordering between two calls made
      * one after another by the SAME caller — it says nothing about what a concurrent writer, from
      * a different thread, racing an in-progress `assemble()` call, can do to the result. This test
-     * uses `ArcadeHorizonAssembler.testMidAssemblySync` to deterministically land a real,
-     * separately-committed write (on its own thread, joined before returning) strictly between
-     * `assemble()`'s candidate-pool fetch and its reactivation fetch.
+     * uses `ArcadeHorizonAssembler.testMidAssemblySync` to deterministically start a real,
+     * independently-committed write on another thread strictly between `assemble()`'s
+     * candidate-pool fetch and its reactivation fetch, then verifies mutual exclusion actually
+     * holds — not merely that some plausible-looking outcome came back.
      *
-     * **Empirical result (reproduced deterministically across repeated runs):** `assemble()`'s
-     * `db.transaction { }` does **not** provide snapshot isolation across the queries inside it —
-     * the reactivation query, run after the concurrent write commits, DOES observe it. Each
-     * statement reads the latest committed state at the moment it runs; there is no single frozen
-     * point-in-time view fixed at transaction start. This corrects the original design doc's claim
-     * that wrapping multiple queries in one transaction yields "one consistent instant" — it does
-     * not, and this test is the regression guard: if ArcadeDB's behavior or this code's transaction
-     * handling ever changes, asserting the wrong branch here fails loudly instead of silently
-     * drifting from documented reality.
+     * **What was tried and rejected before this mechanism, with evidence (see
+     * [HorizonConsistencyLock] for the full account):**
+     * - Sequential await-then-read alone (insufficient by construction — this test exists because
+     *   that one cannot detect a torn cross-query read).
+     * - `Database.setTransactionIsolationLevel(REPEATABLE_READ)` — tested against this exact
+     *   scenario; the concurrent write was still observed by the later query. No change.
+     * - `Database.executeInReadLock`/`executeInWriteLock` — ArcadeDB's own native locks.
+     *   Reproduced a real deadlock: these are thread-affine, and this codebase's writers are
+     *   `suspend fun`s that hop threads via `withContext(Dispatchers.IO)`; a writer thread that
+     *   entered `executeInWriteLock` and then called such a suspend function hung forever, and
+     *   `Database.close()` — which independently needs that same internal lock — hung too.
+     *   Confirmed via `jstack`: one thread parked in `ReentrantReadWriteLock$WriteLock.lock` inside
+     *   `LocalDatabase.executeInWriteLock` called from `LocalDatabase.close`, contending with
+     *   another thread still inside `executeInWriteLock`'s own callable.
      *
-     * This is accepted, not fixed: true snapshot isolation would need an ArcadeDB-specific
-     * mechanism nothing else in this codebase uses (every existing `db.transaction { }` here is for
-     * write atomicity, never a declared read-isolation level). It does not corrupt any single
-     * fact — the reactivation this test observes is a real, fully-formed, committed edge, correctly
-     * attributed — it only means two sub-queries within one `assemble()` call are not guaranteed to
-     * reflect the identical instant when a writer is concurrently active.
+     * The mechanism that survived: a plain JVM `ReentrantReadWriteLock`, one per `Database`
+     * instance, acquired and released entirely within one synchronous `db.transaction { }` call
+     * inside the same `withContext(Dispatchers.IO)` block that runs it — never held across a
+     * suspension point, so lock and unlock always happen on the same thread.
      */
     @Test
-    fun `a concurrent write landing mid-assembly is observed by the later query, not isolated away`() = runBlocking {
+    fun `a concurrent write is excluded until assemble releases its read lock, then proceeds and is not reflected`() = runBlocking {
         val email = "horizon-concurrency-${UUID.randomUUID()}@test.alfrd.internal"
+        // Arx is asserted at cycle 1; assemble() below runs at cycle 3, so absent the concurrent
+        // write it reads as DormantOpen(1) — distinct from JustAsserted, so the assertion below
+        // actually distinguishes "excluded" from "not excluded" rather than being trivially true.
         val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
         store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
         val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:concurrency", text = "event")!!
         // No relevant_to edge yet — the concurrent writer below creates it mid-assembly.
 
         val arcadeAssembler = assembler as ArcadeHorizonAssembler
-        var concurrentWriteCommitted = false
-        arcadeAssembler.testMidAssemblySync = {
-            val writer = Thread {
-                concurrentWriteCommitted = runBlocking {
-                    store.markRelevant(email, cycleSeq = 1, fromPhraseUid = eventUid, toPhraseUid = arxUid)
-                }
-            }
-            writer.start()
-            writer.join(10_000)
+        var writerCommittedAtMillis: Long? = null
+        val writer = Thread {
+            // A plain call — the write lock this acquires is entirely internal to markRelevant()
+            // itself (see ArcadeHorizonGraphStore); nothing external needs to wrap it.
+            val committed = runBlocking { store.markRelevant(email, cycleSeq = 3, fromPhraseUid = eventUid, toPhraseUid = arxUid) }
+            if (committed) writerCommittedAtMillis = System.currentTimeMillis()
         }
+        // Fire-and-forget: assemble() must NOT wait for the writer — with correct mutual exclusion
+        // in place, the writer cannot finish until assemble() releases its read lock, so blocking
+        // here would deadlock the test against its own correctness guarantee.
+        arcadeAssembler.testMidAssemblySync = { writer.start() }
 
-        val horizon = try {
-            assembler.assemble(email, currentCycleSeq = 1, activeRelevanceCycles = 3)
+        val outcome = try {
+            assembler.assemble(email, currentCycleSeq = 3, activeRelevanceCycles = 3)
         } finally {
             arcadeAssembler.testMidAssemblySync = null
         }
+        val assembleEnd = System.currentTimeMillis()
+        val horizon = outcome.expectSuccess()
 
-        assertTrue(concurrentWriteCommitted, "the concurrent write itself must have succeeded and committed")
-        val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
-        val surfacing = item.surfacing
+        writer.join(10_000)
+        assertTrue(writerCommittedAtMillis != null, "the concurrent write must eventually succeed once the read lock is released")
         assertTrue(
-            surfacing is SurfacingReason.ActiveReactivation,
-            "empirically, ArcadeDB's per-statement read-committed behavior means the reactivation " +
-                "query DOES see a write committed after the pool-fetch but before it runs — if this " +
-                "ever comes back DormantOpen instead, isolation behavior has changed and the KDoc " +
-                "on ArcadeHorizonAssembler.assemble must be revisited",
+            writerCommittedAtMillis!! >= assembleEnd,
+            "the write must not be able to commit until assemble() has fully released its read lock — " +
+                "committed at $writerCommittedAtMillis, assemble() ended at $assembleEnd",
         )
-        surfacing as SurfacingReason.ActiveReactivation
-        // Whatever the isolation model, the surfaced fact itself must be whole and correctly
-        // attributed — a real, committed edge, not a torn or partially-applied write.
-        assertEquals(eventUid, surfacing.info.triggeringPhraseUid)
+
+        // Excluded entirely: the snapshot reflects the coherent "before" state, not a torn mix.
+        val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
         assertEquals(
-            eventUid,
-            dbManager.getDatabase().query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to surfacing.info.triggeringPhraseUid))
-                .use { it.next().toElement().asVertex().get("uid") as String },
+            SurfacingReason.DormantOpen(1), item.surfacing,
+            "the concurrent write was excluded from this read entirely — the snapshot must reflect the state as it stood before the write, not a partial view of it",
         )
+    }
+
+    /**
+     * The other half of "coherent before-or-after, or an explicit failure": if the lock genuinely
+     * cannot be acquired in time, `assemble()` must say so, not guess. Uses a short
+     * [ArcadeHorizonAssembler] `lockTimeoutMs` so the failure path is exercised deterministically
+     * and quickly, rather than waiting out the 3-second production default.
+     */
+    @Test
+    fun `assemble returns an explicit ConsistencyFailure when the lock cannot be acquired in time, never a mixed snapshot`() = runBlocking {
+        val email = "horizon-lock-timeout-${UUID.randomUUID()}@test.alfrd.internal"
+        seedConversationalPhraseWithCycle(email, "some fact", cycleSeq = 1)
+
+        val shortTimeoutAssembler = ArcadeHorizonAssembler(dbManager.getDatabase(), lockTimeoutMs = 150)
+        val writeLock = HorizonConsistencyLock.forDatabase(dbManager.getDatabase()).writeLock()
+        writeLock.lock() // simulates a writer that is busy for longer than the assembler's timeout
+        try {
+            val outcome = shortTimeoutAssembler.assemble(email, currentCycleSeq = 1)
+            assertTrue(
+                outcome is AssembleOutcome.ConsistencyFailure,
+                "expected an explicit ConsistencyFailure while the write lock is held elsewhere, got: $outcome",
+            )
+        } finally {
+            writeLock.unlock()
+        }
+
+        // Once released, an ordinary call succeeds normally — the failure was specific to the
+        // contended window, not a permanent break.
+        val recovered = shortTimeoutAssembler.assemble(email, currentCycleSeq = 1)
+        assertTrue(recovered is AssembleOutcome.Assembled, "expected assembly to succeed once the lock is free, got: $recovered")
     }
 
     // ── Adversarial cross-user read: defense in depth even if a bad edge already exists ─────────
@@ -369,7 +412,7 @@ class HorizonAssemblerTest {
             RelatedToEdges.createRelevantTo(from, to, strength = 1.0, cycleSeq = 1, createdAt = System.currentTimeMillis())
         }
 
-        val horizon = assembler.assemble(emailA, currentCycleSeq = 1)
+        val horizon = assembler.assemble(emailA, currentCycleSeq = 1).expectSuccess()
         val arxItem = horizon.items.single { it.sourceRefs.first().phraseUid == arxUidA }
         assertTrue(
             arxItem.surfacing !is SurfacingReason.ActiveReactivation,
@@ -396,7 +439,7 @@ class HorizonAssemblerTest {
         }
 
         val budget = HorizonBudget(maxItems = 3, itemCount = 0, truncated = false)
-        val horizon = assembler.assemble(email, currentCycleSeq = 100, budget = budget)
+        val horizon = assembler.assemble(email, currentCycleSeq = 100, budget = budget).expectSuccess()
 
         assertEquals(3, horizon.items.size)
         assertTrue(horizon.budget.truncated)
@@ -421,7 +464,7 @@ class HorizonAssemblerTest {
         val phraseUid = seedConversationalPhraseWithCycle(email, longText, cycleSeq = 1)
         store.markAssertionStatus(email, cycleSeq = 1, phraseUid = phraseUid, status = AssertionStatus.OPEN)
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 1)
+        val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val item = horizon.items.single { it.sourceRefs.first().phraseUid == phraseUid }
         assertTrue(item.text.truncated)
         assertTrue(item.text.text.length <= HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1)
@@ -440,7 +483,7 @@ class HorizonAssemblerTest {
         val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:x", text = longEventText)!!
         store.markRelevant(email, cycleSeq = 1, fromPhraseUid = eventUid, toPhraseUid = arxUid)
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 1)
+        val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val info = (horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }.surfacing as SurfacingReason.ActiveReactivation).info
         assertTrue(info.triggeringPhraseText.truncated)
         assertTrue(info.triggeringPhraseText.text.length <= HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1)
@@ -448,17 +491,26 @@ class HorizonAssemblerTest {
 
     /**
      * Individual per-field caps (item text, triggering text, item/omitted counts) were each tested
-     * in isolation above, but never the COMPLETE structure at once — including the variable-length
-     * metadata (`sourceUid`, `sourceType`, `phraseUid`, `userEmail`) that rides along every item,
-     * source ref, and omitted entry. This forces every bounding mechanism to its worst case in one
-     * snapshot and measures the total text volume of the whole [ContextHorizon] against a fixed,
-     * calculable ceiling derived from [HorizonLimits] — not merely each field's own cap in
-     * isolation, which could still combine into an unbounded total if any one of them were missed.
+     * in isolation above, but never the COMPLETE structure at once, encoded in the format Alfrd
+     * actually uses for outbound payloads elsewhere in this codebase (`kotlinx.serialization` JSON),
+     * and measured as real bytes rather than summed `String.length`. A raw character sum cannot
+     * stand in for the real encoded size: JSON escaping expands characters that need it (quotes,
+     * backslashes, newlines — each becomes two ASCII bytes instead of one), and a UTF-16 character
+     * count says nothing about UTF-8 byte size for non-ASCII text (many BMP characters, e.g. CJK,
+     * take 3 bytes each; surrogate-pair characters, e.g. emoji, take 4 bytes for 2 UTF-16 units).
+     * This test forces every bounding mechanism to its worst case, seeds content requiring both
+     * escaping and multibyte encoding, serializes with the real [Json] encoder, and measures the
+     * actual `ByteArray` size against [HorizonLimits.MAX_SERIALIZED_HORIZON_BYTES] — not a
+     * hand-derived character ceiling.
      */
     @Test
-    fun `the complete serialized Horizon stays within a fixed, calculable ceiling at worst-case population`() = runBlocking {
+    fun `the complete serialized Horizon stays within its defined byte budget at worst-case population, including escaping and multibyte content`() = runBlocking {
         val email = "horizon-budget-${UUID.randomUUID()}@test.alfrd.internal"
-        val longText = "x".repeat(HorizonLimits.MAX_ITEM_TEXT_LENGTH + 500)
+        // Content requiring JSON escaping (quote, backslash, newline, tab) AND multibyte UTF-8
+        // encoding (CJK — 3 bytes/char, non-surrogate; emoji — 4 bytes/char, surrogate pair),
+        // followed by enough filler to push well past the truncation cap.
+        val stress = "\"quoted\" \\backslash\\ \nnewline\t tab 漢字漢字ひらがな 😀🎉🚀"
+        val longText = stress + "x".repeat(HorizonLimits.MAX_ITEM_TEXT_LENGTH + 500)
 
         // Force every bounding mechanism at once: more open items than the budget allows (forces
         // omittedSample to its cap), every item's text over the truncation cap, and a reactivation
@@ -474,7 +526,7 @@ class HorizonAssemblerTest {
         )!!
         store.markRelevant(email, cycleSeq = overflowCount.toLong(), fromPhraseUid = eventUid, toPhraseUid = uids.last())
 
-        val horizon = assembler.assemble(email, currentCycleSeq = overflowCount.toLong())
+        val horizon = assembler.assemble(email, currentCycleSeq = overflowCount.toLong()).expectSuccess()
 
         // Per-field caps, individually, at worst-case population:
         assertTrue(horizon.items.size <= HorizonBudget.DEFAULT.maxItems)
@@ -486,48 +538,44 @@ class HorizonAssemblerTest {
                 assertTrue(it.text.length <= HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1)
             }
         }
+        assertTrue(horizon.items.any { it.text.truncated }, "test setup: at least one item must actually be truncated")
+        val reactivated = horizon.items.mapNotNull { (it.surfacing as? SurfacingReason.ActiveReactivation)?.info }
+        assertTrue(reactivated.any { it.triggeringPhraseText.truncated }, "test setup: the reactivation's triggering text must actually be truncated")
 
-        // The COMPLETE structure's total text volume — including the variable metadata that rides
-        // along every reference (sourceUid/sourceType/phraseUid), not just headline item text —
-        // stays under a fixed ceiling regardless of how long the underlying graph content was.
-        val totalChars = totalTextLength(horizon)
-        val ceiling = worstCaseCeiling(email)
+        // Real serialization, in the format this codebase actually uses elsewhere for outbound
+        // payloads — not a hand-rolled size estimate.
+        val json = Json { encodeDefaults = true }
+        val serialized = json.encodeToString(horizon)
+        val encodedBytes = serialized.toByteArray(Charsets.UTF_8)
+
+        // The escaping/multibyte content must actually have landed in the serialized output —
+        // otherwise this test would prove nothing about them. A raw newline/quote is illegal inside
+        // a JSON string; their presence here can only mean they were escaped, and the multibyte
+        // characters must survive UTF-8 round-tripping intact.
+        assertTrue(serialized.contains("\\n"), "newline must be JSON-escaped in the serialized payload")
+        assertTrue(serialized.contains("\\\""), "quote must be JSON-escaped in the serialized payload")
+        assertTrue(serialized.contains("漢字"), "multibyte CJK text must survive serialization intact")
+        assertTrue(serialized.contains("😀"), "surrogate-pair emoji must survive serialization intact")
+
         assertTrue(
-            totalChars <= ceiling,
-            "total=$totalChars ceiling=$ceiling — the complete Horizon exceeded its calculable worst-case bound",
+            encodedBytes.size <= HorizonLimits.MAX_SERIALIZED_HORIZON_BYTES,
+            "encoded=${encodedBytes.size} bytes, budget=${HorizonLimits.MAX_SERIALIZED_HORIZON_BYTES} bytes — " +
+                "the complete Horizon exceeded its defined serialized-output byte budget",
         )
-    }
 
-    /** Sums every String field reachable from a [ContextHorizon] — the graph-derived evidence collections, plus the one caller-supplied identifier. */
-    private fun totalTextLength(h: ContextHorizon): Int {
-        var total = h.userEmail.length
-        h.items.forEach { item ->
-            total += item.text.text.length
-            item.sourceRefs.forEach { total += it.sourceUid.length + it.sourceType.length + it.phraseUid.length }
-            (item.surfacing as? SurfacingReason.ActiveReactivation)?.info?.let {
-                total += it.triggeringPhraseText.text.length + it.triggeringPhraseUid.length
+        // Resolvable evidence references and truncation indicators must survive a real decode, not
+        // just remain present in the in-memory object graph before serialization.
+        val decoded = json.decodeFromString<ContextHorizon>(serialized)
+        assertEquals(horizon, decoded, "round-tripping through the real JSON encoder must be lossless")
+        decoded.items.forEach { item ->
+            item.sourceRefs.forEach { ref ->
+                assertTrue(uids.contains(ref.phraseUid) || ref.phraseUid == eventUid, "every decoded sourceRef.phraseUid must resolve to a real seeded phrase")
             }
         }
-        h.omittedSample.forEach {
-            total += it.sourceRef.sourceUid.length + it.sourceRef.sourceType.length + it.sourceRef.phraseUid.length + it.reason.length
-        }
-        return total
-    }
-
-    /**
-     * The worst-case bound this design commits to: `userEmail` is a single, caller-supplied
-     * identifier (O(1) per call, not a collection that scales with graph/history size, so it's
-     * counted honestly here but isn't part of the "bounded for a growing graph" claim — that claim
-     * is about the collections below, which all have a fixed cardinality regardless of graph size).
-     * `refFieldCeiling` is a generous per-reference allowance (uid + type + phraseUid at realistic
-     * lengths — UUIDs are 36 chars, source types are short fixed strings in this codebase).
-     */
-    private fun worstCaseCeiling(email: String): Int {
-        val refFieldCeiling = 120
-        val perItemCeiling = HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1 +           // item text
-            HorizonLimits.MAX_ITEM_TEXT_LENGTH + 1 +                            // reactivation triggering text, worst case
-            HorizonLimits.MAX_SOURCE_REFS_PER_ITEM * refFieldCeiling            // capped source refs
-        return email.length + HorizonBudget.DEFAULT.maxItems * perItemCeiling + HorizonLimits.OMITTED_SAMPLE_CAP * refFieldCeiling
+        assertTrue(decoded.items.any { it.text.truncated }, "truncation indicator must survive the JSON round trip")
+        val decodedReactivation = decoded.items.mapNotNull { (it.surfacing as? SurfacingReason.ActiveReactivation)?.info }
+        assertTrue(decodedReactivation.any { it.triggeringPhraseText.truncated }, "reactivation truncation indicator must survive the JSON round trip")
+        assertTrue(decodedReactivation.any { it.triggeringPhraseUid == eventUid }, "the reactivation's evidence reference (triggeringPhraseUid) must survive and resolve to the real seeded event")
     }
 
     // ── Scale/index verification: not merely assumed bounded ─────────────────────────────────────
@@ -572,11 +620,11 @@ class HorizonAssemblerTest {
     fun `open-item query does not regress into an unindexed full scan at 5000+ edges`() = runBlocking {
         val baselineEmail = "horizon-scale-baseline-${UUID.randomUUID()}@test.alfrd.internal"
         seedManyOpenItemsInOneTransaction(dbManager.getDatabase(), baselineEmail, count = 20)
-        val baselineMs = measureTimeMillis { assembler.assemble(baselineEmail, currentCycleSeq = 1_000_000) }
+        val baselineMs = measureTimeMillis { assembler.assemble(baselineEmail, currentCycleSeq = 1_000_000).expectSuccess() }
 
         val scaleEmail = "horizon-scale-large-${UUID.randomUUID()}@test.alfrd.internal"
         seedManyOpenItemsInOneTransaction(dbManager.getDatabase(), scaleEmail, count = 5_000)
-        val scaleMs = measureTimeMillis { assembler.assemble(scaleEmail, currentCycleSeq = 1_000_000) }
+        val scaleMs = measureTimeMillis { assembler.assemble(scaleEmail, currentCycleSeq = 1_000_000).expectSuccess() }
 
         assertTrue(
             scaleMs < baselineMs * 50 + 2_000,
@@ -671,13 +719,13 @@ class HorizonAssemblerTest {
         val eventUid = localStore.ingestEnvironmentSignal(email, cycleSeq = 2, sourceName = "environment:x", text = "event")!!
         localStore.markRelevant(email, cycleSeq = 2, fromPhraseUid = eventUid, toPhraseUid = arxUid)
 
-        val before = localAssembler.assemble(email, currentCycleSeq = 2)
+        val before = localAssembler.assemble(email, currentCycleSeq = 2).expectSuccess()
 
         manager.close()
         manager = DatabaseManager(path) // reopen the same on-disk path — no re-bootstrap needed
         localAssembler = ArcadeHorizonAssembler(manager.getDatabase())
 
-        val after = localAssembler.assemble(email, currentCycleSeq = 2)
+        val after = localAssembler.assemble(email, currentCycleSeq = 2).expectSuccess()
 
         assertEquals(signature(before), signature(after))
         manager.close()
@@ -702,7 +750,7 @@ class HorizonAssemblerTest {
         val arxUid = seedConversationalPhraseWithCycle(email, text, cycleSeq = 1)
         store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 1)
+        val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
         assertEquals(ProvenanceKind.EXPLICIT_USER_STATEMENT, item.provenance)
         assertEquals(text, item.text.text, "must carry the user's own words verbatim, not a paraphrase or inferred reason")
