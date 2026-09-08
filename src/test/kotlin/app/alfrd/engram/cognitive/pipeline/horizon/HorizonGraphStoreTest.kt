@@ -170,12 +170,21 @@ class HorizonGraphStoreTest {
         assertTrue(uid1 != null && uid2 != null && uid1 != uid2)
 
         val db = dbManager.getDatabase()
-        val sourceCount = db.query("sql", "SELECT count(*) as cnt FROM Source WHERE name = :n", mapOf("n" to sourceName))
-            .use { rs -> (rs.next().toMap()["cnt"] as Number).toInt() }
-        assertEquals(1, sourceCount, "the same sourceName must reuse one Source vertex, not create a second")
+        // Scoped to this user's own TRUSTS edges, not a bare global name count: other test methods
+        // in this PER_CLASS-shared database legitimately create their own, separate Source with the
+        // same literal sourceName for a different user — that is exactly the per-user isolation
+        // findOrCreateEnvironmentSource now provides (see its doc), not a bug. A global count would
+        // conflate that with this user's own reuse, which is what this test actually checks.
+        val trustedSourcesNamed = HorizonOwnership.trustedSourceUids(db, email).count { uid ->
+            db.query("sql", "SELECT FROM Source WHERE uid = :u AND name = :n", mapOf("u" to uid, "n" to sourceName))
+                .use { rs -> rs.hasNext() }
+        }
+        assertEquals(1, trustedSourcesNamed, "the same sourceName must reuse one Source vertex for this user, not create a second")
 
-        val sourceVertex = db.query("sql", "SELECT FROM Source WHERE name = :n", mapOf("n" to sourceName))
-            .use { rs -> rs.next().toElement().asVertex() }
+        val sourceVertex = db.query(
+            "sql", "SELECT FROM Source WHERE name = :n AND uid IN :uids",
+            mapOf("n" to sourceName, "uids" to HorizonOwnership.trustedSourceUids(db, email)),
+        ).use { rs -> rs.next().toElement().asVertex() }
         assertEquals(ENVIRONMENT_SOURCE_TYPE, sourceVertex.get("type") as? String)
     }
 
@@ -276,5 +285,31 @@ class HorizonGraphStoreTest {
         val scored = results.single { it.uid == phraseUid }
         assertEquals(0.7, scored.scores["trust"] ?: 0.0, 0.001, "adding a status must not zero out the existing trust score")
         assertEquals(0.9, scored.scores["salience"] ?: 0.0, 0.001, "adding a status must not zero out the existing salience score")
+    }
+
+    /**
+     * Regression test: [ArcadeHorizonGraphStore.markAssertionStatus] used to `takeLast(20)` the
+     * appended `statusHistory` list, deleting older transitions from durable storage — an audit
+     * trail is supposed to be durable, and nothing in [HorizonAssembler] even reads this field back
+     * (bounding what a *read* returns, if one ever surfaces it, is that read path's job, not the
+     * writer's). Fixed by appending without truncation.
+     */
+    @Test
+    fun `more than 20 status transitions are all preserved durably, never truncated on write`() = runBlocking {
+        val email = "horizon-store-history-durability-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(email, "a phrase with a long status history")
+
+        val transitionCount = 25
+        val expectedStates = (1..transitionCount).map { i -> if (i % 2 == 1) "open" else "resolved" }
+        expectedStates.forEachIndexed { index, _ ->
+            val status = if (index % 2 == 0) AssertionStatus.OPEN else AssertionStatus.RESOLVED
+            assertTrue(store.markAssertionStatus(email, cycleSeq = (index + 1).toLong(), phraseUid = phraseUid, status = status))
+        }
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        val history = Json { ignoreUnknownKeys = true }
+            .decodeFromString<List<StatusHistoryEntry>>(edge.get("statusHistory") as String)
+        assertEquals(transitionCount, history.size, "every one of the $transitionCount transitions must be preserved, not capped at 20")
+        assertEquals(expectedStates, history.map { it.state })
     }
 }

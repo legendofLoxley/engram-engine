@@ -79,10 +79,6 @@ class ArcadeHorizonGraphStore(
     private val logger = LoggerFactory.getLogger(ArcadeHorizonGraphStore::class.java)
     private val json = Json { ignoreUnknownKeys = true }
 
-    companion object {
-        private const val MAX_STATUS_HISTORY_ENTRIES = 20
-    }
-
     override suspend fun ingestEnvironmentSignal(
         userEmail: String,
         cycleSeq: Long,
@@ -159,8 +155,14 @@ class ArcadeHorizonGraphStore(
                             continue
                         }
                         val mutableEdge = edge.modify()
+                        // Durable audit trail — every transition is kept forever, not just the most
+                        // recent N. Nothing reads this back through HorizonAssembler today (it is
+                        // not part of ContextHorizon); if a future read path ever surfaces it, that
+                        // path applies its own bound at read time, the same way HorizonAssembler
+                        // already bounds every other inlined field — the durable graph record is
+                        // never the place to lose history to a serialization-size concern.
                         val history = parseStatusHistory(mutableEdge.get("statusHistory") as? String)
-                        val updated = (history + StatusHistoryEntry(stateValue, now)).takeLast(MAX_STATUS_HISTORY_ENTRIES)
+                        val updated = history + StatusHistoryEntry(stateValue, now)
                         mutableEdge.set("status", stateValue)
                         mutableEdge.set("statusHistory", json.encodeToString(updated))
                         // statusCycleSeq tracks the MOST RECENT status change — deliberately distinct
@@ -239,9 +241,21 @@ class ArcadeHorizonGraphStore(
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * Reuse is scoped to a Source this *specific* [userVertex] already trusts, matched on both
+     * [sourceName] and [ENVIRONMENT_SOURCE_TYPE] — never a global name lookup. A global lookup
+     * (the prior implementation) would hand two different users the same Source vertex whenever
+     * they happened to use the same [sourceName]: the second user's phrase would be asserted from a
+     * Source the *first* user trusts (and the second user does not, since the early-return skipped
+     * creating their own `TRUSTS` edge), making the second user's "private" event invisible to
+     * themselves and visible to the first user's [HorizonAssembler.assemble] — a real cross-user
+     * leak, not merely a naming collision. Traversal is bounded by this user's own `TRUSTS`
+     * out-degree, which is small (see [HorizonOwnership.trustedSourceUids]).
+     */
     private fun findOrCreateEnvironmentSource(userVertex: Vertex, sourceName: String, metadata: String): Vertex {
-        val existing = db.query("sql", "SELECT FROM Source WHERE name = :name", mapOf("name" to sourceName))
-            .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null }
+        val existing = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
+            .firstOrNull { it.get("name") == sourceName && it.get("type") == ENVIRONMENT_SOURCE_TYPE }
+            ?.modify()
         if (existing != null) return existing
         val sourceVertex = db.newVertex("Source").apply {
             set("uid", UUID.randomUUID().toString())

@@ -31,7 +31,7 @@ object HorizonLimits {
     /**
      * The total budget on a [ContextHorizon]'s serialized (JSON, `kotlinx.serialization` — the
      * format this codebase already uses for every other outbound payload) UTF-8-encoded byte size,
-     * at worst-case population. Every collection ([HorizonBudget.DEFAULT.maxItems] items,
+     * at worst-case population for a given [maxItems]. Every collection ([maxItems] items,
      * [MAX_SOURCE_REFS_PER_ITEM] refs each, [OMITTED_SAMPLE_CAP] omitted entries) and every inlined
      * text field ([MAX_ITEM_TEXT_LENGTH] chars, `+1` for the truncation ellipsis) is already fixed
      * regardless of graph size — this is a byte-denominated restatement of that same bound, sized
@@ -42,15 +42,20 @@ object HorizonLimits {
      * evidence this holds even under adversarial escaping/multibyte content). `refFieldCeiling`
      * generously covers a `SourceRef`'s uid/type fields plus its JSON field-name/punctuation
      * overhead; `perItemStructuralCeiling` covers a `HorizonItem`'s own field names/punctuation.
+     * Scales with [maxItems] rather than a fixed constant so a caller requesting a nondefault item
+     * budget (via [HorizonBudget.maxItems]) is checked against a correspondingly sized ceiling, not
+     * silently held to the default's — [ArcadeHorizonAssembler] enforces this at assembly time.
      */
     private const val BYTES_PER_UTF16_UNIT_WORST_CASE = 3
     private const val REF_FIELD_CEILING_BYTES = 200
     private const val PER_ITEM_STRUCTURAL_CEILING_BYTES = 300
-    val MAX_SERIALIZED_HORIZON_BYTES: Int = run {
+    private const val TOP_LEVEL_STRUCTURAL_CEILING_BYTES = 1_000
+    fun serializedByteBudget(maxItems: Int): Int {
         val perItemTextBytes = 2 * (MAX_ITEM_TEXT_LENGTH + 1) * BYTES_PER_UTF16_UNIT_WORST_CASE // item text + reactivation triggering text
         val perItemBytes = perItemTextBytes + MAX_SOURCE_REFS_PER_ITEM * REF_FIELD_CEILING_BYTES + PER_ITEM_STRUCTURAL_CEILING_BYTES
-        HorizonBudget.DEFAULT.maxItems * perItemBytes + OMITTED_SAMPLE_CAP * REF_FIELD_CEILING_BYTES + 1_000 // + fixed top-level overhead
+        return maxItems * perItemBytes + OMITTED_SAMPLE_CAP * REF_FIELD_CEILING_BYTES + TOP_LEVEL_STRUCTURAL_CEILING_BYTES
     }
+    val MAX_SERIALIZED_HORIZON_BYTES: Int = serializedByteBudget(HorizonBudget.DEFAULT.maxItems)
 }
 
 /** What kind of content this is — independent of its lifecycle, why it surfaced, or who asserted it. */

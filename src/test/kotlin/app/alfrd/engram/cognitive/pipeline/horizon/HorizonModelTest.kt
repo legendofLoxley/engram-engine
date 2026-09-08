@@ -58,4 +58,21 @@ class HorizonModelTest {
         assertTrue(!exact.truncated)
         assertEquals(HorizonLimits.MAX_ITEM_TEXT_LENGTH, exact.text.length)
     }
+
+    /**
+     * The byte budget [ArcadeHorizonAssembler.assemble] enforces must scale with the caller's own
+     * `budget.maxItems`, not stay pinned to [HorizonBudget.DEFAULT]'s — a caller requesting a larger
+     * item budget needs a correspondingly larger ceiling, or a legitimate larger result would be
+     * wrongly rejected/truncated as if it were oversized.
+     */
+    @Test
+    fun `serializedByteBudget scales with maxItems rather than a fixed default`() {
+        val defaultBudget = HorizonLimits.serializedByteBudget(HorizonBudget.DEFAULT.maxItems)
+        val largerBudget = HorizonLimits.serializedByteBudget(HorizonBudget.DEFAULT.maxItems * 4)
+        val smallerBudget = HorizonLimits.serializedByteBudget(1)
+
+        assertEquals(HorizonLimits.MAX_SERIALIZED_HORIZON_BYTES, defaultBudget)
+        assertTrue(largerBudget > defaultBudget, "a larger maxItems must get a larger byte ceiling")
+        assertTrue(smallerBudget < defaultBudget, "a smaller maxItems must get a smaller byte ceiling")
+    }
 }

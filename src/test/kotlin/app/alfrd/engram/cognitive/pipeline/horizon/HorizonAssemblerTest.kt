@@ -426,6 +426,172 @@ class HorizonAssemblerTest {
         assertTrue(allText.none { it.contains("attack-payload") }, "user B's phrase text must never appear anywhere in user A's snapshot")
     }
 
+    // ── Cross-user Source isolation: same sourceName, different users ────────────────────────────
+
+    /**
+     * Regression test for a real cross-user leak: [ArcadeHorizonGraphStore.findOrCreateEnvironmentSource]
+     * used to look up a reusable Source by [sourceName] alone, globally — so two different users
+     * calling [HorizonGraphStore.ingestEnvironmentSignal] with the same [sourceName] would share one
+     * Source vertex. The second user's phrase would then be asserted from a Source only the FIRST
+     * user trusts (the early-return path skipped creating the second user's own `TRUSTS` edge),
+     * making the second user's "private" event invisible to themselves and visible in the first
+     * user's [HorizonAssembler.assemble] snapshot. Fixed by scoping reuse to a Source the specific
+     * calling user already trusts, matched on name AND type.
+     */
+    @Test
+    fun `two users ingesting different private events under the same source name get separate, non-leaking Sources`() = runBlocking {
+        val emailA = "horizon-source-iso-a-${UUID.randomUUID()}@test.alfrd.internal"
+        val emailB = "horizon-source-iso-b-${UUID.randomUUID()}@test.alfrd.internal"
+        val sharedSourceName = "environment:shared-build-system"
+        // ingestEnvironmentSignal requires an existing User vertex — it does not create one.
+        seedConversationalPhraseWithCycle(emailA, "unrelated seed so A's User vertex exists", cycleSeq = 0)
+        seedConversationalPhraseWithCycle(emailB, "unrelated seed so B's User vertex exists", cycleSeq = 0)
+
+        val uidA = store.ingestEnvironmentSignal(emailA, cycleSeq = 1, sourceName = sharedSourceName, text = "A's private build event")!!
+        val uidB = store.ingestEnvironmentSignal(emailB, cycleSeq = 1, sourceName = sharedSourceName, text = "B's private build event")!!
+        assertTrue(uidA != uidB)
+
+        val db = dbManager.getDatabase()
+        val sourceUidsA = HorizonOwnership.trustedSourceUids(db, emailA)
+        val sourceUidsB = HorizonOwnership.trustedSourceUids(db, emailB)
+        assertTrue(sourceUidsA.none { it in sourceUidsB }, "each user must trust their own separate Source vertex, never a shared one")
+
+        val horizonA = assembler.assemble(emailA, currentCycleSeq = 1).expectSuccess()
+        val horizonB = assembler.assemble(emailB, currentCycleSeq = 1).expectSuccess()
+        assertTrue(horizonA.items.any { it.sourceRefs.first().phraseUid == uidA }, "user A must see their own event")
+        assertTrue(horizonB.items.any { it.sourceRefs.first().phraseUid == uidB }, "user B must see their own event")
+        assertTrue(horizonA.items.none { it.sourceRefs.first().phraseUid == uidB }, "user A must never see user B's event")
+        assertTrue(horizonB.items.none { it.sourceRefs.first().phraseUid == uidA }, "user B must never see user A's event")
+        assertTrue(horizonA.items.none { it.text.text.contains("B's private") }, "user A's snapshot must never contain user B's text")
+        assertTrue(horizonB.items.none { it.text.text.contains("A's private") }, "user B's snapshot must never contain user A's text")
+    }
+
+    // ── Independently bounded active-relevance candidate path ────────────────────────────────────
+
+    /**
+     * Regression test: [ArcadeHorizonAssembler]'s reactivation lookup used to be restricted to
+     * phrases already selected by the open/fresh candidate pools — so a `relevant_to` edge targeting
+     * a phrase ranked below those pools' own bounded `LIMIT` (e.g. a very old open item) was silently
+     * never reactivated. Fixed by [ArcadeHorizonAssembler.queryActiveReactivations] querying
+     * `relevant_to` edges directly, independent of the open/fresh pools, and admitting any newly
+     * found target as a full candidate via [ArcadeHorizonAssembler.queryAssertsForPhrase].
+     */
+    @Test
+    fun `an old item ranked below the open pool's own limit is still found and reactivated via the independent path`() = runBlocking {
+        val email = "horizon-independent-reactivation-${UUID.randomUUID()}@test.alfrd.internal"
+        // maxItems=1 -> poolLimit = 1 * CANDIDATE_POOL_OVERFETCH(3) = 3. Seed 4 open items so the
+        // oldest-by-statusCycleSeq one (the reactivation target) ranks 4th and is excluded from the
+        // open pool's top-3 (ORDER BY statusCycleSeq DESC LIMIT 3).
+        val budget = HorizonBudget(maxItems = 1, itemCount = 0, truncated = false)
+        val targetUid = seedConversationalPhraseWithCycle(email, "old target item", cycleSeq = 1)
+        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = targetUid, status = AssertionStatus.OPEN)
+        (2..4).forEach { i ->
+            val uid = seedConversationalPhraseWithCycle(email, "filler open item $i", cycleSeq = i.toLong())
+            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+        }
+
+        // Test setup sanity check: confirm the target is genuinely excluded from the bounded pool
+        // absent any reactivation — otherwise this test would prove nothing about the independent path.
+        val withoutReactivation = assembler.assemble(email, currentCycleSeq = 4, budget = budget).expectSuccess()
+        assertTrue(
+            withoutReactivation.items.none { it.sourceRefs.first().phraseUid == targetUid },
+            "test setup: the target must be excluded from the open pool before reactivation",
+        )
+
+        val triggerUid = seedConversationalPhraseWithCycle(email, "fresh trigger", cycleSeq = 5)
+        assertTrue(store.markRelevant(email, cycleSeq = 5, fromPhraseUid = triggerUid, toPhraseUid = targetUid))
+
+        val horizon = assembler.assemble(email, currentCycleSeq = 5, activeRelevanceCycles = 3, budget = budget).expectSuccess()
+        assertEquals(1, horizon.items.size, "ActiveReactivation outranks everything else, so the reactivated target must be the sole kept item")
+        val item = horizon.items.single()
+        assertEquals(targetUid, item.sourceRefs.first().phraseUid)
+        assertTrue(item.surfacing is SurfacingReason.ActiveReactivation, "expected ActiveReactivation, got: ${item.surfacing}")
+        assertEquals(triggerUid, (item.surfacing as SurfacingReason.ActiveReactivation).info.triggeringPhraseUid)
+    }
+
+    // ── Distinct failure modes: consistency, query error, and byte budget are never conflated ─────
+
+    @Test
+    fun `assemble returns an explicit QueryFailure on a genuine database error, distinguishable from a legitimately empty graph`() = runBlocking {
+        val email = "horizon-query-failure-${UUID.randomUUID()}@test.alfrd.internal"
+        seedConversationalPhraseWithCycle(email, "some phrase", cycleSeq = 1)
+        dbManager.getDatabase().close() // forces every subsequent query/transaction on this handle to throw
+
+        val outcome = assembler.assemble(email, currentCycleSeq = 1)
+        assertTrue(outcome is AssembleOutcome.QueryFailure, "expected QueryFailure on a real database error, got: $outcome")
+    }
+
+    @Test
+    fun `assemble returns Assembled with an empty item list for a legitimately empty graph, never conflated with a query error`() = runBlocking {
+        val email = "horizon-legitimately-empty-${UUID.randomUUID()}@test.alfrd.internal"
+        // No data seeded at all for this user — not even a User vertex.
+        val outcome = assembler.assemble(email, currentCycleSeq = 1)
+        assertTrue(outcome is AssembleOutcome.Assembled, "a user with no data yet must be a successful, empty Assembled result, got: $outcome")
+        assertTrue((outcome as AssembleOutcome.Assembled).horizon.items.isEmpty())
+    }
+
+    // ── Serialized-output byte budget is enforced, not merely documented ─────────────────────────
+
+    @Test
+    fun `assemble drops lowest-priority items to fit a real byte budget, preserving evidence for what was dropped`() = runBlocking {
+        val email = "horizon-byte-enforce-${UUID.randomUUID()}@test.alfrd.internal"
+        val budget = HorizonBudget(maxItems = 5, itemCount = 0, truncated = false)
+        val uids = (1..5).map { i ->
+            val uid = seedConversationalPhraseWithCycle(email, "moderately long open item text number $i", cycleSeq = i.toLong())
+            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            uid
+        }
+
+        // First measure what an unconstrained assembly actually encodes to, so the override budget
+        // below is derived from a real measurement (enough for ~2 items, not all 5) rather than a
+        // guessed magic number.
+        val assemblerImpl = assembler as ArcadeHorizonAssembler
+        val unconstrained = assemblerImpl.assemble(email, currentCycleSeq = 5, budget = budget).expectSuccess()
+        assertEquals(5, unconstrained.items.size, "test setup: all 5 items must fit under the default byte budget")
+        val json = Json { encodeDefaults = true }
+        val fullBytes = json.encodeToString(unconstrained).toByteArray(Charsets.UTF_8).size
+        val twoItemsBytes = json.encodeToString(unconstrained.copy(items = unconstrained.items.take(2))).toByteArray(Charsets.UTF_8).size
+        val tightBudget = (fullBytes + twoItemsBytes) / 2 // strictly between "2 items" and "all 5 items" in size
+
+        assemblerImpl.testByteBudgetOverride = tightBudget
+        try {
+            val constrained = assemblerImpl.assemble(email, currentCycleSeq = 5, budget = budget).expectSuccess()
+            assertTrue(constrained.items.size < 5, "the byte budget must actually reduce the item count below what the item-count budget alone would keep")
+            assertTrue(constrained.budget.truncated)
+            val encodedSize = json.encodeToString(constrained).toByteArray(Charsets.UTF_8).size
+            assertTrue(encodedSize <= tightBudget, "the enforced result ($encodedSize bytes) must actually fit the override budget ($tightBudget bytes)")
+
+            // Evidence preserved: every item dropped for the byte budget is still traceable via
+            // omittedSample/omittedAtLeast, resolving to a real seeded phrase — never silently lost.
+            assertTrue(constrained.omittedAtLeast > 0)
+            constrained.omittedSample.forEach { omitted ->
+                assertTrue(omitted.sourceRef.phraseUid in uids, "every byte-budget-dropped item must resolve to a real seeded phrase")
+            }
+        } finally {
+            assemblerImpl.testByteBudgetOverride = null
+        }
+    }
+
+    @Test
+    fun `assemble returns an explicit BudgetExceeded when even zero items fits the byte budget, never an oversized snapshot`() = runBlocking {
+        val email = "horizon-byte-exceeded-${UUID.randomUUID()}@test.alfrd.internal"
+        val uid = seedConversationalPhraseWithCycle(email, "an item", cycleSeq = 1)
+        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = uid, status = AssertionStatus.OPEN)
+
+        val assemblerImpl = assembler as ArcadeHorizonAssembler
+        assemblerImpl.testByteBudgetOverride = 10 // even an empty ContextHorizon's JSON metadata exceeds this
+        try {
+            val outcome = assemblerImpl.assemble(email, currentCycleSeq = 1)
+            assertTrue(outcome is AssembleOutcome.BudgetExceeded, "expected BudgetExceeded, got: $outcome")
+        } finally {
+            assemblerImpl.testByteBudgetOverride = null
+        }
+
+        // Once the override is cleared, an ordinary call succeeds normally.
+        val recovered = assemblerImpl.assemble(email, currentCycleSeq = 1)
+        assertTrue(recovered is AssembleOutcome.Assembled, "expected assembly to succeed once the byte budget is realistic again, got: $recovered")
+    }
+
     // ── Bounded output: honest lower-bound accounting, never an unbounded list ───────────────────
 
     @Test
@@ -700,6 +866,68 @@ class HorizonAssemblerTest {
         } while (cursor != null)
 
         assertEquals(seededUids, collected)
+    }
+
+    /**
+     * Regression test: continuation used to be decided by the CATEGORY-FILTERED row count
+     * (`rows.size == limit`), not the raw pre-filter page size. A raw page whose rows all happened
+     * to fail the category filter came back with `rows.size == 0`, which `!= limit`, so
+     * `nextCursor` was set to `null` — silently terminating pagination even though later raw pages
+     * held real matches. Fixed by basing continuation on the raw row count instead.
+     */
+    @Test
+    fun `listCandidates continues past a raw page whose rows all fail the category filter, reaching later matching records`() = runBlocking {
+        val email = "horizon-paging-category-${UUID.randomUUID()}@test.alfrd.internal"
+        seedConversationalPhraseWithCycle(email, "unrelated seed so the User vertex exists", cycleSeq = 0)
+        // 5 ENVIRONMENT_EVENT items at the most recent cycles sort first (ORDER BY cycleSeq DESC)
+        // and form the entire first raw page at limit=5 — none of them match the INTENTION filter
+        // used below.
+        (10..14).forEach { i ->
+            assertTrue(store.ingestEnvironmentSignal(email, cycleSeq = i.toLong(), sourceName = "environment:noise-$i", text = "environment noise $i") != null)
+        }
+        // 5 INTENTION (open) items at older cycles land on a LATER raw page.
+        val intentionUids = (1..5).map { i ->
+            val uid = seedConversationalPhraseWithCycle(email, "intention $i", cycleSeq = i.toLong())
+            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            uid
+        }.toSet()
+
+        val collected = mutableSetOf<String>()
+        var cursor: String? = null
+        var pages = 0
+        do {
+            val page = assembler.listCandidates(email, category = HorizonItemCategory.INTENTION, limit = 5, cursor = cursor)
+            collected += page.items.map { it.phraseUid }
+            cursor = page.nextCursor
+            pages++
+            assertTrue(pages < 100, "pagination must terminate")
+        } while (cursor != null)
+
+        assertEquals(intentionUids, collected, "every INTENTION item must still be reached even though the first raw page was entirely non-matching")
+    }
+
+    /** Without a deterministic tiebreaker, SKIP/LIMIT paging one row at a time over cycleSeq-tied rows is not guaranteed to visit each row exactly once. */
+    @Test
+    fun `listCandidates pagination is stable across a cycleSeq tie via the phraseUid tiebreaker`() = runBlocking {
+        val email = "horizon-paging-tie-${UUID.randomUUID()}@test.alfrd.internal"
+        val uids = (1..2).map {
+            val uid = seedConversationalPhraseWithCycle(email, "tied item $it", cycleSeq = 1)
+            store.markAssertionStatus(email, cycleSeq = 1, phraseUid = uid, status = AssertionStatus.OPEN)
+            uid
+        }.toSet()
+
+        val collected = mutableSetOf<String>()
+        var cursor: String? = null
+        var pages = 0
+        do {
+            val page = assembler.listCandidates(email, status = AssertionStatus.OPEN, limit = 1, cursor = cursor)
+            collected += page.items.map { it.phraseUid }
+            cursor = page.nextCursor
+            pages++
+            assertTrue(pages < 100, "pagination must terminate")
+        } while (cursor != null)
+
+        assertEquals(uids, collected, "both cycleSeq-tied items must be visited exactly once across pages")
     }
 
     // ── Restart/rebuild equivalence ────────────────────────────────────────────────────────────
