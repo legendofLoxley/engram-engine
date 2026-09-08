@@ -199,7 +199,7 @@ class ArcadeHorizonGraphStore(
                 db.transaction {
                     val from = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, fromPhraseUid) ?: return@transaction
                     val to = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, toPhraseUid) ?: return@transaction
-                    RelatedToEdges.createRelevantTo(from.modify(), to.modify(), strength, cycleSeq, System.currentTimeMillis())
+                    RelatedToEdges.createRelevantTo(from.modify(), to.modify(), strength, cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail)
                     success = true
                 }
                 success
@@ -225,7 +225,7 @@ class ArcadeHorizonGraphStore(
                 db.transaction {
                     val newer = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, newerPhraseUid) ?: return@transaction
                     val older = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, olderPhraseUid) ?: return@transaction
-                    RelatedToEdges.createSupersedes(newer.modify(), older.modify(), cycleSeq, System.currentTimeMillis())
+                    RelatedToEdges.createSupersedes(newer.modify(), older.modify(), cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail)
                     success = true
                 }
                 success

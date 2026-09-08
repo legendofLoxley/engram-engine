@@ -15,13 +15,20 @@ import com.arcadedb.graph.Vertex
  */
 object RelatedToEdges {
 
-    /** newer ([from]) -RELATED_TO(relevant_to)-> older ([to]). Read backward from [to] to find what's just made it relevant. */
-    fun createRelevantTo(from: Vertex, to: Vertex, strength: Double, cycleSeq: Long, createdAt: Long): Edge =
+    /**
+     * newer ([from]) -RELATED_TO(relevant_to)-> older ([to]). Read backward from [to] to find what's
+     * just made it relevant. [ownerEmail] is the caller-validated user both endpoints belong to —
+     * stamped so [ArcadeHorizonAssembler.queryActiveReactivations] can scope its candidate query to
+     * one user via an index, before `LIMIT` is applied, rather than after. A scoping aid only, never
+     * trusted on its own by the read path — see that property's schema doc.
+     */
+    fun createRelevantTo(from: Vertex, to: Vertex, strength: Double, cycleSeq: Long, createdAt: Long, ownerEmail: String): Edge =
         from.newEdge("RELATED_TO", to, true).apply {
             set("relationType", "relevant_to")
             set("strength", strength)
             set("cycleSeq", cycleSeq)
             set("createdAt", createdAt)
+            set("ownerEmail", ownerEmail)
             save()
         }
 
@@ -29,14 +36,15 @@ object RelatedToEdges {
      * newer ([newer]) -RELATED_TO(supersedes)-> older ([older]). "Current" = the phrase among a
      * candidate group with no *incoming* `supersedes` edge — see [resolveCurrent], which is why
      * this also needs `bidirectional=true`, not the `false` every other `RELATED_TO` relationType
-     * uses.
+     * uses. [ownerEmail] — see [createRelevantTo].
      */
-    fun createSupersedes(newer: Vertex, older: Vertex, cycleSeq: Long, createdAt: Long): Edge =
+    fun createSupersedes(newer: Vertex, older: Vertex, cycleSeq: Long, createdAt: Long, ownerEmail: String): Edge =
         newer.newEdge("RELATED_TO", older, true).apply {
             set("relationType", "supersedes")
             set("strength", 1.0)
             set("cycleSeq", cycleSeq)
             set("createdAt", createdAt)
+            set("ownerEmail", ownerEmail)
             save()
         }
 

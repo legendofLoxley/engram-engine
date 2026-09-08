@@ -181,59 +181,72 @@ class ArcadeHorizonAssembler(
             val horizonOrNull: ContextHorizon? = withHorizonReadLock(db, lockTimeoutMs) {
                 var result = empty
                 db.transaction {
-                    val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@transaction
-                    val sourceUids = trustedSourceUids(userVertex)
-                    if (sourceUids.isEmpty()) return@transaction
+                    val userVertex = HorizonOwnership.findUserVertex(db, userEmail)
+                    val sourceUids = userVertex?.let { trustedSourceUids(it) } ?: emptyList()
 
-                    // Bounded over-fetch pools — cost is a function of poolLimit and sourceUids
-                    // (small, one per source type per user), not total graph size. The open-status
-                    // branch is confirmed (by direct execution-plan inspection, not timing alone —
-                    // see debugOpenPoolExecutionSteps and its test) to use the ASSERTS[status] index
-                    // rather than a full type scan.
-                    val poolLimit = budget.maxItems * HorizonLimits.CANDIDATE_POOL_OVERFETCH
-                    val openPool = queryAsserts(sourceUids, statusFilter = "open", cycleSeqFilter = null, currentCycleSeq = currentCycleSeq, limit = poolLimit)
-                    val freshPool = queryAsserts(sourceUids, statusFilter = null, cycleSeqFilter = currentCycleSeq, currentCycleSeq = currentCycleSeq, limit = poolLimit)
-                    var moreCandidatesAvailable = openPool.size >= poolLimit || freshPool.size >= poolLimit
+                    // A missing user or a user with no trusted sources both fall through with an
+                    // empty candidate list rather than an early `return@transaction` — every path,
+                    // populated or not, must reach the SAME byte-budget enforcement below. An early
+                    // return here used to skip that enforcement entirely, so a budget too small even
+                    // for a genuinely empty ContextHorizon would silently succeed as Assembled for
+                    // these two paths while correctly failing for a populated one — inconsistent
+                    // behavior depending only on whether the user happened to have data.
+                    var moreCandidatesAvailable = false
+                    val prioritized: List<HorizonItem>
+                    if (sourceUids.isEmpty()) {
+                        prioritized = emptyList()
+                    } else {
+                        // Bounded over-fetch pools — cost is a function of poolLimit and sourceUids
+                        // (small, one per source type per user), not total graph size. The
+                        // open-status branch is confirmed (by direct execution-plan inspection, not
+                        // timing alone — see debugOpenPoolExecutionSteps and its test) to use the
+                        // ASSERTS[status] index rather than a full type scan.
+                        val poolLimit = budget.maxItems * HorizonLimits.CANDIDATE_POOL_OVERFETCH
+                        val openPool = queryAsserts(sourceUids, statusFilter = "open", cycleSeqFilter = null, currentCycleSeq = currentCycleSeq, limit = poolLimit)
+                        val freshPool = queryAsserts(sourceUids, statusFilter = null, cycleSeqFilter = currentCycleSeq, currentCycleSeq = currentCycleSeq, limit = poolLimit)
+                        moreCandidatesAvailable = openPool.size >= poolLimit || freshPool.size >= poolLimit
 
-                    val byUid = LinkedHashMap<String, RawCandidate>()
-                    for (c in openPool) byUid[c.phraseUid] = c
-                    for (c in freshPool) byUid.putIfAbsent(c.phraseUid, c)
+                        val byUid = LinkedHashMap<String, RawCandidate>()
+                        for (c in openPool) byUid[c.phraseUid] = c
+                        for (c in freshPool) byUid.putIfAbsent(c.phraseUid, c)
 
-                    testMidAssemblySync?.invoke()
+                        testMidAssemblySync?.invoke()
 
-                    // Independently bounded active-relevance candidate path (see
-                    // queryActiveReactivations doc): a fresh relevant_to edge can target a phrase
-                    // that never made it into either pool above (e.g. a very old open item ranked
-                    // below poolLimit, or a resolved item being reactivated) — such a target is
-                    // still admitted as a candidate here, not silently missed.
-                    val minCycle = currentCycleSeq - activeRelevanceCycles
-                    val reactivationResult = queryActiveReactivations(userEmail, minCycle, currentCycleSeq, now, activeRelevanceWallClock, poolLimit)
-                    if (reactivationResult.hitLimit) moreCandidatesAvailable = true
-                    for (targetUid in reactivationResult.infoByTargetUid.keys) {
-                        if (byUid.containsKey(targetUid)) continue
-                        val extra = queryAssertsForPhrase(sourceUids, targetUid) ?: continue
-                        byUid[targetUid] = extra
+                        // Independently bounded active-relevance candidate path (see
+                        // queryActiveReactivations doc): a fresh relevant_to edge can target a
+                        // phrase that never made it into either pool above (e.g. a very old open
+                        // item ranked below poolLimit, or a resolved item being reactivated) — such
+                        // a target is still admitted as a candidate here, not silently missed.
+                        val minCycle = currentCycleSeq - activeRelevanceCycles
+                        val reactivationResult = queryActiveReactivations(userEmail, minCycle, currentCycleSeq, now, activeRelevanceWallClock, poolLimit)
+                        if (reactivationResult.hitLimit) moreCandidatesAvailable = true
+                        for (targetUid in reactivationResult.infoByTargetUid.keys) {
+                            if (byUid.containsKey(targetUid)) continue
+                            val extra = queryAssertsForPhrase(sourceUids, targetUid) ?: continue
+                            byUid[targetUid] = extra
+                        }
+
+                        // Defense in depth alongside the SQL-level exclusion in queryAsserts: any
+                        // candidate whose original assertion or last status change is somehow ahead
+                        // of the cycle being assembled (a caller sequencing bug, or a write that
+                        // bypassed HorizonGraphStore) is dropped here too, rather than being
+                        // misclassified as JustAsserted/DormantOpen. Runs after the reactivation
+                        // merge so an independently-fetched candidate gets the same guard.
+                        byUid.entries.removeAll { (_, c) ->
+                            c.cycleSeq > currentCycleSeq || (c.statusCycleSeq != null && c.statusCycleSeq > currentCycleSeq)
+                        }
+
+                        val classified = byUid.values.map { c -> toHorizonItem(c, currentCycleSeq, reactivationResult.infoByTargetUid[c.phraseUid]) }
+                        prioritized = classified.sortedWith(
+                            compareBy<HorizonItem> { priorityRank(it.surfacing) }.thenByDescending { surfacingCycleSeq(it.surfacing) },
+                        )
                     }
-
-                    // Defense in depth alongside the SQL-level exclusion in queryAsserts: any
-                    // candidate whose original assertion or last status change is somehow ahead of
-                    // the cycle being assembled (a caller sequencing bug, or a write that bypassed
-                    // HorizonGraphStore) is dropped here too, rather than being misclassified as
-                    // JustAsserted/DormantOpen. Runs after the reactivation merge so an
-                    // independently-fetched candidate gets the same guard.
-                    byUid.entries.removeAll { (_, c) ->
-                        c.cycleSeq > currentCycleSeq || (c.statusCycleSeq != null && c.statusCycleSeq > currentCycleSeq)
-                    }
-
-                    val classified = byUid.values.map { c -> toHorizonItem(c, currentCycleSeq, reactivationResult.infoByTargetUid[c.phraseUid]) }
-                    val prioritized = classified.sortedWith(
-                        compareBy<HorizonItem> { priorityRank(it.surfacing) }.thenByDescending { surfacingCycleSeq(it.surfacing) },
-                    )
 
                     // Enforce the actual serialized-output byte budget, not just item count —
                     // measured against the real kotlinx.serialization JSON encoding of the COMPLETE
-                    // structure (metadata included), scaled to this call's own budget.maxItems.
-                    // Items are dropped from the tail (lowest priority first) and moved into
+                    // structure (metadata included), scaled to this call's own budget.maxItems. Runs
+                    // unconditionally for every path above, populated or empty. Items are dropped
+                    // from the tail (lowest priority first) and moved into
                     // omittedSample/omittedAtLeast — never silently discarded — until the encoded
                     // payload fits. If even zero items doesn't fit, budgetExceeded signals the outer
                     // scope to return AssembleOutcome.BudgetExceeded instead of an oversized result.
@@ -470,30 +483,33 @@ class ArcadeHorizonAssembler(
     private data class ReactivationQueryResult(val infoByTargetUid: Map<String, ReactivationInfo>, val hitLimit: Boolean)
 
     /**
-     * Active `relevant_to` reactivations within `[minCycle, currentCycleSeq]`, bounded by [limit] —
-     * **independently** of [ArcadeHorizonAssembler.assemble]'s open/fresh candidate pools, not
-     * restricted to phrases they already selected. A target ranked below those pools' own `LIMIT`
-     * (e.g. a very old open item, or a resolved item being reactivated) would otherwise never be
-     * found: restricting this lookup to an already-bounded candidate set (a prior version of this
-     * method) silently missed exactly that case. Both the trigger *and* the target of each candidate
-     * edge are independently verified as owned by [userEmail] before being trusted — defense in
-     * depth: even a cross-user edge injected outside [HorizonGraphStore] (a bug or bad migration) is
-     * refused here rather than leaking another user's phrase text or reactivating another user's
-     * item. [hitLimit] mirrors [ArcadeHorizonAssembler]'s other bounded pools: true if the raw
-     * (pre-ownership-filter) row count hit [limit], signaling more candidates may exist beyond what
-     * was inspected at all.
+     * Active `relevant_to` reactivations within `[minCycle, currentCycleSeq]` for [userEmail],
+     * bounded by [limit] — **independently** of [ArcadeHorizonAssembler.assemble]'s open/fresh
+     * candidate pools, not restricted to phrases they already selected. A target ranked below those
+     * pools' own `LIMIT` (e.g. a very old open item, or a resolved item being reactivated) would
+     * otherwise never be found: restricting this lookup to an already-bounded candidate set (a prior
+     * version of this method) silently missed exactly that case.
      *
-     * **Known scope limitation, stated rather than hidden:** this query bounds by `cycleSeq` value
-     * and [limit] alone, not pre-scoped to [userEmail]'s own sources before the `LIMIT` is applied —
-     * `cycleSeq` is a per-user monotonic counter with no cross-user namespacing (see
-     * [HorizonGraphStore]'s doc), so the numeric range can, in principle, also match other users'
-     * edges, which are then filtered out by the ownership check below. In a busy multi-tenant graph
-     * where many *other* users' `relevant_to` edges happen to land in this exact numeric `cycleSeq`
-     * range, they could crowd this user's own edges out of the `limit` window before ownership
-     * filtering ever runs. This foundation increment accepts that tradeoff rather than pre-fetching
-     * a user's full historical phrase set to scope the query first — itself unbounded by
-     * construction (see [HorizonGraphStore]'s documented "edges accumulating on a single long-lived
-     * Source" risk), which would trade one bounded-cost concern for a worse one.
+     * **Scoped to [userEmail] before `LIMIT`, via an index, not after.** The query filters on
+     * `RELATED_TO.ownerEmail` — stamped by [HorizonGraphStore]'s writers at edge-creation time from
+     * the already-validated caller, and backed by the composite `(ownerEmail, relationType,
+     * cycleSeq)` index (see `SchemaBootstrap`) — so `LIMIT` applies only to this user's own
+     * candidate edges. An earlier version filtered by `cycleSeq` range alone (a per-user counter
+     * with no cross-user namespacing) and applied `LIMIT` before any ownership check, so a busy
+     * multi-tenant graph could let many *other* users' edges crowd this user's own out of the
+     * window entirely, before their existence was ever checked. Scoping by an indexed `ownerEmail`
+     * fixes that without pre-fetching this user's full historical phrase set (itself unbounded by
+     * construction — see [HorizonGraphStore]'s documented "edges accumulating on a single
+     * long-lived Source" risk).
+     *
+     * **The `ownerEmail` stamp is a scoping aid, never trusted on its own.** Both the trigger *and*
+     * the target of each candidate edge are still independently re-verified as owned by [userEmail]
+     * via [HorizonOwnership] before being trusted — defense in depth against a stamp that is stale,
+     * wrong, or bypassed entirely by a writer that doesn't go through [HorizonGraphStore] (a bug or
+     * bad migration); such an edge is refused here rather than leaking another user's phrase text or
+     * reactivating another user's item, exactly as before this change. [hitLimit] mirrors
+     * [ArcadeHorizonAssembler]'s other bounded pools: true if the raw (pre-ownership-filter) row
+     * count hit [limit], signaling more candidates may exist beyond what was inspected at all.
      */
     private fun queryActiveReactivations(
         userEmail: String,
@@ -506,13 +522,13 @@ class ArcadeHorizonAssembler(
         val sql = """
             SELECT @out.uid as triggerUid, @out.text as triggerText, @in.uid as targetUid, strength, cycleSeq, createdAt
             FROM RELATED_TO
-            WHERE relationType = 'relevant_to' AND cycleSeq >= :minCycle AND cycleSeq <= :currentCycleSeq
+            WHERE ownerEmail = :ownerEmail AND relationType = 'relevant_to' AND cycleSeq >= :minCycle AND cycleSeq <= :currentCycleSeq
             ORDER BY cycleSeq DESC
             LIMIT :limit
         """.trimIndent()
         val rows = db.query(
             "sql", sql,
-            mapOf("minCycle" to minCycle, "currentCycleSeq" to currentCycleSeq, "limit" to limit),
+            mapOf("ownerEmail" to userEmail, "minCycle" to minCycle, "currentCycleSeq" to currentCycleSeq, "limit" to limit),
         ).use { rs ->
             val out = mutableListOf<Map<String, Any?>>()
             while (rs.hasNext()) out += rs.next().toMap()

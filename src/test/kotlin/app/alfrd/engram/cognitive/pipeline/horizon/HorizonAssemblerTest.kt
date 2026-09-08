@@ -106,6 +106,23 @@ class HorizonAssemblerTest {
     private fun seedConversationalPhraseWithCycle(email: String, text: String, cycleSeq: Long): String =
         seedConversationalPhraseWithCycle(dbManager.getDatabase(), email, text, cycleSeq)
 
+    /** A real User vertex that trusts no Source at all — distinct from a missing user entirely. */
+    private fun seedBareUser(email: String) {
+        val db = dbManager.getDatabase()
+        val now = System.currentTimeMillis()
+        db.transaction {
+            db.newVertex("User").apply {
+                set("uid", UUID.randomUUID().toString())
+                set("username", email.substringBefore("@"))
+                set("email", email)
+                set("tier", -1)
+                set("createdAt", now)
+                set("updatedAt", now)
+                save()
+            }
+        }
+    }
+
     /** Unwraps a successful assembly, failing loudly (not silently) on an unexpected ConsistencyFailure. */
     private fun AssembleOutcome.expectSuccess(): ContextHorizon {
         check(this is AssembleOutcome.Assembled) { "expected a successful assembly, got: $this" }
@@ -409,7 +426,11 @@ class HorizonAssemblerTest {
                 .use { it.next().toElement().asVertex().modify() }
             val to = db.query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to arxUidA))
                 .use { it.next().toElement().asVertex().modify() }
-            RelatedToEdges.createRelevantTo(from, to, strength = 1.0, cycleSeq = 1, createdAt = System.currentTimeMillis())
+            // ownerEmail is stamped as emailA (the requesting user) despite the trigger actually
+            // belonging to emailB — simulating a writer bug that mislabels the scoping stamp, so
+            // this test proves the endpoint re-verification catches it, not merely the absence of a
+            // matching ownerEmail value.
+            RelatedToEdges.createRelevantTo(from, to, strength = 1.0, cycleSeq = 1, createdAt = System.currentTimeMillis(), ownerEmail = emailA)
         }
 
         val horizon = assembler.assemble(emailA, currentCycleSeq = 1).expectSuccess()
@@ -509,6 +530,52 @@ class HorizonAssemblerTest {
         assertEquals(triggerUid, (item.surfacing as SurfacingReason.ActiveReactivation).info.triggeringPhraseUid)
     }
 
+    /**
+     * Regression test: [ArcadeHorizonAssembler.queryActiveReactivations] used to apply a global
+     * `LIMIT` on `cycleSeq` range alone, before any ownership check — so another user's
+     * `relevant_to` edges landing in the exact same numeric `cycleSeq` window could fill the
+     * bounded window before the requesting user's own edge was ever inspected, silently excluding a
+     * genuine reactivation. Fixed by scoping the query on the indexed `ownerEmail` stamp before
+     * `LIMIT` is applied (see that method's doc). User B's noise edges here are created via the real
+     * [HorizonGraphStore.markRelevant] path (not a raw bypass) specifically so they carry a
+     * correctly-stamped `ownerEmail=B` — proving this is a *scoping* fix, not merely the existing
+     * endpoint-ownership defense catching a bad edge.
+     */
+    @Test
+    fun `reactivation lookup is scoped to the requesting user before LIMIT, not crowded out by another user's edges in the same cycle range`() = runBlocking {
+        val emailA = "horizon-reactivation-scope-a-${UUID.randomUUID()}@test.alfrd.internal"
+        val emailB = "horizon-reactivation-scope-b-${UUID.randomUUID()}@test.alfrd.internal"
+        // maxItems=1 -> poolLimit = 1 * CANDIDATE_POOL_OVERFETCH(3) = 3, so queryActiveReactivations
+        // is called with limit=3. User B seeds 5 relevant_to edges (> poolLimit) with cycleSeq
+        // strictly higher than A's own edge, all within A's own [minCycle, currentCycleSeq] window —
+        // under the old unscoped-before-LIMIT query, ORDER BY cycleSeq DESC LIMIT 3 would
+        // deterministically pick 3 of B's higher-cycleSeq edges and never even reach A's.
+        val budget = HorizonBudget(maxItems = 1, itemCount = 0, truncated = false)
+
+        val targetUidA = seedConversationalPhraseWithCycle(emailA, "A's old target item", cycleSeq = 1)
+        store.markAssertionStatus(emailA, cycleSeq = 1, phraseUid = targetUidA, status = AssertionStatus.OPEN)
+        (2..4).forEach { i ->
+            val uid = seedConversationalPhraseWithCycle(emailA, "A's filler open item $i", cycleSeq = i.toLong())
+            store.markAssertionStatus(emailA, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+        }
+        val triggerUidA = seedConversationalPhraseWithCycle(emailA, "A's fresh trigger", cycleSeq = 2)
+        assertTrue(store.markRelevant(emailA, cycleSeq = 2, fromPhraseUid = triggerUidA, toPhraseUid = targetUidA))
+
+        val noiseCycleSeqs = listOf(3L, 3L, 4L, 4L, 5L) // all > A's edge cycleSeq (2), 5 edges > poolLimit (3)
+        noiseCycleSeqs.forEach { noiseCycle ->
+            val noiseTarget = seedConversationalPhraseWithCycle(emailB, "B noise target @$noiseCycle", cycleSeq = noiseCycle)
+            val noiseTrigger = seedConversationalPhraseWithCycle(emailB, "B noise trigger @$noiseCycle", cycleSeq = noiseCycle)
+            assertTrue(store.markRelevant(emailB, cycleSeq = noiseCycle, fromPhraseUid = noiseTrigger, toPhraseUid = noiseTarget))
+        }
+
+        val horizon = assembler.assemble(emailA, currentCycleSeq = 5, activeRelevanceCycles = 3, budget = budget).expectSuccess()
+        assertEquals(1, horizon.items.size)
+        val item = horizon.items.single()
+        assertEquals(targetUidA, item.sourceRefs.first().phraseUid, "A's own reactivation must still be found despite B's noise filling the pool limit")
+        assertTrue(item.surfacing is SurfacingReason.ActiveReactivation, "expected ActiveReactivation, got: ${item.surfacing}")
+        assertEquals(triggerUidA, (item.surfacing as SurfacingReason.ActiveReactivation).info.triggeringPhraseUid)
+    }
+
     // ── Distinct failure modes: consistency, query error, and byte budget are never conflated ─────
 
     @Test
@@ -590,6 +657,52 @@ class HorizonAssemblerTest {
         // Once the override is cleared, an ordinary call succeeds normally.
         val recovered = assemblerImpl.assemble(email, currentCycleSeq = 1)
         assertTrue(recovered is AssembleOutcome.Assembled, "expected assembly to succeed once the byte budget is realistic again, got: $recovered")
+    }
+
+    /**
+     * Regression test: a missing user's assembly used to `return@transaction` before ever reaching
+     * the byte-budget enforcement code, leaving `result` at the pre-built `empty` ContextHorizon
+     * unchecked — so an insufficient budget was silently ignored for this path while correctly
+     * caught for a populated one. Fixed by routing every path, including a missing user, through the
+     * same enforcement.
+     */
+    @Test
+    fun `assemble for a missing user goes through the same byte-budget enforcement as a populated result`() = runBlocking {
+        val email = "horizon-missing-user-budget-${UUID.randomUUID()}@test.alfrd.internal"
+        // No data seeded at all — not even a User vertex.
+        val assemblerImpl = assembler as ArcadeHorizonAssembler
+
+        val normal = assemblerImpl.assemble(email, currentCycleSeq = 1)
+        assertTrue(normal is AssembleOutcome.Assembled, "a missing user under a normal budget must be a successful, empty Assembled result, got: $normal")
+        assertTrue((normal as AssembleOutcome.Assembled).horizon.items.isEmpty())
+
+        assemblerImpl.testByteBudgetOverride = 10 // even an empty ContextHorizon's JSON metadata exceeds this
+        try {
+            val insufficient = assemblerImpl.assemble(email, currentCycleSeq = 1)
+            assertTrue(insufficient is AssembleOutcome.BudgetExceeded, "a missing user must still hit the same byte-budget enforcement, got: $insufficient")
+        } finally {
+            assemblerImpl.testByteBudgetOverride = null
+        }
+    }
+
+    /** Same regression as above, for the other early-return path: a real User vertex that trusts no Source at all. */
+    @Test
+    fun `assemble for a user with no trusted sources goes through the same byte-budget enforcement as a populated result`() = runBlocking {
+        val email = "horizon-source-free-budget-${UUID.randomUUID()}@test.alfrd.internal"
+        seedBareUser(email)
+        val assemblerImpl = assembler as ArcadeHorizonAssembler
+
+        val normal = assemblerImpl.assemble(email, currentCycleSeq = 1)
+        assertTrue(normal is AssembleOutcome.Assembled, "a source-free user under a normal budget must be a successful, empty Assembled result, got: $normal")
+        assertTrue((normal as AssembleOutcome.Assembled).horizon.items.isEmpty())
+
+        assemblerImpl.testByteBudgetOverride = 10
+        try {
+            val insufficient = assemblerImpl.assemble(email, currentCycleSeq = 1)
+            assertTrue(insufficient is AssembleOutcome.BudgetExceeded, "a source-free user must still hit the same byte-budget enforcement, got: $insufficient")
+        } finally {
+            assemblerImpl.testByteBudgetOverride = null
+        }
     }
 
     // ── Bounded output: honest lower-bound accounting, never an unbounded list ───────────────────

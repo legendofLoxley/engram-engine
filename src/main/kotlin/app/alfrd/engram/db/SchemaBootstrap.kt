@@ -204,6 +204,15 @@ object SchemaBootstrap {
             ensureProperty(schema, "ASSERTS",   "statusCycleSeq", Type.LONG)   // cycle of the MOST RECENT status change — distinct from cycleSeq; see HorizonGraphStore.markAssertionStatus
             ensureProperty(schema, "RELATED_TO", "createdAt",    Type.LONG)    // audit timestamp only — never used for identity/decay comparisons
             ensureProperty(schema, "RELATED_TO", "cycleSeq",     Type.LONG)    // cycle the edge was asserted in — drives reactivation decay
+            // Denormalized owner stamp — the userEmail HorizonGraphStore.markRelevant/markSuperseded
+            // already validated both endpoints against when the edge was created. Lets
+            // HorizonAssembler.queryActiveReactivations scope its candidate query to the requesting
+            // user BEFORE applying LIMIT (via the composite index below), rather than after — a
+            // global, unscoped LIMIT would let another user's edges crowd this user's own out of the
+            // window. This is a scoping optimization only, never a trust boundary on its own: the
+            // read path still independently re-verifies both endpoints via HorizonOwnership, since a
+            // stamp can be stale, wrong, or bypassed by a writer that doesn't go through the store.
+            ensureProperty(schema, "RELATED_TO", "ownerEmail",   Type.STRING)
 
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")
@@ -233,6 +242,9 @@ object SchemaBootstrap {
             // Bounds the relevant_to reactivation-window lookup, which is otherwise a global scan
             // of every RELATED_TO edge regardless of relationType.
             ensureCompositeIndex(schema, "RELATED_TO", "relationType", "cycleSeq")
+            // Scopes the same reactivation-window lookup to one user before LIMIT is applied — see
+            // the ownerEmail property doc and ArcadeHorizonAssembler.queryActiveReactivations.
+            ensureCompositeIndex(schema, "RELATED_TO", "ownerEmail", "relationType", "cycleSeq")
             // SELECTED edge indexes — freshness queries (phraseUid+userId) and session analytics (sessionId)
             ensureIndex(schema, "SELECTED", "sessionId")
             ensureCompositeIndex(schema, "SELECTED", "phraseUid", "userId")
