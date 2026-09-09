@@ -20,7 +20,14 @@ import org.slf4j.LoggerFactory
  * response's directive rather than collapsed into one blanket "something failed" flag.
  */
 sealed interface MutationOutcome {
-    data class Fact(val phraseUid: String, val applied: Boolean) : MutationOutcome
+    /**
+     * [phraseUid] is null when the candidate never became a Phrase at all — [EngramClient.decompose]
+     * or [EngramClient.ingest] threw, or a partial [EngramClient.ingest] result couldn't be safely
+     * attributed to this candidate — as distinct from a Phrase that was created but whose Horizon
+     * stamp failed ([applied] false with a non-null [phraseUid]). Either way [applied] is false and
+     * the write must never be described to the user as having succeeded.
+     */
+    data class Fact(val phraseUid: String?, val applied: Boolean) : MutationOutcome
     data class Intention(val phraseUid: String?, val applied: Boolean, val quote: String) : MutationOutcome
 }
 
@@ -104,10 +111,12 @@ open class HorizonCycleCoordinator(
         val interpretOutcome = interpreter.interpret(utterance)
         val interpretLatencyMs = System.currentTimeMillis() - interpretStartMs
 
+        var decomposeFailed = false
         val factCandidates = try {
             engramClient.decompose(utterance, emptyList())
         } catch (e: Exception) {
             logger.warn("runCycle: decompose failed for userEmail=$userEmail: ${e.message}")
+            decomposeFailed = true
             emptyList()
         }
         val intentionQuote = (interpretOutcome as? InterpretOutcome.ProposedAssertion)?.quote
@@ -162,9 +171,18 @@ open class HorizonCycleCoordinator(
         val newPhrases = factUids.zip(factTexts) +
             listOfNotNull(if (intentionUid != null && intentionQuote != null) intentionUid to intentionQuote else null)
 
+        // A candidate that never became a Phrase at all — decompose() threw, ingest() threw, or a
+        // partial ingest() result couldn't be safely attributed — is otherwise invisible: it has no
+        // uid to attach a MutationOutcome to, so without this it would silently vanish from
+        // mutationOutcomes rather than being reflected as a failed write. decomposeFailed is
+        // special-cased (a single sentinel) because when decompose() itself threw, factCandidates is
+        // empty and there is no candidate count left to diff against.
+        val lostFactCount = if (decomposeFailed) 1 else (factCandidates.size - factUids.size).coerceAtLeast(0)
+        val lostFactOutcomes = List(lostFactCount) { MutationOutcome.Fact(phraseUid = null, applied = false) }
+
         return stampPropagateAssemble(
             userEmail, requestId, cycleSeq, interpretOutcome, interpretLatencyMs,
-            factUids, intentionUid, intentionQuote, newPhrases,
+            factUids, intentionUid, intentionQuote, newPhrases, lostFactOutcomes,
         )
     }
 
@@ -178,8 +196,9 @@ open class HorizonCycleCoordinator(
         intentionUid: String?,
         intentionQuote: String?,
         newPhrases: List<Pair<String, String>>,
+        initialMutationOutcomes: List<MutationOutcome> = emptyList(),
     ): HorizonCycleResult {
-        val mutationOutcomes = mutableListOf<MutationOutcome>()
+        val mutationOutcomes = initialMutationOutcomes.toMutableList()
         for (uid in factUids) {
             val applied = horizonGraphStore.stampNewAssertion(userEmail, cycleSeq, uid, status = null)
             mutationOutcomes += MutationOutcome.Fact(uid, applied)

@@ -79,6 +79,9 @@ object HorizonItemsRenderer {
     fun composeIntegrityCaveat(result: HorizonCycleResult?): String? {
         if (result == null) return null
         val caveats = mutableListOf<String>()
+        if (result.allocationFailed) {
+            caveats += "Nothing from this turn could be confirmed recorded to memory — do not say anything was noted, saved, or remembered from what the user just said."
+        }
         for (outcome in result.mutationOutcomes) {
             when (outcome) {
                 is MutationOutcome.Intention -> if (!outcome.applied) {
@@ -88,6 +91,9 @@ object HorizonItemsRenderer {
                     caveats += "Something from this turn was not confirmed recorded to memory — do not claim it was."
                 }
             }
+        }
+        if (result.interpretOutcome is InterpretOutcome.LlmFailure) {
+            caveats += "This turn could not be fully checked for anything you should treat as a new priority — do not claim to have captured one if the user stated one."
         }
         val propagationFailed = result.propagationOutcome is PropagationOutcome.Failed
         val assembleFailed = result.assembleOutcome != null && result.assembleOutcome !is AssembleOutcome.Assembled

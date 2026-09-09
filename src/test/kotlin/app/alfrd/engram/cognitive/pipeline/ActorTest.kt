@@ -171,6 +171,29 @@ class ActorTest {
     }
 
     @Test
+    fun `an allocation failure produces its own visible caveat, mutationOutcomes being empty is not read as success`() {
+        val result = HorizonCycleResult.allocationFailed()
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
+        assertNotNull(caveat, "nothing was captured this cycle — that must never be silent")
+        assertTrue(caveat!!.contains("Nothing from this turn could be confirmed recorded"))
+    }
+
+    @Test
+    fun `an LlmFailure interpretation caveats that a priority may have been missed, not just silence`() {
+        val result = HorizonCycleResult(
+            cycleSeq = 1,
+            interpretOutcome = InterpretOutcome.LlmFailure("timeout"),
+            mutationOutcomes = listOf(MutationOutcome.Fact("p1", applied = true)),
+            propagationOutcome = PropagationOutcome.Propagated(emptyList()),
+            assembleOutcome = null,
+        )
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
+        assertNotNull(caveat, "an interpreter failure must not be indistinguishable from a quiet turn with nothing to say")
+        assertTrue(caveat!!.contains("could not be fully checked"))
+        assertTrue(!caveat.contains("not confirmed recorded"), "the successful fact write must not also be caveated")
+    }
+
+    @Test
     fun `propagation failure and non-Assembled outcomes each add an honest contextual-awareness caveat`() {
         val propagationFailedResult = HorizonCycleResult(
             cycleSeq = 1,

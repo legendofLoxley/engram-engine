@@ -13,6 +13,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPropagator
 import app.alfrd.engram.cognitive.pipeline.horizon.RequestLedger
 import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCategory
 import app.alfrd.engram.db.DatabaseManager
@@ -162,6 +163,74 @@ class HorizonCycleCoordinatorTest {
         assertTrue(horizon.items.none { it.status == AssertionStatus.OPEN }, "no OPEN item may appear without an actual proposal")
     }
 
+    // ── Failed writes must be visible to response handling, never silently dropped ──
+
+    @Test
+    fun `decompose() throwing is a visible failed write, never a silent no-op`() = runBlocking {
+        val email = "coord-decompose-fail-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val failingClient = object : EngramClient by engramClient {
+            override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> {
+                throw RuntimeException("simulated decompose failure")
+            }
+        }
+        val c = HorizonCycleCoordinator(
+            cycleSequencer = cycleSequencer,
+            requestLedger = requestLedger,
+            interpreter = fixedInterpreter(InterpretOutcome.NoOperation),
+            engramClient = failingClient,
+            horizonGraphStore = horizonGraphStore,
+            horizonPropagator = propagator,
+            horizonAssembler = horizonAssembler,
+        )
+
+        val result = c.runCycle(email, requestId = "req-decompose-fail", utterance = "My dog's name is Newton")
+
+        assertNotNull(result.cycleSeq, "the cycle itself is still allocated — this is a partial failure, not a total one")
+        val lostFact = result.mutationOutcomes.filterIsInstance<MutationOutcome.Fact>().single()
+        assertEquals(null, lostFact.phraseUid, "a candidate that never became a Phrase has no uid to report")
+        assertTrue(!lostFact.applied)
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
+        assertNotNull(caveat, "a failed write must produce a visible caveat, never silence")
+        assertTrue(caveat!!.contains("not confirmed recorded"))
+    }
+
+    @Test
+    fun `ingest() throwing loses the fact candidate visibly and still marks a proposed intention unconfirmed`() = runBlocking {
+        val email = "coord-ingest-fail-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val quote = "getting Alfrd running on Arx is a priority for me"
+        val failingClient = object : EngramClient by engramClient {
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
+                throw RuntimeException("simulated ingest failure")
+            }
+        }
+        val c = HorizonCycleCoordinator(
+            cycleSequencer = cycleSequencer,
+            requestLedger = requestLedger,
+            interpreter = fixedInterpreter(InterpretOutcome.ProposedAssertion(quote, latencyMs = 5)),
+            engramClient = failingClient,
+            horizonGraphStore = horizonGraphStore,
+            horizonPropagator = propagator,
+            horizonAssembler = horizonAssembler,
+        )
+        // No '.', '!', '?', or contrastive marker — stays one decompose() segment, so exactly one
+        // fact candidate is lost (kept simple to assert against, not a claim about segmentation).
+        val result = c.runCycle(email, requestId = "req-ingest-fail", utterance = "My dog's name is Newton and $quote")
+
+        assertNotNull(result.cycleSeq)
+        val lostFact = result.mutationOutcomes.filterIsInstance<MutationOutcome.Fact>().single()
+        assertEquals(null, lostFact.phraseUid)
+        assertTrue(!lostFact.applied)
+        val intentionOutcome = result.mutationOutcomes.filterIsInstance<MutationOutcome.Intention>().single()
+        assertTrue(!intentionOutcome.applied, "the intention must also be reported unconfirmed, never silently dropped")
+        assertEquals(quote, intentionOutcome.quote)
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
+        assertNotNull(caveat)
+        assertTrue(caveat!!.contains("NOT confirmed"), "the intention-specific caveat must still fire")
+        assertTrue(caveat.contains("not confirmed recorded"), "the fact-loss caveat must also fire")
+    }
+
     @Test
     fun `allocation failure for an unknown user is reported explicitly, not silently`() = runBlocking {
         val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
@@ -169,6 +238,9 @@ class HorizonCycleCoordinatorTest {
         val result = c.runCycle("nobody-${UUID.randomUUID()}@test.alfrd.internal", requestId = "req-unknown", utterance = "hey")
 
         assertTrue(result.allocationFailed)
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
+        assertNotNull(caveat, "an allocation failure must be visible to response handling, not silent")
+        assertTrue(caveat!!.contains("Nothing from this turn could be confirmed recorded"))
     }
 
     // ── Checkpoint resume — a crash artifact, never a live concurrent attempt (see PerUserCycleLock) ──
