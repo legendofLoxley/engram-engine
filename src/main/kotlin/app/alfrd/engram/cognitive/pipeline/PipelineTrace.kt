@@ -14,6 +14,7 @@ data class PipelineTrace(
     var candidatePhrases: List<CandidatePhraseTrace> = emptyList(),
     var graphMutations: GraphMutationsTrace = GraphMutationsTrace(),
     var retrievalCoverage: RetrievalCoverageTrace? = null,
+    var horizonCycle: HorizonCycleTrace? = null,
 )
 
 @Serializable
@@ -116,4 +117,52 @@ data class RetrievalCoverageTrace(
     val playFired: Boolean,
     val conceptResolutionRatio: Double,
     val gaps: List<String>,
+)
+
+/** One write [app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator] confirmed or attempted this cycle — mirrors [app.alfrd.engram.cognitive.pipeline.MutationOutcome]. */
+@Serializable
+data class MutationOutcomeTrace(val kind: String, val phraseUid: String?, val applied: Boolean, val textSummary: String? = null)
+
+/** One `relevant_to` edge propagation created — mirrors [app.alfrd.engram.cognitive.pipeline.horizon.RelevanceEdgeSummary]. */
+@Serializable
+data class RelevanceEdgeTrace(val fromPhraseUid: String, val toPhraseUid: String, val strength: Double)
+
+/** One propagation candidate — mirrors [app.alfrd.engram.cognitive.pipeline.horizon.PropagationCandidate]. */
+@Serializable
+data class PropagationCandidateTrace(val phraseUid: String, val text: String, val cycleSeq: Long)
+
+/** One assembled Horizon item, flattened for tracing — mirrors [app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem]. */
+@Serializable
+data class HorizonItemTrace(val category: String, val text: String, val status: String?, val surfacing: String)
+
+/**
+ * Controlled debug evidence for one Horizon cycle — populated only when [PipelineTrace] itself is
+ * (i.e. `/cognitive/chat/debug` and `/debug/converse`; never the plain `/cognitive/chat` response).
+ * Deliberately carries three distinct stages, not one conflated view:
+ * [openCandidatesBeforePropagation] is what propagation actually had to work with (the bounded
+ * open-item pool, independent of the response-prompt budget); [horizonAfterPropagation] is
+ * `assemble()`'s output *before* the prompt-budget ladder touches it; [horizonAfterBudget] plus
+ * [promptOmissions]/[promptBudgetOutcome] is what actually survived trimming.
+ * [finalSystemPromptSent]/[finalUserPromptSent] are the literal strings sent to the Actor's LLM
+ * call, captured after all budget handling — not just the Horizon fragment of it.
+ */
+@Serializable
+data class HorizonCycleTrace(
+    var cycleSeq: Long? = null,
+    var allocationFailed: Boolean = false,
+    var interpretOutcome: String? = null,
+    var interpretLatencyMs: Long = 0,
+    var mutationOutcomes: List<MutationOutcomeTrace> = emptyList(),
+    var propagationOutcome: String? = null,
+    var propagationEdges: List<RelevanceEdgeTrace> = emptyList(),
+    var propagateLatencyMs: Long = 0,
+    var assembleOutcome: String? = null,
+    var assembleLatencyMs: Long = 0,
+    var openCandidatesBeforePropagation: List<PropagationCandidateTrace> = emptyList(),
+    var horizonAfterPropagation: List<HorizonItemTrace> = emptyList(),
+    var horizonAfterBudget: List<HorizonItemTrace> = emptyList(),
+    var promptOmissions: List<String> = emptyList(),
+    var promptBudgetOutcome: String? = null,
+    var finalSystemPromptSent: String? = null,
+    var finalUserPromptSent: String? = null,
 )

@@ -312,4 +312,87 @@ class HorizonGraphStoreTest {
         assertEquals(transitionCount, history.size, "every one of the $transitionCount transitions must be preserved, not capped at 20")
         assertEquals(expectedStates, history.map { it.state })
     }
+
+    // ── stampNewAssertion ────────────────────────────────────────────────────
+
+    @Test
+    fun `stampNewAssertion stamps cycleSeq and status atomically on a freshly created phrase`() = runBlocking {
+        val email = "horizon-store-stamp-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(email, "Getting Alfrd running on Arx is a priority for me.")
+
+        assertTrue(store.stampNewAssertion(email, cycleSeq = 4, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        assertEquals(4L, (edge.get("cycleSeq") as Number).toLong())
+        assertEquals("open", edge.get("status"))
+        assertEquals(4L, (edge.get("statusCycleSeq") as Number).toLong())
+    }
+
+    @Test
+    fun `stampNewAssertion with status null stamps cycleSeq only`() = runBlocking {
+        val email = "horizon-store-stamp-fact-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(email, "My dog's name is Newton.")
+
+        assertTrue(store.stampNewAssertion(email, cycleSeq = 2, phraseUid = phraseUid, status = null))
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        assertEquals(2L, (edge.get("cycleSeq") as Number).toLong())
+        assertNull(edge.get("status"), "a plain fact must never gain a status")
+    }
+
+    @Test
+    fun `stampNewAssertion is idempotent for a resumed attempt with the same cycleSeq`() = runBlocking {
+        val email = "horizon-store-stamp-resume-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(email, "Getting Alfrd running on Arx is a priority for me.")
+
+        assertTrue(store.stampNewAssertion(email, cycleSeq = 4, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+        assertTrue(store.stampNewAssertion(email, cycleSeq = 4, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        val history = Json { ignoreUnknownKeys = true }
+            .decodeFromString<List<StatusHistoryEntry>>(edge.get("statusHistory") as String)
+        assertEquals(1, history.size, "a resumed stamp with the same (status, cycleSeq) must not append a duplicate history entry")
+    }
+
+    @Test
+    fun `stampNewAssertion rejects re-stamping an already-stamped phrase with a different cycleSeq`() = runBlocking {
+        val email = "horizon-store-stamp-conflict-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(email, "Getting Alfrd running on Arx is a priority for me.")
+
+        assertTrue(store.stampNewAssertion(email, cycleSeq = 4, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+        val secondAttempt = store.stampNewAssertion(email, cycleSeq = 99, phraseUid = phraseUid, status = AssertionStatus.OPEN)
+
+        val edge = findAssertsEdgeForPhrase(phraseUid)
+        assertFalse(secondAttempt, "a conflicting cycleSeq must be rejected, not silently overwrite the original")
+        assertEquals(4L, (edge.get("cycleSeq") as Number).toLong(), "the original cycleSeq must never be overwritten")
+    }
+
+    @Test
+    fun `stampNewAssertion returns false for a phrase not owned by the caller`() = runBlocking {
+        val ownerEmail = "horizon-store-stamp-owner-${UUID.randomUUID()}@test.alfrd.internal"
+        val otherEmail = "horizon-store-stamp-other-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(ownerEmail, "Getting Alfrd running on Arx is a priority for me.")
+
+        assertFalse(store.stampNewAssertion(otherEmail, cycleSeq = 1, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+    }
+
+    // ── phraseText ───────────────────────────────────────────────────────────
+
+    @Test
+    fun `phraseText returns the text of an owned phrase`() = runBlocking {
+        val email = "horizon-store-text-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(email, "Getting Alfrd running on Arx is a priority for me.")
+
+        assertEquals("Getting Alfrd running on Arx is a priority for me.", store.phraseText(email, phraseUid))
+    }
+
+    @Test
+    fun `phraseText returns null for an unowned or unknown phrase`() = runBlocking {
+        val ownerEmail = "horizon-store-text-owner-${UUID.randomUUID()}@test.alfrd.internal"
+        val otherEmail = "horizon-store-text-other-${UUID.randomUUID()}@test.alfrd.internal"
+        val phraseUid = seedConversationalPhrase(ownerEmail, "a private phrase")
+
+        assertNull(store.phraseText(otherEmail, phraseUid))
+        assertNull(store.phraseText(ownerEmail, "nonexistent-${UUID.randomUUID()}"))
+    }
 }

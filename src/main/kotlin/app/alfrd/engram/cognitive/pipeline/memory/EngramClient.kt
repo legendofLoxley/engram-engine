@@ -162,8 +162,15 @@ interface EngramClient {
      * Implementations that write to the real graph (e.g. [DatabaseEngramClient]) use [userEmail]
      * to locate the correct User vertex and wire Source → ASSERTS → Phrase. Implementations that
      * do not track per-user state (e.g. [InMemoryEngramClient]) may ignore [userEmail].
+     *
+     * Returns the created Phrase uids, one per candidate that was actually written, in the same
+     * order as [candidates] — empty (never throws) on any failure or skip condition (blank
+     * [userEmail], no matching User vertex, empty [candidates]). This is what lets a caller (e.g.
+     * [app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore.stampNewAssertion]) attach
+     * Horizon-specific identity to phrases this method wrote, without reimplementing this
+     * method's own Source-reuse/Concept-linking behavior in a parallel write path.
      */
-    suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String = "")
+    suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String = ""): List<String>
 
     /**
      * Retrieve phrases visible to [userEmail] via perspective-scoped graph traversal:

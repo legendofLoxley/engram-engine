@@ -5,11 +5,13 @@ import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.LlmTimeoutError
+import app.alfrd.engram.cognitive.providers.ToolCall
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -85,7 +87,8 @@ class CloudLlmClient(
         }
 
         val text = parseAnthropicText(response.body())
-        LlmResponse(text = text, latencyMs = System.currentTimeMillis() - startMs, retryCount = 0)
+        val toolCalls = parseAnthropicToolCalls(response.body())
+        LlmResponse(text = text, toolCalls = toolCalls, latencyMs = System.currentTimeMillis() - startMs, retryCount = 0)
     }
 
     private fun buildAnthropicBody(modelId: String, request: LlmRequest): AnthropicRequest {
@@ -95,6 +98,9 @@ class CloudLlmClient(
             max_tokens = request.maxTokens,
             system = request.systemPrompt,
             messages = messages,
+            tools = request.tools.takeIf { it.isNotEmpty() }?.map {
+                AnthropicTool(name = it.name, description = it.description, input_schema = it.inputSchema)
+            },
         )
     }
 
@@ -105,6 +111,26 @@ class CloudLlmClient(
             .firstOrNull { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }
             ?.jsonObject?.get("text")?.jsonPrimitive?.content
             ?: ""
+    }
+
+    /**
+     * Extracts `tool_use` content blocks. Single-shot only — this never sends a `tool_result`
+     * message back; the tool call itself is the terminal output of one [complete] call. If the
+     * response contains more than one `tool_use` block, all are returned in order — the caller
+     * (e.g. [app.alfrd.engram.cognitive.pipeline.Interpreter]) decides how many to honor rather
+     * than this provider layer silently picking one.
+     */
+    private fun parseAnthropicToolCalls(body: String): List<ToolCall> {
+        val root = json.parseToJsonElement(body).jsonObject
+        val content = root["content"]?.jsonArray ?: return emptyList()
+        return content
+            .filter { it.jsonObject["type"]?.jsonPrimitive?.content == "tool_use" }
+            .mapNotNull { block ->
+                val obj = block.jsonObject
+                val name = obj["name"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                val input = obj["input"]?.jsonObject ?: JsonObject(emptyMap())
+                ToolCall(name = name, input = input)
+            }
     }
 
     // ── Google Gemini API ─────────────────────────────────────────────────────
@@ -181,10 +207,15 @@ class CloudLlmClient(
         val max_tokens: Int,
         val system: String? = null,
         val messages: List<AnthropicMessage>,
+        /** Omitted from the wire request when null — every caller not passing [LlmRequest.tools] is unaffected. */
+        val tools: List<AnthropicTool>? = null,
     )
 
     @Serializable
     private data class AnthropicMessage(val role: String, val content: String)
+
+    @Serializable
+    private data class AnthropicTool(val name: String, val description: String, val input_schema: JsonObject)
 
     @Serializable
     private data class GeminiRequest(

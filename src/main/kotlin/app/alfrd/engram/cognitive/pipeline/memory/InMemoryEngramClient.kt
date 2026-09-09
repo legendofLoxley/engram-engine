@@ -81,18 +81,22 @@ class InMemoryEngramClient : EngramClient {
 
     // ── Ingest ────────────────────────────────────────────────────────────────
 
-    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) {
+    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
+        val createdIds = mutableListOf<String>()
         for (c in candidates) {
+            val id = UUID.randomUUID().toString()
             phrases.add(
                 Phrase(
-                    id = UUID.randomUUID().toString(),
+                    id = id,
                     content = c.content,
                     source = c.source,
                     trustPhase = 1,
                     score = 0.5,
                 )
             )
+            createdIds += id
         }
+        return createdIds
     }
 
     // ── Query ─────────────────────────────────────────────────────────────────

@@ -103,6 +103,17 @@ interface HorizonAssembler {
         limit: Int = 50,
         cursor: String? = null,
     ): CandidatePage
+
+    /**
+     * Every `status=open` candidate for [userEmail], with text, bounded by [limit] —
+     * **independent of [assemble]'s own response-prompt budget** ([HorizonBudget.maxItems],
+     * default 12). Propagation needs to consider a user's full (bounded) set of open intentions,
+     * not just whichever ones happened to survive [assemble]'s trimming for the last response —
+     * an intention ranked below that budget is still a legitimate reactivation target. Not
+     * lock-protected (same precedent as [listCandidates]): a bounded enumeration, not the
+     * consistency-critical read [assemble] is.
+     */
+    suspend fun listOpenCandidatesWithText(userEmail: String, limit: Int = 200): List<PropagationCandidate>
 }
 
 class ArcadeHorizonAssembler(
@@ -366,6 +377,36 @@ class ArcadeHorizonAssembler(
         } catch (e: Exception) {
             logger.warn("listCandidates failed for userEmail=$userEmail: ${e.message}")
             CandidatePage(emptyList(), null)
+        }
+    }
+
+    override suspend fun listOpenCandidatesWithText(userEmail: String, limit: Int): List<PropagationCandidate> = withContext(Dispatchers.IO) {
+        try {
+            val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@withContext emptyList()
+            val sourceUids = trustedSourceUids(userVertex)
+            if (sourceUids.isEmpty()) return@withContext emptyList()
+            val sql = """
+                SELECT @in.uid as phraseUid, @in.text as phraseText, cycleSeq
+                FROM ASSERTS
+                WHERE @out.uid IN :sourceUids AND status = 'open'
+                ORDER BY statusCycleSeq DESC
+                LIMIT :limit
+            """.trimIndent()
+            db.query("sql", sql, mapOf("sourceUids" to sourceUids, "limit" to limit)).use { rs ->
+                val out = mutableListOf<PropagationCandidate>()
+                while (rs.hasNext()) {
+                    val row = rs.next().toMap()
+                    out += PropagationCandidate(
+                        phraseUid = row["phraseUid"] as? String ?: continue,
+                        text = row["phraseText"] as? String ?: "",
+                        cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
+                    )
+                }
+                out
+            }
+        } catch (e: Exception) {
+            logger.warn("listOpenCandidatesWithText failed for userEmail=$userEmail: ${e.message}")
+            emptyList()
         }
     }
 

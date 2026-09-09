@@ -17,6 +17,11 @@ import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
+import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
+import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
+import app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.EpisodicLogService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
@@ -65,6 +70,14 @@ open class CognitivePipeline(
     private val personaSource: PersonaSource = DefaultPersonaSource(),
     private val confidenceService: TopicConfidenceService? = null,
     private val episodicLogService: EpisodicLogService? = null,
+    /**
+     * When wired, owns interpretation → graph mutation → propagation → refreshed-Horizon
+     * assembly for every PROCESS turn — see [HorizonCycleCoordinator]. Null preserves today's
+     * behavior byte-for-byte: the legacy fire-and-forget [memoryWriteService] call still fires
+     * exactly where it does now, and no Horizon context reaches [Actor]. Every existing test that
+     * constructs [CognitivePipeline] without this parameter is unaffected by this change.
+     */
+    private val horizonCycleCoordinator: HorizonCycleCoordinator? = null,
 ) {
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
@@ -191,9 +204,9 @@ open class CognitivePipeline(
      * Process a single utterance end-to-end and return the final response text.
      */
     open suspend fun process(
-        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT, requestId: String? = null,
     ): String =
-        processInternal(utterance, sessionId, userId, debug = false, modality = modality).first.responseText
+        processInternal(utterance, sessionId, userId, debug = false, modality = modality, requestId = requestId).first.responseText
 
     /**
      * Process a single utterance end-to-end and return synthesis text with its source tag.
@@ -203,9 +216,9 @@ open class CognitivePipeline(
      * Overridable so tests can inject controlled failures without touching [process].
      */
     open suspend fun processForStream(
-        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT, requestId: String? = null,
     ): SynthesisResult {
-        val (chatResult, _) = processInternal(utterance, sessionId, userId, debug = false, modality = modality)
+        val (chatResult, _) = processInternal(utterance, sessionId, userId, debug = false, modality = modality, requestId = requestId)
         return SynthesisResult(chatResult.responseText, chatResult.synthesisSource)
     }
 
@@ -278,18 +291,18 @@ open class CognitivePipeline(
      * Used by the HTTP chat surface to populate [ChatResult.intent] in the API response.
      */
     suspend fun processForChat(
-        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT, requestId: String? = null,
     ): ChatResult =
-        processInternal(utterance, sessionId, userId, debug = false, modality = modality).first
+        processInternal(utterance, sessionId, userId, debug = false, modality = modality, requestId = requestId).first
 
     /**
      * Process a single utterance with full instrumentation, returning both the
      * chat result and the pipeline trace for the debug endpoint.
      */
     suspend fun processForDebug(
-        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT,
+        utterance: String, sessionId: String, userId: String, modality: Modality = Modality.TEXT, requestId: String? = null,
     ): DebugChatResult {
-        val (chatResult, trace) = processInternal(utterance, sessionId, userId, debug = true, modality = modality)
+        val (chatResult, trace) = processInternal(utterance, sessionId, userId, debug = true, modality = modality, requestId = requestId)
         return DebugChatResult(chatResult, trace!!)
     }
 
@@ -496,9 +509,12 @@ open class CognitivePipeline(
     }
 
     private suspend fun processInternal(
-        utterance: String, sessionId: String, userId: String, debug: Boolean, modality: Modality = Modality.TEXT,
+        utterance: String, sessionId: String, userId: String, debug: Boolean, modality: Modality = Modality.TEXT, requestId: String? = null,
     ): Pair<ChatResult, PipelineTrace?> {
 
+        // Absent a caller-supplied id, this call gets no retry protection — RequestLedger cannot
+        // recognize a retry it was never given a stable identity for. See RequestLedger's doc.
+        val effectiveRequestId = requestId ?: java.util.UUID.randomUUID().toString()
         val turnIndex = turnCounters.merge(sessionId, 1, Int::plus)!!
         val trace = if (debug) PipelineTrace() else null
         // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
@@ -616,9 +632,30 @@ open class CognitivePipeline(
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
 
-        // ── Script (retrieval) + Actor (composition) ─────────────────────────
-        // The only two components allowed to touch EngramClient/LlmClient for this turn.
-        val retrievedScript = script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
+        // ── Script (retrieval) + Horizon cycle (interpret/mutate/propagate/assemble) ──
+        // The only components allowed to touch EngramClient/LlmClient for this turn, besides
+        // Actor. Both run inside PerUserCycleLock (when horizonCycleCoordinator is wired) as one
+        // critical section for this user — Script's own writes (a correction's amendPhrase/ingest)
+        // and the Horizon cycle's writes/reads must not interleave with another cycle
+        // (conversational or environment-signal) for the same user. See PerUserCycleLock's doc for
+        // exactly what this guarantees, and why response composition below deliberately runs
+        // outside it.
+        val coordinator = horizonCycleCoordinator
+        var horizonCycleResult: HorizonCycleResult? = null
+        val retrievedScript: RetrievedScript = if (coordinator != null) {
+            val (rs, hcr) = PerUserCycleLock.withLock(ctx.userEmail) {
+                val r = script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
+                val h = coordinator.runCycle(ctx.userEmail, effectiveRequestId, ctx.utterance)
+                r to h
+            }
+            horizonCycleResult = hcr
+            rs
+        } else {
+            script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
+        }
+        val horizonItems = (horizonCycleResult?.assembleOutcome as? AssembleOutcome.Assembled)
+            ?.horizon?.let { HorizonItemsRenderer.render(it) } ?: emptyList()
+        val integrityCaveat = HorizonItemsRenderer.composeIntegrityCaveat(horizonCycleResult)
         val persona = script.persona(ctx.modality)
         // Posture read as a natural-language directive — computed independent of which branch
         // fired (ctx.postureSignals is set for every turn above), so it still reaches the actor
@@ -644,6 +681,8 @@ open class CognitivePipeline(
             topicConfidence  = topicConfidenceDirective(currentTopicPhase),
             mood             = moodDirective(moodState.mood),
             recentTurns      = recentTurnsConditioner(),
+            horizonItems     = horizonItems,
+            integrityCaveat  = integrityCaveat,
         )
         val coverage = ctx.retrievalCoverage ?: RetrievalCoverage.NONE_NEEDED
         logger.info(
@@ -660,15 +699,38 @@ open class CognitivePipeline(
         ctx.actorResult = actor.compose(ctx.utterance, retrievedScript, conditioners)
 
         // ── Universal memory ingestion ────────────────────────────────────────
-        // Every PROCESS turn is silently decomposed and ingested exactly once,
-        // independent of which branch handled it. Fire-and-forget — never blocks.
-        memoryWriteService?.captureUtterance(
-            utterance = utterance,
-            userId    = userId,
-            sessionId = sessionId,
-            turnIndex = ctx.priorUtterances.size,
-            sourceTag = "conversation",
-        )
+        // When horizonCycleCoordinator is wired, it already owns both ordinary-fact and
+        // intention capture for this turn (see the Horizon cycle above, which runs BEFORE
+        // actor.compose — mutations are confirmed and visible before response composition uses
+        // them). This legacy fire-and-forget path only fires when the coordinator isn't wired,
+        // exactly preserving today's behavior for any caller (every existing test, or a
+        // deployment without a database) that doesn't wire the new dependencies.
+        if (coordinator == null) {
+            memoryWriteService?.captureUtterance(
+                utterance = utterance,
+                userId    = userId,
+                sessionId = sessionId,
+                turnIndex = ctx.priorUtterances.size,
+                sourceTag = "conversation",
+            )
+        }
+
+        // Correlated production logging — (userEmail, cycleSeq) is itself the correlation key,
+        // durable and reconstructable from the graph, not just an ephemeral request id. Matches
+        // the existing key=value-in-message convention (see the retrieval-coverage/turn log
+        // lines above/below) rather than introducing MDC on this main path.
+        horizonCycleResult?.let { hcr ->
+            logger.info(
+                "horizon-cycle userEmail=${ctx.userEmail} cycleSeq=${hcr.cycleSeq} sessionId=$sessionId " +
+                "turnIndex=$turnIndex requestId=$effectiveRequestId " +
+                "interpretOutcome=${hcr.interpretOutcome?.let { it::class.simpleName } ?: "none"} " +
+                "mutationOutcomes=${hcr.mutationOutcomes.size} " +
+                "propagationEdges=${(hcr.propagationOutcome as? PropagationOutcome.Propagated)?.edgesCreated?.size ?: 0} " +
+                "assembleOutcome=${hcr.assembleOutcome?.let { it::class.simpleName } ?: "none"} " +
+                "allocationFailed=${hcr.allocationFailed} " +
+                "interpretMs=${hcr.interpretLatencyMs} propagateMs=${hcr.propagateLatencyMs} assembleMs=${hcr.assembleLatencyMs}"
+            )
+        }
 
         // Record pending outcome for the *next* turn's classification.
         // Only set when a phrase was actually selected — pure-reason branches leave this null.
@@ -699,6 +761,42 @@ open class CognitivePipeline(
                 conceptResolutionRatio = coverage.conceptResolutionRatio,
                 gaps = coverage.gaps,
             )
+
+            // Controlled debug evidence for the Horizon cycle — never surfaced on the plain
+            // /cognitive/chat response, only here (debug == true). Three distinct stages, not one
+            // conflated view: openCandidatesBeforePropagation is what propagation actually had to
+            // work with; horizonAfterPropagation is assemble()'s output before the prompt-budget
+            // ladder trims it; horizonAfterBudget (rendered from Actor's own HorizonPromptItem
+            // view, so category/status aren't re-derived here) plus promptOmissions is what
+            // actually survived, alongside the literal final system/user prompt sent.
+            horizonCycleResult?.let { hcr ->
+                val promptDebug = ctx.actorResult?.promptDebug
+                trace.horizonCycle = HorizonCycleTrace(
+                    cycleSeq = hcr.cycleSeq,
+                    allocationFailed = hcr.allocationFailed,
+                    interpretOutcome = hcr.interpretOutcome?.let { describeInterpretOutcome(it) },
+                    interpretLatencyMs = hcr.interpretLatencyMs,
+                    mutationOutcomes = hcr.mutationOutcomes.map { toMutationOutcomeTrace(it) },
+                    propagationOutcome = hcr.propagationOutcome?.let { describePropagationOutcome(it) },
+                    propagationEdges = (hcr.propagationOutcome as? PropagationOutcome.Propagated)?.edgesCreated?.map {
+                        RelevanceEdgeTrace(it.fromPhraseUid, it.toPhraseUid, it.strength)
+                    } ?: emptyList(),
+                    propagateLatencyMs = hcr.propagateLatencyMs,
+                    assembleOutcome = hcr.assembleOutcome?.let { describeAssembleOutcome(it) },
+                    assembleLatencyMs = hcr.assembleLatencyMs,
+                    openCandidatesBeforePropagation = (hcr.propagationOutcome as? PropagationOutcome.Propagated)?.candidatesConsidered?.map {
+                        PropagationCandidateTrace(it.phraseUid, it.text, it.cycleSeq)
+                    } ?: emptyList(),
+                    horizonAfterPropagation = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.items?.map { toHorizonItemTrace(it) } ?: emptyList(),
+                    horizonAfterBudget = promptDebug?.horizonItemsIncluded?.map {
+                        HorizonItemTrace(category = "", text = it.renderedLine, status = null, surfacing = if (it.essential) "essential" else "dormant")
+                    } ?: emptyList(),
+                    promptOmissions = promptDebug?.omissions ?: emptyList(),
+                    promptBudgetOutcome = promptDebug?.outcome,
+                    finalSystemPromptSent = promptDebug?.finalSystemPrompt,
+                    finalUserPromptSent = promptDebug?.finalUserPrompt,
+                )
+            }
 
             val selResult = ctx.selectionResult
             if (selResult != null) {
@@ -794,6 +892,43 @@ open class CognitivePipeline(
             trace,
         )
     }
+
+    private fun describeInterpretOutcome(outcome: InterpretOutcome): String = when (outcome) {
+        is InterpretOutcome.NoOperation -> "NoOperation"
+        is InterpretOutcome.ProposedAssertion -> "ProposedAssertion"
+        is InterpretOutcome.ValidationRejected -> "ValidationRejected:${outcome.reason}"
+        is InterpretOutcome.LlmFailure -> "LlmFailure:${outcome.reason}"
+    }
+
+    private fun describeAssembleOutcome(outcome: AssembleOutcome): String = when (outcome) {
+        is AssembleOutcome.Assembled -> "Assembled"
+        is AssembleOutcome.ConsistencyFailure -> "ConsistencyFailure:${outcome.reason}"
+        is AssembleOutcome.QueryFailure -> "QueryFailure:${outcome.reason}"
+        is AssembleOutcome.BudgetExceeded -> "BudgetExceeded:${outcome.reason}"
+    }
+
+    private fun describePropagationOutcome(outcome: PropagationOutcome): String = when (outcome) {
+        is PropagationOutcome.Propagated -> "Propagated:${outcome.edgesCreated.size} edges"
+        is PropagationOutcome.Failed -> "Failed:${outcome.reason}"
+    }
+
+    private fun toMutationOutcomeTrace(outcome: MutationOutcome): MutationOutcomeTrace = when (outcome) {
+        is MutationOutcome.Fact -> MutationOutcomeTrace(kind = "fact", phraseUid = outcome.phraseUid, applied = outcome.applied)
+        is MutationOutcome.Intention -> MutationOutcomeTrace(
+            kind = "intention", phraseUid = outcome.phraseUid, applied = outcome.applied, textSummary = outcome.quote,
+        )
+    }
+
+    private fun toHorizonItemTrace(item: HorizonItem): HorizonItemTrace = HorizonItemTrace(
+        category = item.category.name,
+        text = item.text.text,
+        status = item.status?.name,
+        surfacing = when (item.surfacing) {
+            is SurfacingReason.ActiveReactivation -> "ActiveReactivation"
+            is SurfacingReason.JustAsserted -> "JustAsserted"
+            is SurfacingReason.DormantOpen -> "DormantOpen"
+        },
+    )
 
     private fun tier2ModelName(): String? {
         val model = selectTier2Model(llmClient) ?: return null

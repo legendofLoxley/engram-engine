@@ -1096,4 +1096,77 @@ class HorizonAssemblerTest {
         assertEquals(ProvenanceKind.EXPLICIT_USER_STATEMENT, item.provenance)
         assertEquals(text, item.text.text, "must carry the user's own words verbatim, not a paraphrase or inferred reason")
     }
+
+    // ── listOpenCandidatesWithText: propagation's own candidate pool, independent of assemble()'s prompt budget ────
+
+    @Test
+    fun `returns text and cycleSeq for open items only, never non-open ones`() = runBlocking {
+        val email = "horizon-open-candidates-${UUID.randomUUID()}@test.alfrd.internal"
+        val openUid = seedConversationalPhraseWithCycle(email, "Getting Alfrd running on Arx is a priority for me.", cycleSeq = 1)
+        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = openUid, status = AssertionStatus.OPEN)
+        val plainFactUid = seedConversationalPhraseWithCycle(email, "My dog's name is Newton.", cycleSeq = 2)
+        val resolvedUid = seedConversationalPhraseWithCycle(email, "The delivery arrived.", cycleSeq = 3)
+        store.markAssertionStatus(email, cycleSeq = 3, phraseUid = resolvedUid, status = AssertionStatus.OPEN)
+        store.markAssertionStatus(email, cycleSeq = 4, phraseUid = resolvedUid, status = AssertionStatus.RESOLVED)
+
+        val candidates = assembler.listOpenCandidatesWithText(email)
+
+        val uids = candidates.map { it.phraseUid }.toSet()
+        assertTrue(openUid in uids, "the open item must be present")
+        assertFalse(plainFactUid in uids, "a plain fact with no status must never be a propagation candidate")
+        assertFalse(resolvedUid in uids, "a resolved item must never be a propagation candidate")
+        val openEntry = candidates.single { it.phraseUid == openUid }
+        assertEquals("Getting Alfrd running on Arx is a priority for me.", openEntry.text)
+        assertEquals(1L, openEntry.cycleSeq)
+    }
+
+    @Test
+    fun `is independent of the response-prompt budget, an item ranked below it is still returned`() = runBlocking {
+        val email = "horizon-open-candidates-unbudgeted-${UUID.randomUUID()}@test.alfrd.internal"
+        // Seed more open items than HorizonBudget.DEFAULT.maxItems (12) so a real prompt-budgeted
+        // assemble() call would necessarily drop some — the target of this test is deliberately
+        // the LOWEST-priority one (earliest cycle, statusCycleSeq-ordered last).
+        val uids = (1..15L).map { cycle ->
+            val uid = seedConversationalPhraseWithCycle(email, "Open item number $cycle with distinctivewordxyz$cycle", cycleSeq = cycle)
+            store.markAssertionStatus(email, cycleSeq = cycle, phraseUid = uid, status = AssertionStatus.OPEN)
+            uid
+        }
+        val lowestPriorityUid = uids.first() // cycleSeq=1, oldest statusCycleSeq — ranked last by assemble()
+
+        val candidates = assembler.listOpenCandidatesWithText(email, limit = 200)
+
+        assertTrue(
+            candidates.any { it.phraseUid == lowestPriorityUid },
+            "listOpenCandidatesWithText must return an item that a budget-constrained assemble() would have dropped",
+        )
+        assertTrue(candidates.size >= 15, "all 15 open items must be within this call's own (much larger) bound")
+    }
+
+    @Test
+    fun `is bounded by its own limit parameter`() = runBlocking {
+        val email = "horizon-open-candidates-bounded-${UUID.randomUUID()}@test.alfrd.internal"
+        (1..10L).forEach { cycle ->
+            val uid = seedConversationalPhraseWithCycle(email, "Open item $cycle", cycleSeq = cycle)
+            store.markAssertionStatus(email, cycleSeq = cycle, phraseUid = uid, status = AssertionStatus.OPEN)
+        }
+
+        val candidates = assembler.listOpenCandidatesWithText(email, limit = 3)
+
+        assertEquals(3, candidates.size)
+    }
+
+    @Test
+    fun `never leaks another user's open items`() = runBlocking {
+        val emailA = "horizon-open-candidates-a-${UUID.randomUUID()}@test.alfrd.internal"
+        val emailB = "horizon-open-candidates-b-${UUID.randomUUID()}@test.alfrd.internal"
+        val uidA = seedConversationalPhraseWithCycle(emailA, "A's private open item", cycleSeq = 1)
+        store.markAssertionStatus(emailA, cycleSeq = 1, phraseUid = uidA, status = AssertionStatus.OPEN)
+        val uidB = seedConversationalPhraseWithCycle(emailB, "B's private open item", cycleSeq = 1)
+        store.markAssertionStatus(emailB, cycleSeq = 1, phraseUid = uidB, status = AssertionStatus.OPEN)
+
+        val candidatesForA = assembler.listOpenCandidatesWithText(emailA)
+
+        assertTrue(candidatesForA.any { it.phraseUid == uidA })
+        assertFalse(candidatesForA.any { it.phraseUid == uidB }, "must never surface another user's open item")
+    }
 }

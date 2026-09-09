@@ -81,7 +81,13 @@ class HttpEngramClient(
 
     // ── Ingest ────────────────────────────────────────────────────────────────
 
-    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = withContext(Dispatchers.IO) {
+    // The /ingest/text endpoint does not return created phrase uids today (confirmed against
+    // its documented response shape). This implementation is unused in production wiring
+    // (CognitivePipelineFactory chooses only between DatabaseEngramClient and
+    // InMemoryEngramClient) — same precedent as the other server-endpoint gaps in this class —
+    // so returning an empty list here rather than adding a new server contract is the smallest
+    // change that keeps this a valid, gracefully-degrading EngramClient.
+    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> = withContext(Dispatchers.IO) {
         try {
             val body = json.encodeToString(IngestRequest(userEmail = userEmail, texts = candidates.map { it.content }))
             val req = HttpRequest.newBuilder()
@@ -96,6 +102,7 @@ class HttpEngramClient(
         } catch (e: Exception) {
             logger.warning("engram-engine unreachable during ingest: ${e.message}")
         }
+        emptyList()
     }
 
     // ── Query phrases ─────────────────────────────────────────────────────────

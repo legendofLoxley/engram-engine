@@ -2,7 +2,14 @@ package app.alfrd.engram.cognitive
 
 import app.alfrd.engram.cognitive.pipeline.CognitivePipeline
 import app.alfrd.engram.cognitive.pipeline.FirstSessionHandler
+import app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator
+import app.alfrd.engram.cognitive.pipeline.Interpreter
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeRequestLedger
+import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.EpisodicLogService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
@@ -48,15 +55,35 @@ object CognitivePipelineFactory {
             )
         } else null
 
+        // Owns interpretation -> graph mutation -> propagation -> refreshed-Horizon assembly for
+        // every PROCESS turn (see HorizonCycleCoordinator). Only wired when a real Database is
+        // available — the same condition ResponseSelectionService already requires — so any
+        // DB-less pipeline (tests, or a deployment without one) falls back to CognitivePipeline's
+        // legacy memoryWriteService path unchanged.
+        val horizonCycleCoordinator = db?.let {
+            val horizonGraphStore = ArcadeHorizonGraphStore(it)
+            val horizonAssembler = ArcadeHorizonAssembler(it)
+            HorizonCycleCoordinator(
+                cycleSequencer    = ArcadeCycleSequencer(it),
+                requestLedger     = ArcadeRequestLedger(it),
+                interpreter       = Interpreter(llmClient),
+                engramClient      = engramClient,
+                horizonGraphStore = horizonGraphStore,
+                horizonPropagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler),
+                horizonAssembler  = horizonAssembler,
+            )
+        }
+
         return CognitivePipeline(
-            engramClient        = engramClient,
-            llmClient           = llmClient,
-            selectionService    = selectionService,
-            memoryWriteService  = MemoryWriteService(engramClient),
-            transitionService   = transitionService,
-            firstSessionHandler = firstSessionHandler,
-            confidenceService   = confidenceService,
-            episodicLogService  = episodicLogService,
+            engramClient          = engramClient,
+            llmClient             = llmClient,
+            selectionService      = selectionService,
+            memoryWriteService    = MemoryWriteService(engramClient),
+            transitionService     = transitionService,
+            firstSessionHandler   = firstSessionHandler,
+            confidenceService     = confidenceService,
+            episodicLogService    = episodicLogService,
+            horizonCycleCoordinator = horizonCycleCoordinator,
         )
     }
 }

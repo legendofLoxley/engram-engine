@@ -278,7 +278,7 @@ class PhaseEventStreamerTest {
         // TimeoutCancellationException; any other exception silently closed the stream
         // after acknowledge had already been flushed to the browser.
         val throwingPipeline = object : CognitivePipeline() {
-            override suspend fun processForStream(utterance: String, sessionId: String, userId: String, modality: Modality): SynthesisResult {
+            override suspend fun processForStream(utterance: String, sessionId: String, userId: String, modality: Modality, requestId: String?): SynthesisResult {
                 throw RuntimeException("simulated infrastructure failure")
             }
         }
@@ -297,7 +297,7 @@ class PhaseEventStreamerTest {
     @Test
     fun `SOCIAL pipeline exception emits apology not silent close`() = runTest {
         val throwingPipeline = object : CognitivePipeline() {
-            override suspend fun processForStream(utterance: String, sessionId: String, userId: String, modality: Modality): SynthesisResult {
+            override suspend fun processForStream(utterance: String, sessionId: String, userId: String, modality: Modality, requestId: String?): SynthesisResult {
                 throw RuntimeException("simulated infrastructure failure")
             }
         }

@@ -62,8 +62,9 @@ class DatabaseEngramClient(
      * system requires users to be seeded via /onboard/seed before phrase attribution
      * is possible.
      */
-    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = withContext(Dispatchers.IO) {
-        if (userEmail.isBlank() || candidates.isEmpty()) return@withContext
+    override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> = withContext(Dispatchers.IO) {
+        if (userEmail.isBlank() || candidates.isEmpty()) return@withContext emptyList()
+        val createdUids = mutableListOf<String>()
         try {
             db.transaction {
                 val now = System.currentTimeMillis()
@@ -106,8 +107,9 @@ class DatabaseEngramClient(
                 // Create Phrase vertices and ASSERTS edges.
                 val scores = """[{"type":"trust","perspective":"user","value":$TRUST_SCORE}]"""
                 for (candidate in candidates) {
+                    val uid = UUID.randomUUID().toString()
                     val phraseVertex = db.newVertex("Phrase").apply {
-                        set("uid", UUID.randomUUID().toString())
+                        set("uid", uid)
                         set("text", candidate.content)
                         set("hash", sha256(candidate.content))
                         set("visibility", "private")
@@ -121,10 +123,13 @@ class DatabaseEngramClient(
                         set("scores", scores)
                         save()
                     }
+                    createdUids += uid
                 }
             }
+            createdUids
         } catch (e: Exception) {
             logger.warn("ingest failed for userEmail=$userEmail: ${e.message}")
+            emptyList()
         }
     }
 

@@ -65,9 +65,9 @@ class UnifiedIngestionTest {
         var ingestCallCount = 0
         val delegate = InMemoryEngramClient()
         val countingEngram = object : EngramClient by delegate {
-            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) {
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
                 ingestCallCount++
-                delegate.ingest(candidates, userEmail)
+                return delegate.ingest(candidates, userEmail)
             }
         }
         val mws = MemoryWriteService(countingEngram, this)
@@ -104,9 +104,9 @@ class UnifiedIngestionTest {
         var ingestCallCount = 0
         val delegate = InMemoryEngramClient()
         val countingEngram = object : EngramClient by delegate {
-            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) {
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
                 ingestCallCount++
-                delegate.ingest(candidates, userEmail)
+                return delegate.ingest(candidates, userEmail)
             }
         }
         val mws = MemoryWriteService(countingEngram, this)
@@ -129,9 +129,9 @@ class UnifiedIngestionTest {
             override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> {
                 return delegate.decompose(text, context)
             }
-            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) {
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
                 capturedSourceTag = candidates.firstOrNull()?.source
-                delegate.ingest(candidates, userEmail)
+                return delegate.ingest(candidates, userEmail)
             }
             override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> =
                 delegate.queryPhrases(userEmail, concept, limit)

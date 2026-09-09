@@ -22,6 +22,14 @@ data class ChatRequest(
     val utterance: String,
     val sessionId: String,
     val userId: String,
+    /**
+     * Stable caller-supplied identity for this logical send — resend the same value on a client
+     * retry so it's recognized as a retry rather than a new conversational event. Optional: a
+     * caller that omits it gets no retry protection (see
+     * [app.alfrd.engram.cognitive.pipeline.horizon.RequestLedger]'s doc) but the turn still
+     * processes normally.
+     */
+    val requestId: String? = null,
 )
 
 @Serializable
@@ -94,7 +102,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 val startMs = System.currentTimeMillis()
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val result   = pipeline.processForChat(req.utterance, req.sessionId, userId)
+                val result   = pipeline.processForChat(req.utterance, req.sessionId, userId, requestId = req.requestId)
 
                 val latencyMs = System.currentTimeMillis() - startMs
 
@@ -118,7 +126,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
                 val startMs = System.currentTimeMillis()
 
                 val pipeline = sessionManager.getOrCreate(req.sessionId)
-                val debugResult = pipeline.processForDebug(req.utterance, req.sessionId, userId)
+                val debugResult = pipeline.processForDebug(req.utterance, req.sessionId, userId, requestId = req.requestId)
 
                 val latencyMs = System.currentTimeMillis() - startMs
 

@@ -3,6 +3,7 @@ package app.alfrd.engram
 import app.alfrd.engram.api.configureCognitiveRoutes
 import app.alfrd.engram.api.configureAuth
 import app.alfrd.engram.api.configureDebugConverseRoutes
+import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureOnboardingRoutes
 import app.alfrd.engram.api.configurePhrasesRoutes
 import app.alfrd.engram.api.configureRoutes
@@ -138,6 +139,7 @@ fun main() {
             // No sessionManager passed to factory → FirstSessionHandler is disabled for synthetic users.
             val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db) })
             configureDebugConverseRoutes(debugSessionManager, db)
+            configureDebugEnvironmentSignalRoutes(db)
             log.info("debug-converse endpoint enabled")
         }
         routing {

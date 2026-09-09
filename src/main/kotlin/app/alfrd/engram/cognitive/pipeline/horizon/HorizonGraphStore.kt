@@ -64,11 +64,46 @@ interface HorizonGraphStore {
     /** Appends a status transition to every `ASSERTS` edge asserting [phraseUid] that [userEmail] owns. Returns false if the phrase isn't owned by [userEmail] or doesn't exist. */
     suspend fun markAssertionStatus(userEmail: String, cycleSeq: Long, phraseUid: String, status: AssertionStatus): Boolean
 
-    /** Creates a `relevant_to` edge from [fromPhraseUid] to [toPhraseUid]. Both must be owned by [userEmail]; returns false otherwise. */
+    /**
+     * Creates a `relevant_to` edge from [fromPhraseUid] to [toPhraseUid]. Both must be owned by
+     * [userEmail]; returns false otherwise. Idempotent: if a `relevant_to` edge already exists for
+     * this exact (from, to) pair, no duplicate is created and this returns true — a repeated
+     * reactivation of the same target by the *same* new evidence (e.g. a resumed, previously
+     * interrupted propagation pass) is a safe no-op. A *different* `fromPhraseUid` reactivating the
+     * same [toPhraseUid] is genuinely new evidence and is not deduplicated against this or any
+     * other existing edge.
+     */
     suspend fun markRelevant(userEmail: String, cycleSeq: Long, fromPhraseUid: String, toPhraseUid: String, strength: Double = 1.0): Boolean
 
     /** Creates a `supersedes` edge from [newerPhraseUid] to [olderPhraseUid]. Both must be owned by [userEmail]; returns false otherwise. Representation only — no live code path calls this yet. */
     suspend fun markSuperseded(userEmail: String, cycleSeq: Long, newerPhraseUid: String, olderPhraseUid: String): Boolean
+
+    /**
+     * Stamps Horizon identity onto an `ASSERTS` edge an ordinary [app.alfrd.engram.cognitive.pipeline.memory.EngramClient.ingest]
+     * call already created for [phraseUid] — it never creates a Phrase or `ASSERTS` edge itself.
+     * This is the deliberate split that lets ordinary fact capture keep using `ingest()` verbatim
+     * (preserving whatever Source-reuse/Concept-linking/`queryPhrases` behavior it already has)
+     * while still becoming Horizon-visible: [cycleSeq] is set only if the edge has no `cycleSeq`
+     * yet (this is always the initial stamp, immediately following creation); when [status] is
+     * non-null, `status`/`statusHistory`/`statusCycleSeq` are set too, in the same call.
+     *
+     * Idempotent for a resumed, previously-interrupted attempt: calling this again with the same
+     * [cycleSeq]/[status] for a phrase already stamped that way is a safe no-op (no duplicate
+     * `statusHistory` entry). Calling it with a *different* [cycleSeq] than what is already
+     * stamped is rejected (per-edge, logged) rather than silently overwriting an established
+     * cycle identity — [markAssertionStatus] exists for a genuine *later* status transition.
+     *
+     * Returns false if [phraseUid] isn't owned by [userEmail] or doesn't exist.
+     */
+    suspend fun stampNewAssertion(userEmail: String, cycleSeq: Long, phraseUid: String, status: AssertionStatus? = null): Boolean
+
+    /**
+     * The text of [phraseUid], if it exists and is owned by [userEmail] — null otherwise. Used to
+     * recover evidence text for a phrase a caller already knows the uid of but not the text (e.g.
+     * [app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator] resuming propagation after a
+     * crash-interrupted write, from a [RequestLedger] checkpoint that stored only uids).
+     */
+    suspend fun phraseText(userEmail: String, phraseUid: String): String?
 }
 
 class ArcadeHorizonGraphStore(
@@ -199,6 +234,15 @@ class ArcadeHorizonGraphStore(
                 db.transaction {
                     val from = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, fromPhraseUid) ?: return@transaction
                     val to = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, toPhraseUid) ?: return@transaction
+                    val toUid = to.get("uid")
+                    val alreadyExists = from.getEdges(Vertex.DIRECTION.OUT, "RELATED_TO").any {
+                        it.get("relationType") as? String == "relevant_to" &&
+                            it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == toUid
+                    }
+                    if (alreadyExists) {
+                        success = true
+                        return@transaction
+                    }
                     RelatedToEdges.createRelevantTo(from.modify(), to.modify(), strength, cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail)
                     success = true
                 }
@@ -236,6 +280,74 @@ class ArcadeHorizonGraphStore(
         } catch (e: Exception) {
             logger.warn("markSuperseded failed for userEmail=$userEmail newer=$newerPhraseUid older=$olderPhraseUid: ${e.message}")
             false
+        }
+    }
+
+    override suspend fun stampNewAssertion(
+        userEmail: String,
+        cycleSeq: Long,
+        phraseUid: String,
+        status: AssertionStatus?,
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            withHorizonWriteLock(db, lockTimeoutMs) {
+                var success = false
+                db.transaction {
+                    val ownedAssertsEdges = HorizonOwnership.ownedAssertsEdges(db, userEmail, phraseUid)
+                    if (ownedAssertsEdges.isEmpty()) return@transaction
+                    val now = System.currentTimeMillis()
+                    for (edge in ownedAssertsEdges) {
+                        val existingCycleSeq = (edge.get("cycleSeq") as? Number)?.toLong()
+                        if (existingCycleSeq != null && existingCycleSeq != cycleSeq) {
+                            // Already stamped under a different cycle — this method is only for the
+                            // initial stamp (or an idempotent resume with the SAME cycleSeq); a
+                            // mismatch means the caller is trying to re-establish identity that
+                            // already exists. markAssertionStatus is for a genuine later transition.
+                            logger.warn(
+                                "stampNewAssertion: phraseUid=$phraseUid already stamped with " +
+                                    "cycleSeq=$existingCycleSeq, cannot re-stamp with cycleSeq=$cycleSeq — skipping",
+                            )
+                            continue
+                        }
+                        val mutableEdge = edge.modify()
+                        if (existingCycleSeq == null) {
+                            mutableEdge.set("cycleSeq", cycleSeq)
+                        }
+                        if (status != null) {
+                            val stateValue = status.name.lowercase()
+                            val currentStatus = edge.get("status") as? String
+                            val currentStatusCycleSeq = (edge.get("statusCycleSeq") as? Number)?.toLong()
+                            // Idempotent under a resumed attempt: only append a new history entry
+                            // if this exact (state, cycle) isn't already the recorded current one.
+                            if (currentStatus != stateValue || currentStatusCycleSeq != cycleSeq) {
+                                val history = parseStatusHistory(mutableEdge.get("statusHistory") as? String)
+                                val updated = history + StatusHistoryEntry(stateValue, now)
+                                mutableEdge.set("status", stateValue)
+                                mutableEdge.set("statusHistory", json.encodeToString(updated))
+                                mutableEdge.set("statusCycleSeq", cycleSeq)
+                            }
+                        }
+                        mutableEdge.save()
+                        success = true
+                    }
+                }
+                success
+            } ?: run {
+                logger.warn("stampNewAssertion: could not acquire the Horizon write lock within ${lockTimeoutMs}ms for phraseUid=$phraseUid — rejecting")
+                false
+            }
+        } catch (e: Exception) {
+            logger.warn("stampNewAssertion failed for userEmail=$userEmail phraseUid=$phraseUid: ${e.message}")
+            false
+        }
+    }
+
+    override suspend fun phraseText(userEmail: String, phraseUid: String): String? = withContext(Dispatchers.IO) {
+        try {
+            HorizonOwnership.findPhraseOwnedByUser(db, userEmail, phraseUid)?.get("text") as? String
+        } catch (e: Exception) {
+            logger.warn("phraseText failed for userEmail=$userEmail phraseUid=$phraseUid: ${e.message}")
+            null
         }
     }
 

@@ -35,6 +35,12 @@ data class DebugConverseRequest(
      * the current processForDebug turn does not load trust phase (mirrors production behaviour).
      */
     val trustPhase: String? = null,
+    /**
+     * Stable caller-supplied identity for this logical send — resend the same value to exercise
+     * retry-safety. Optional; omitting it means no retry protection for that call (see
+     * [app.alfrd.engram.cognitive.pipeline.horizon.RequestLedger]'s doc).
+     */
+    val requestId: String? = null,
 )
 
 @Serializable
@@ -135,7 +141,7 @@ fun Application.configureDebugConverseRoutes(
 
                         val startMs = System.currentTimeMillis()
                         val pipeline = debugSessionManager.getOrCreate(sessionId)
-                        val debugResult = pipeline.processForDebug(req.message, sessionId, syntheticEmail)
+                        val debugResult = pipeline.processForDebug(req.message, sessionId, syntheticEmail, requestId = req.requestId)
                         val totalLatencyMs = System.currentTimeMillis() - startMs
 
                         val resolution = classifyDebugResolution(debugResult.chat.synthesisSource)

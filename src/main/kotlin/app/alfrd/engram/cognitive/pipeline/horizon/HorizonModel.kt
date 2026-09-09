@@ -194,3 +194,12 @@ data class ContextHorizon(
 /** One page of a full, explicitly paginated candidate enumeration — see [HorizonAssembler.listCandidates]. */
 @Serializable
 data class CandidatePage(val items: List<SourceRef>, val nextCursor: String?)
+
+/**
+ * One open-status candidate with its text, as returned by [HorizonAssembler.listOpenCandidatesWithText]
+ * for propagation — deliberately not [SourceRef] (reference-only by design, used inside bounded
+ * [ContextHorizon] payloads) and not routed through [HorizonAssembler.assemble] (already trimmed
+ * to a small response-prompt budget before propagation would ever see it).
+ */
+@Serializable
+data class PropagationCandidate(val phraseUid: String, val text: String, val cycleSeq: Long)

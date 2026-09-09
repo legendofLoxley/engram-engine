@@ -91,6 +91,25 @@ object SchemaBootstrap {
                 vt.createProperty("createdAt", Type.LONG)
             }
 
+            // Durable per-user cycle-sequence identity and a bounded, checkpointed record of
+            // in-flight/completed conversational-cycle requests. See
+            // app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer and RequestLedger. The
+            // request record exists so a retried request (identified by a caller-supplied
+            // requestId, never by matching text) can be recognized and resumed/short-circuited
+            // instead of re-running interpretation or re-committing writes — see RequestLedger's
+            // doc for the checkpoint state machine.
+            ensureVertex(schema, "ProcessedRequest") { vt ->
+                vt.createProperty("requestId", Type.STRING)
+                vt.createProperty("userEmail", Type.STRING)
+                vt.createProperty("cycleSeq", Type.LONG)
+                vt.createProperty("checkpoint", Type.STRING)        // cycle_allocated | facts_ingested | writes_committed | completed | failed
+                vt.createProperty("phraseUids", Type.STRING)        // JSON array, populated as known
+                vt.createProperty("intentionPhraseUid", Type.STRING) // nullable
+                vt.createProperty("failureReason", Type.STRING)     // nullable
+                vt.createProperty("createdAt", Type.LONG)
+                vt.createProperty("updatedAt", Type.LONG)
+            }
+
             ensureVertex(schema, "UserScaffoldState") { vt ->
                 vt.createProperty("userId", Type.STRING)
                 vt.createProperty("trustPhase", Type.STRING)         // ORIENTATION | WORKING_RHYTHM | CONTEXT | UNDERSTANDING
@@ -183,6 +202,10 @@ object SchemaBootstrap {
             // ── Additive migrations — safe to run on pre-existing types ──
             ensureProperty(schema, "User",    "email",               Type.STRING)
             ensureProperty(schema, "User",    "updatedAt",           Type.LONG)
+            // Caller-owned, durable per-user monotonic cycle identity — see
+            // app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer. Never a wall-clock
+            // timestamp; allocated atomically under HorizonConsistencyLock's write lock.
+            ensureProperty(schema, "User",    "lastCycleSeq",        Type.LONG)
             ensureProperty(schema, "ASSERTS", "scores",              Type.STRING)
             ensureProperty(schema, "INVITED", "relationshipContext", Type.STRING)
             ensureProperty(schema, "INVITED", "trustPhase",          Type.STRING)
@@ -230,6 +253,10 @@ object SchemaBootstrap {
             ensureIndex(schema, "ResponsePhrase", "hash")
             ensureIndex(schema, "ResponsePhrase", "moveType")
             ensureIndex(schema, "UserScaffoldState", "userId")
+            // ProcessedRequest — scoped lookup by (userEmail, requestId) before LIMIT, and a
+            // cycleSeq index supporting bounded pruning of old rows. See RequestLedger.
+            ensureCompositeIndex(schema, "ProcessedRequest", "userEmail", "requestId")
+            ensureIndex(schema, "ProcessedRequest", "cycleSeq")
             // Context Horizon retrieval — see HorizonAssembler. Bounds the "status=open" and
             // "cycleSeq=currentCycleSeq" filters so they don't degrade into a full scan as ASSERTS
             // edges accumulate on a long-lived Source. Confirmed by direct execution-plan

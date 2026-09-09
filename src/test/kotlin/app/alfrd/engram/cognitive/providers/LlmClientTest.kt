@@ -197,4 +197,36 @@ class LlmClientTest {
 
         assertEquals(parsed, result.parsedOutput)
     }
+
+    // -------------------------------------------------------------------------
+    // Tool calling (LlmRequest.tools / LlmResponse.toolCalls)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `tools defaults to empty so every existing caller is unaffected`() {
+        assertEquals(emptyList<ToolDefinition>(), defaultRequest.tools)
+    }
+
+    @Test
+    fun `toolCalls defaults to empty when a provider returns none`() = runTest {
+        val client = fakeLlmClient { successResponse() }
+
+        val result = client.complete(defaultRequest)
+
+        assertEquals(emptyList<ToolCall>(), result.toolCalls)
+    }
+
+    @Test
+    fun `toolCalls survive the retry wrapper's copy(retryCount = attempt)`() = runTest {
+        val toolCall = ToolCall(name = "assert_open_intention", input = kotlinx.serialization.json.buildJsonObject { put("quote", kotlinx.serialization.json.JsonPrimitive("x")) })
+        val client = fakeLlmClient { attempt ->
+            if (attempt == 0) throw RuntimeException("transient")
+            LlmResponse(text = "", toolCalls = listOf(toolCall), latencyMs = 5, retryCount = 0)
+        }
+
+        val result = client.complete(defaultRequest)
+
+        assertEquals(listOf(toolCall), result.toolCalls, "AbstractLlmClient.complete's result.copy(retryCount=...) must not drop toolCalls")
+        assertEquals(1, result.retryCount)
+    }
 }
