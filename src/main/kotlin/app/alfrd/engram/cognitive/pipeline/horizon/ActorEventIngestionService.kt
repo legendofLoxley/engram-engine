@@ -250,6 +250,26 @@ open class ActorEventIngestionService(
             return ActorEventIngestOutcome.DuplicateDelivery(eventId, existing.phraseUid, existing.cycleSeq, outcome)
         }
 
+        if (existing.propagationStatus != null) {
+            // Reachable when propagationStatus is "incomplete" with an EMPTY target list — e.g.
+            // PropagationOutcome.Failed, which SalientTokenPropagator can return without ever
+            // capturing which markRelevant calls, if any, it attempted before failing (see that
+            // class's catch block). The attempt's outcome WAS durably recorded here (unlike
+            // "pending"), but it recorded no specific set to retry precisely — falling through to a
+            // full recompute would carry the exact same "recompute against later intentions" risk
+            // as "pending", so it gets the same treatment: report uncertain, take no action.
+            logger.warn(
+                "resolveDuplicateDelivery: eventId=$eventId propagationStatus=${existing.propagationStatus} with no recorded " +
+                    "incomplete target set for userEmail=$userEmail — reporting uncertain, taking no propagation action",
+            )
+            return ActorEventIngestOutcome.PropagationUncertain(
+                eventId,
+                existing.phraseUid,
+                existing.cycleSeq,
+                "a prior propagation attempt recorded no specific retry target set — refusing to recompute against current state",
+            )
+        }
+
         // propagationStatus == null: never started. The one safe full-recompute case — there is no
         // prior partial effect to reconcile against, so this genuinely is a first attempt.
         val retryCycle = cycleSequencer.allocateCycle(userEmail)

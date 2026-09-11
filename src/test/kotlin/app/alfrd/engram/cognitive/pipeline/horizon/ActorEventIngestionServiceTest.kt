@@ -528,6 +528,43 @@ class ActorEventIngestionServiceTest {
         assertEquals(0, countingPropagator.callCount, "an uncertain checkpoint must never trigger a fresh recomputation — propagate() must not be called at all")
     }
 
+    @Test
+    fun `a duplicate delivery of an event whose original propagation returned Failed reports uncertain, never recomputes`() = runBlocking {
+        // Regression test: PropagationOutcome.Failed is recorded as propagationStatus="incomplete"
+        // with an EMPTY target list (see recordPropagationOutcome) — resolveDuplicateDelivery used
+        // to fall through its incompletePropagationTargets.isNotEmpty() check straight into the
+        // "never started" full-recompute branch, because nothing verified propagationStatus was
+        // actually null first. A recorded (but empty) "incomplete" state is not "never started" —
+        // it must be treated exactly like "pending": report uncertain, take no action.
+        val email = "prop-failed-then-replay-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        // An open intention a full recompute WOULD connect to, if invoked — makes "never
+        // recomputed" an observable fact, not an assumption.
+        seedOpenIntention(email, cycleSeq = 1, text = "Arx priority is getting Alfrd running")
+
+        val failingPropagator = object : HorizonPropagator {
+            override suspend fun propagate(userEmail: String, cycleSeq: Long, newPhrases: List<Pair<String, String>>): PropagationOutcome =
+                PropagationOutcome.Failed("simulated total propagation failure")
+        }
+        val countingPropagator = CountingPropagator(failingPropagator)
+
+        val first = service(propagator = countingPropagator)
+            .ingest(email, "evt-failed-then-replay", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+        assertTrue(first is ActorEventIngestOutcome.Committed, "expected Committed, got $first")
+        assertTrue((first as ActorEventIngestOutcome.Committed).propagationOutcome is PropagationOutcome.Failed)
+        assertEquals(1, countingPropagator.callCount, "the original attempt must actually run propagate() once")
+
+        val replay = service(propagator = countingPropagator)
+            .ingest(email, "evt-failed-then-replay", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+
+        assertTrue(
+            replay is ActorEventIngestOutcome.PropagationUncertain,
+            "a prior Failed outcome with no recorded target set must never authorize a full recompute — expected PropagationUncertain, got $replay",
+        )
+        assertEquals(1, countingPropagator.callCount, "the replay must add zero additional propagation calls")
+        assertEquals(0, relatedToCount(email), "no relevance effects can exist from a replay that never ran propagate()")
+    }
+
     // ── Isolation ────────────────────────────────────────────────────────────
 
     @Test
