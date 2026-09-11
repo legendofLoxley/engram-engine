@@ -171,6 +171,23 @@ class ActorEventIngestionServiceTest {
         return phraseUid
     }
 
+    /** Delegates every [HorizonGraphStore] call to [delegate] except `recordActorEventPropagationStatus("pending", ...)`, which reports failure — simulates the checkpoint write itself failing (lock timeout, transient error) without touching evidence-write or any other status transition. */
+    private fun pendingCheckpointFailingStore(delegate: HorizonGraphStore) = object : HorizonGraphStore by delegate {
+        override suspend fun recordActorEventPropagationStatus(
+            userEmail: String, eventId: String, status: String, incompletePropagationTargets: List<RelevanceEdgeSummary>,
+        ): Boolean = if (status == "pending") false else delegate.recordActorEventPropagationStatus(userEmail, eventId, status, incompletePropagationTargets)
+    }
+
+    /** Counts real [propagate] invocations — a direct, unambiguous witness that propagation was or wasn't attempted, independent of what edges (if any) it would have produced. */
+    private class CountingPropagator(private val delegate: HorizonPropagator) : HorizonPropagator {
+        var callCount = 0
+            private set
+        override suspend fun propagate(userEmail: String, cycleSeq: Long, newPhrases: List<Pair<String, String>>): PropagationOutcome {
+            callCount++
+            return delegate.propagate(userEmail, cycleSeq, newPhrases)
+        }
+    }
+
     private fun assertsCountForEventId(eventId: String): Int =
         dbManager.getDatabase().query("sql", "SELECT count(*) as c FROM ASSERTS WHERE eventId = :id", mapOf("id" to eventId))
             .use { rs -> (rs.next().toMap()["c"] as Number).toInt() }
@@ -438,6 +455,77 @@ class ActorEventIngestionServiceTest {
         assertTrue(dup.propagationOutcome is PropagationOutcome.Propagated, "expected Propagated, got ${dup.propagationOutcome}")
         assertEquals(1, relatedToCount(email), "the never-started propagation should connect to the pre-existing open candidate now that it finally runs")
         assertTrue((dup.propagationOutcome as PropagationOutcome.Propagated).edgesCreated.any { it.toPhraseUid == target })
+    }
+
+    @Test
+    fun `when the pending checkpoint write itself fails, propagate is never called and the status stays recoverable as never-started`() = runBlocking {
+        val email = "checkpoint-write-fail-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        // An open intention a real propagate() run WOULD connect to — makes "propagate never ran"
+        // an observable fact (zero relevance edges), not just an assumption.
+        seedOpenIntention(email, cycleSeq = 1, text = "Arx priority is getting Alfrd running")
+
+        val checkpointFailingStore = pendingCheckpointFailingStore(store)
+        val countingPropagator = CountingPropagator(SalientTokenPropagator(checkpointFailingStore, assembler))
+
+        val outcome = service(store = checkpointFailingStore, propagator = countingPropagator)
+            .ingest(email, "evt-checkpoint-write-fail", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+
+        assertTrue(outcome is ActorEventIngestOutcome.Committed, "evidence commitment must not be blocked by a checkpoint-write failure, got $outcome")
+        val committed = outcome as ActorEventIngestOutcome.Committed
+        assertTrue(committed.propagationOutcome is PropagationOutcome.Failed, "expected Failed, got ${committed.propagationOutcome}")
+        assertEquals(0, countingPropagator.callCount, "propagate() must never run unless the pending checkpoint write is confirmed to have succeeded first")
+        assertEquals(0, relatedToCount(email), "no relevance effects can exist if propagate() was never called")
+
+        // The invariant a later retry depends on: propagationStatus was left untouched by the
+        // failed checkpoint write (never promoted to "pending"), so a genuine retry through the
+        // REAL store still sees "never started" and safely runs a full recompute exactly once —
+        // never PropagationUncertain, which would mean a real effect might already exist unrecorded.
+        val retry = service().ingest(email, "evt-checkpoint-write-fail", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+        assertTrue(retry is ActorEventIngestOutcome.DuplicateDelivery, "expected DuplicateDelivery, got $retry")
+        val dup = retry as ActorEventIngestOutcome.DuplicateDelivery
+        assertNotNull(dup.propagationOutcome, "a never-started propagation must actually run on retry, not be skipped")
+        assertTrue(dup.propagationOutcome is PropagationOutcome.Propagated, "expected Propagated, got ${dup.propagationOutcome}")
+        assertEquals(1, relatedToCount(email), "the recovered retry should connect to the pre-existing open candidate")
+    }
+
+    @Test
+    fun `a checkpoint write failure on the never-started duplicate-delivery retry path also never calls propagate`() = runBlocking {
+        val email = "checkpoint-write-fail-retry-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        seedOpenIntention(email, cycleSeq = 1, text = "Arx priority is getting Alfrd running")
+        seedActorEventWithPropagationStatus(
+            email, "evt-never-started-checkpoint-fail", cycleSeq = 2, text = "Arx developer build finished compiling", sourceName = "hermes", propagationStatus = null,
+        )
+
+        val checkpointFailingStore = pendingCheckpointFailingStore(store)
+        val countingPropagator = CountingPropagator(SalientTokenPropagator(checkpointFailingStore, assembler))
+
+        val retry = service(store = checkpointFailingStore, propagator = countingPropagator)
+            .ingest(email, "evt-never-started-checkpoint-fail", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+
+        assertTrue(retry is ActorEventIngestOutcome.DuplicateDelivery, "expected DuplicateDelivery, got $retry")
+        val dup = retry as ActorEventIngestOutcome.DuplicateDelivery
+        assertTrue(dup.propagationOutcome is PropagationOutcome.Failed, "expected Failed, got ${dup.propagationOutcome}")
+        assertEquals(0, countingPropagator.callCount, "propagate() must never run without a confirmed durable pending checkpoint, on this retry path either")
+        assertEquals(0, relatedToCount(email))
+    }
+
+    @Test
+    fun `PropagationUncertain never invokes propagate at all, confirmed by call count not just absence of edges`() = runBlocking {
+        val email = "prop-uncertain-callcount-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        seedOpenIntention(email, cycleSeq = 1, text = "Arx priority is getting Alfrd running")
+        seedActorEventWithPropagationStatus(
+            email, "evt-uncertain-callcount", cycleSeq = 2, text = "Arx developer build finished compiling", sourceName = "hermes", propagationStatus = "pending",
+        )
+
+        val countingPropagator = CountingPropagator(SalientTokenPropagator(store, assembler))
+        val outcome = service(propagator = countingPropagator)
+            .ingest(email, "evt-uncertain-callcount", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+
+        assertTrue(outcome is ActorEventIngestOutcome.PropagationUncertain, "expected PropagationUncertain, got $outcome")
+        assertEquals(0, countingPropagator.callCount, "an uncertain checkpoint must never trigger a fresh recomputation — propagate() must not be called at all")
     }
 
     // ── Isolation ────────────────────────────────────────────────────────────

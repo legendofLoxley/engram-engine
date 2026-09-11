@@ -268,9 +268,29 @@ open class ActorEventIngestionService(
      * durable, explicit trace ([ActorEventIngestOutcome.PropagationUncertain] on the next lookup)
      * rather than silent `null`, which [resolveDuplicateDelivery] would otherwise treat as
      * "never started" and blindly recompute.
+     *
+     * **The checkpoint write's own success is verified, not assumed, before [propagate] ever
+     * runs.** A checkpoint written *after* the effect it describes is worthless — but so is one
+     * merely *attempted* beforehand: if [HorizonGraphStore.recordActorEventPropagationStatus]
+     * itself fails (write-lock timeout, unknown user), `propagationStatus` stays exactly as it was
+     * before this call — most likely still `null` — while [propagate] is about to run regardless.
+     * A subsequent crash during that unguarded run would then leave real, uncertain effects behind
+     * a `null` checkpoint, which [resolveDuplicateDelivery] treats as "never started" and safe to
+     * fully recompute — silently reintroducing the exact uncontrolled recomputation this whole
+     * mechanism exists to prevent. So [propagate] is never called unless the "pending" write is
+     * confirmed durable first; on failure this returns [PropagationOutcome.Failed] immediately,
+     * leaving `propagationStatus` untouched — a later retry's "`null` means safe to retry fully"
+     * reasoning stays valid because nothing was actually attempted.
      */
     private suspend fun runAndRecordPropagation(userEmail: String, eventId: String, phraseUid: String, cycleSeq: Long, text: String): PropagationOutcome {
-        horizonGraphStore.recordActorEventPropagationStatus(userEmail, eventId, "pending", emptyList())
+        val checkpointSaved = horizonGraphStore.recordActorEventPropagationStatus(userEmail, eventId, "pending", emptyList())
+        if (!checkpointSaved) {
+            logger.warn(
+                "runAndRecordPropagation: could not persist the pending propagation checkpoint for eventId=$eventId " +
+                    "userEmail=$userEmail — refusing to run propagate() without a confirmed durable checkpoint",
+            )
+            return PropagationOutcome.Failed("could not persist the pending propagation checkpoint before starting — propagation not attempted")
+        }
         val outcome = horizonPropagator.propagate(userEmail, cycleSeq, listOf(phraseUid to text))
         recordPropagationOutcome(userEmail, eventId, outcome)
         return outcome
