@@ -237,6 +237,19 @@ object SchemaBootstrap {
             // stamp can be stale, wrong, or bypassed by a writer that doesn't go through the store.
             ensureProperty(schema, "RELATED_TO", "ownerEmail",   Type.STRING)
 
+            // Actor-event identity and retry state — see
+            // app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService. Additive only,
+            // same ASSERTS edge every other Horizon-specific property already lives on, so identity
+            // is committed atomically with the evidence it identifies (same db.transaction), not a
+            // separate ledger that could drift out of sync with it.
+            ensureProperty(schema, "ASSERTS", "eventId",      Type.STRING)  // idempotency key, scoped per-user (see the composite index below)
+            ensureProperty(schema, "ASSERTS", "contentHash",  Type.STRING)  // actorEventFingerprint() of the immutable event payload — detects conflicting reuse of eventId
+            ensureProperty(schema, "ASSERTS", "assignmentId", Type.STRING) // nullable — correlates events under one broader task; never used for dedup, distinct from eventId
+            ensureProperty(schema, "ASSERTS", "occurredAt",   Type.LONG)   // nullable — when the event happened at the source; existing `timestamp` already serves as receipt time
+            ensureProperty(schema, "ASSERTS", "kindMetadata", Type.STRING) // JSON, event-specific fields (e.g. toolName/toolSucceeded) — on the event's own edge, never only in the (reused, not-updated-on-reuse) Source.metadata
+            ensureProperty(schema, "ASSERTS", "propagationStatus", Type.STRING) // "completed" | "incomplete", null before first propagate() attempt
+            ensureProperty(schema, "ASSERTS", "incompletePropagationTargets", Type.STRING) // JSON array of {toPhraseUid,strength} still owed — precise retry target, never a blind full recompute
+
             // ── Indexes ───────────────────────────────────────────────────
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
@@ -266,6 +279,11 @@ object SchemaBootstrap {
             ensureIndex(schema, "ASSERTS", "status")
             ensureIndex(schema, "ASSERTS", "cycleSeq")
             ensureIndex(schema, "ASSERTS", "statusCycleSeq")
+            // Actor-event idempotency lookup — see ActorEventIngestionService. Scoped to one user's
+            // trusted sources via `@out.uid IN :sourceUids` after this index narrows by eventId,
+            // same pattern as HorizonOwnership.ownedAssertsEdges; two different users independently
+            // choosing the same eventId string never collide.
+            ensureIndex(schema, "ASSERTS", "eventId")
             // Bounds the relevant_to reactivation-window lookup, which is otherwise a global scan
             // of every RELATED_TO edge regardless of relationType.
             ensureCompositeIndex(schema, "RELATED_TO", "relationType", "cycleSeq")

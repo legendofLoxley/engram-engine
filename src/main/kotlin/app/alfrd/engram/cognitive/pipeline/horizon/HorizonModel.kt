@@ -1,6 +1,9 @@
 package app.alfrd.engram.cognitive.pipeline.horizon
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.security.MessageDigest
 
 /**
  * The bounded, evidence-backed read model this package assembles from durable graph state.
@@ -18,6 +21,24 @@ import kotlinx.serialization.Serializable
  * `EngramClient.ingest()` hardcodes `Source.type = "onboarding_conversation"`.
  */
 const val ENVIRONMENT_SOURCE_TYPE = "environment_signal"
+
+/**
+ * `Source.type` values for the three Actor-attributed provenance kinds [ActorEventIngestionService]
+ * distinguishes — never inferred from a caller-supplied free-text field (see that service's
+ * `ActorEventKind`). Kept distinct from each other and from [ENVIRONMENT_SOURCE_TYPE] so
+ * [ArcadeHorizonAssembler.provenanceFor] never defaults any of them to
+ * [ProvenanceKind.EXPLICIT_USER_STATEMENT].
+ */
+const val ACTOR_OBSERVATION_SOURCE_TYPE = "actor_observation"
+const val ACTOR_INTERPRETATION_SOURCE_TYPE = "actor_interpretation"
+const val ACTOR_TOOL_RESULT_SOURCE_TYPE = "actor_tool_result"
+
+/** The bounded-recency evidence pool in [ArcadeHorizonAssembler.assemble] is scoped to exactly these — see [SurfacingReason.RecentActorEvidence]. Deliberately excludes [ENVIRONMENT_SOURCE_TYPE]: that path's own visibility gap is a named follow-up, not touched by this increment. */
+val ACTOR_ATTRIBUTED_SOURCE_TYPES: Set<String> = setOf(
+    ACTOR_OBSERVATION_SOURCE_TYPE,
+    ACTOR_INTERPRETATION_SOURCE_TYPE,
+    ACTOR_TOOL_RESULT_SOURCE_TYPE,
+)
 
 /** Tunable bounds shared by [HorizonGraphStore] and [HorizonAssembler]. Foundation defaults, not policy. */
 object HorizonLimits {
@@ -74,9 +95,20 @@ enum class AssertionStatus { OPEN, RESOLVED }
 @Serializable
 enum class AttentionDirective { PINNED, SUPPRESSED }
 
-/** Who/what asserted an item — kept distinct from category and lifecycle. */
+/**
+ * Who/what asserted an item — kept distinct from category and lifecycle. [ACTOR_OBSERVATION],
+ * [ACTOR_INTERPRETATION] and [ACTOR_TOOL_RESULT] are three deliberately distinct kinds (never
+ * collapsed into one "Actor" value, and never defaulted to [EXPLICIT_USER_STATEMENT]): an Actor
+ * directly reporting something it observed, an inference the Actor drew, and a tool's own reported
+ * result are different epistemic claims — see [ActorEventIngestionService.ActorEventKind]. None of
+ * these three is independently verified by this increment merely because a caller labels an event
+ * "tool" — see that service's doc.
+ */
 @Serializable
-enum class ProvenanceKind { EXPLICIT_USER_STATEMENT, ENVIRONMENT_SIGNAL, MODEL_INFERENCE }
+enum class ProvenanceKind {
+    EXPLICIT_USER_STATEMENT, ENVIRONMENT_SIGNAL, MODEL_INFERENCE,
+    ACTOR_OBSERVATION, ACTOR_INTERPRETATION, ACTOR_TOOL_RESULT,
+}
 
 /**
  * Inlined text capped at [HorizonLimits.MAX_ITEM_TEXT_LENGTH]. The full text is always recoverable
@@ -144,6 +176,24 @@ sealed interface SurfacingReason {
     /** Status is OPEN, asserted in an earlier cycle, and not actively reactivated right now. */
     @Serializable
     data class DormantOpen(val lastStatusChangeCycleSeq: Long) : SurfacingReason
+    /**
+     * Not open-status, not this cycle's own content, not actively reactivated — surfaced purely
+     * because it is Actor-attributed evidence ([ACTOR_ATTRIBUTED_SOURCE_TYPES]) asserted within the
+     * bounded recency window ([ArcadeHorizonAssembler.assemble]'s `activeRelevanceCycles`, same knob
+     * `ActiveReactivation` already uses). Deliberately never [DormantOpen]: that variant's name and
+     * precondition specifically mean an open-status intention, and a completed Actor result is not
+     * one — mislabeling it that way just to keep it visible was explicitly ruled out.
+     *
+     * **This is eligibility, not a guarantee of inclusion.** [essential] is false for this reason in
+     * [app.alfrd.engram.cognitive.pipeline.HorizonItemsRenderer] — [ArcadeHorizonAssembler.assemble]'s
+     * own pool limit / byte budget, and separately [app.alfrd.engram.cognitive.pipeline.Actor]'s
+     * prompt budget ladder, can both still drop it under pressure from higher-priority or more
+     * numerous competing candidates, exactly as they already can for any other droppable item. It
+     * also stops being eligible at all once `currentCycleSeq` moves past the window — this does not
+     * make evidence persist indefinitely, and it does not by itself complete "Director freshness."
+     */
+    @Serializable
+    data class RecentActorEvidence(val assertedCycleSeq: Long) : SurfacingReason
 }
 
 /** One bounded candidate in a [ContextHorizon]. */
@@ -203,3 +253,47 @@ data class CandidatePage(val items: List<SourceRef>, val nextCursor: String?)
  */
 @Serializable
 data class PropagationCandidate(val phraseUid: String, val text: String, val cycleSeq: Long)
+
+/**
+ * The immutable payload [actorEventFingerprint] hashes — every field that, if it differed between
+ * two deliveries under the same `eventId`, would mean they are genuinely different events (a
+ * conflicting reuse), not a retry of the same one. Deliberately excludes anything server-generated
+ * or allocated (receipt time, `cycleSeq`) — those can legitimately differ between an original
+ * delivery and its retry without the underlying event being any different. [occurredAt] is the
+ * **raw, caller-supplied** value, `null` when omitted — never defaulted to a receipt time before
+ * hashing, or an identical retry that omits it would conflict with itself purely because the wall
+ * clock advanced between attempts. A `data class` (not a `Map`) so kotlinx.serialization's JSON
+ * encoding is fixed by declaration order — deterministic without relying on map-iteration order —
+ * and so embedded delimiter-like characters in [text] can never shift field boundaries the way naive
+ * string concatenation could.
+ */
+@Serializable
+private data class ActorEventFingerprintPayload(
+    val provenanceSourceType: String,
+    val sourceName: String,
+    val text: String,
+    val assignmentId: String? = null,
+    val occurredAt: Long? = null,
+    val basis: String? = null,
+    val toolName: String? = null,
+    val toolSucceeded: Boolean? = null,
+)
+
+private val fingerprintJson = Json { encodeDefaults = true }
+
+/** SHA-256 over [ActorEventFingerprintPayload]'s canonical JSON encoding — see that type's doc for exactly what is and isn't included. */
+fun actorEventFingerprint(
+    provenanceSourceType: String,
+    sourceName: String,
+    text: String,
+    assignmentId: String?,
+    occurredAt: Long?,
+    basis: String? = null,
+    toolName: String? = null,
+    toolSucceeded: Boolean? = null,
+): String {
+    val payload = ActorEventFingerprintPayload(provenanceSourceType, sourceName, text, assignmentId, occurredAt, basis, toolName, toolSucceeded)
+    val canonical = fingerprintJson.encodeToString(payload)
+    val bytes = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))
+    return bytes.joinToString("") { "%02x".format(it) }
+}

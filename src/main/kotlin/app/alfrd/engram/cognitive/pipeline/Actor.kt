@@ -49,9 +49,11 @@ data class RetrievedScript(
  * from the full [app.alfrd.engram.cognitive.pipeline.horizon] type surface while still letting it
  * own budget trimming, which needs per-item granularity (see [Actor.assemblePrompt]).
  * [essential] items ([SurfacingReason.ActiveReactivation]/[SurfacingReason.JustAsserted] — this
- * cycle's freshly-relevant evidence) are never silently dropped by the budget ladder; only
- * [SurfacingReason.DormantOpen] items are droppable, and only in the priority order
- * [HorizonItemsRenderer.render] already received them in.
+ * cycle's freshly-relevant evidence) are never silently dropped by the budget ladder; every other
+ * kind ([SurfacingReason.DormantOpen], [SurfacingReason.RecentActorEvidence]) is droppable, and only
+ * in the priority order [HorizonItemsRenderer.render] already received them in — bounded-recency
+ * eligibility (see that reason's own doc) is not itself a guarantee of a place in the rendered
+ * prompt.
  */
 data class HorizonPromptItem(val renderedLine: String, val essential: Boolean)
 
@@ -65,6 +67,7 @@ object HorizonItemsRenderer {
             is SurfacingReason.ActiveReactivation ->
                 "new evidence just made this relevant again: \"${surfacing.info.triggeringPhraseText.text}\""
             is SurfacingReason.JustAsserted -> "just noted"
+            is SurfacingReason.RecentActorEvidence -> "reported recently, independent of this conversation"
             is SurfacingReason.DormantOpen -> "noted earlier, still open"
         }
         val statusNote = item.status?.let { " [${it.name.lowercase()}]" } ?: ""

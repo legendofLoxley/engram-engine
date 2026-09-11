@@ -91,6 +91,38 @@ class ActorTest {
         sourceCount = 1,
     )
 
+    private fun recentActorEvidenceItem(text: String, assertedCycleSeq: Long) = HorizonItem(
+        category = HorizonItemCategory.FACT,
+        text = BoundedText(text, truncated = false),
+        status = null,
+        attentionDirective = null as AttentionDirective?,
+        provenance = ProvenanceKind.ACTOR_OBSERVATION,
+        surfacing = SurfacingReason.RecentActorEvidence(assertedCycleSeq),
+        sourceRefs = emptyList(),
+        sourceCount = 1,
+    )
+
+    @Test
+    fun `render marks RecentActorEvidence droppable, framing distinct from DormantOpen`() {
+        val horizon = ContextHorizon(
+            userEmail = "u@test.alfrd.internal",
+            asOf = 0L,
+            schemaVersion = 1,
+            items = listOf(recentActorEvidenceItem("Arx build finished compiling", assertedCycleSeq = 5)),
+            budget = HorizonBudget(maxItems = 12, itemCount = 1, truncated = false),
+            omittedSample = emptyList(),
+            omittedAtLeast = 0,
+            moreCandidatesAvailable = false,
+        )
+
+        val rendered = HorizonItemsRenderer.render(horizon)
+
+        assertEquals(1, rendered.size)
+        assertTrue(!rendered[0].essential, "RecentActorEvidence must be droppable under budget pressure, exactly like DormantOpen — bounded-recency eligibility is not a guarantee of a rendered place")
+        assertTrue(rendered[0].renderedLine.contains("reported recently, independent of this conversation"))
+        assertTrue(!rendered[0].renderedLine.contains("noted earlier, still open"), "must never be confused with DormantOpen's framing — it is not an open intention")
+    }
+
     @Test
     fun `render marks ActiveReactivation and JustAsserted essential, DormantOpen droppable, order preserved`() {
         val horizon = ContextHorizon(

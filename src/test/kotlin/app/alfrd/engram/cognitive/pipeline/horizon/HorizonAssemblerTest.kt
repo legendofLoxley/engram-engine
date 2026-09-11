@@ -106,6 +106,58 @@ class HorizonAssemblerTest {
     private fun seedConversationalPhraseWithCycle(email: String, text: String, cycleSeq: Long): String =
         seedConversationalPhraseWithCycle(dbManager.getDatabase(), email, text, cycleSeq)
 
+    /** Seeds a User + Actor-attributed Source→ASSERTS→Phrase (status=null, so it only ever surfaces via JustAsserted/RecentActorEvidence — never DormantOpen) with an explicit cycleSeq. */
+    private fun seedActorEventPhraseWithCycle(email: String, text: String, cycleSeq: Long, sourceType: String = ACTOR_OBSERVATION_SOURCE_TYPE): String {
+        val db = dbManager.getDatabase()
+        val now = System.currentTimeMillis()
+        val phraseUid = UUID.randomUUID().toString()
+        db.transaction {
+            var userVertex = db.query("sql", "SELECT FROM User WHERE email = :e", mapOf("e" to email))
+                .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+            if (userVertex == null) {
+                userVertex = db.newVertex("User").apply {
+                    set("uid", UUID.randomUUID().toString())
+                    set("username", email.substringBefore("@"))
+                    set("email", email)
+                    set("tier", -1)
+                    set("createdAt", now)
+                    set("updatedAt", now)
+                    save()
+                }
+            }
+            val sourceName = "hermes:$email"
+            var sourceVertex = db.query("sql", "SELECT FROM Source WHERE name = :n AND type = :t", mapOf("n" to sourceName, "t" to sourceType))
+                .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null }
+            if (sourceVertex == null) {
+                sourceVertex = db.newVertex("Source").apply {
+                    set("uid", UUID.randomUUID().toString())
+                    set("name", sourceName)
+                    set("type", sourceType)
+                    set("metadata", "{}")
+                    save()
+                }
+                userVertex.modify().newEdge("TRUSTS", sourceVertex, false).apply { set("scores", "[]"); save() }
+            }
+            val phraseVertex = db.newVertex("Phrase").apply {
+                set("uid", phraseUid)
+                set("text", text)
+                set("hash", phraseUid)
+                set("visibility", "private")
+                set("createdAt", now)
+                set("updatedAt", now)
+                save()
+            }
+            sourceVertex.newEdge("ASSERTS", phraseVertex, false).apply {
+                set("context", sourceType)
+                set("timestamp", now)
+                set("scores", "[]")
+                set("cycleSeq", cycleSeq)
+                save()
+            }
+        }
+        return phraseUid
+    }
+
     /** A real User vertex that trusts no Source at all — distinct from a missing user entirely. */
     private fun seedBareUser(email: String) {
         val db = dbManager.getDatabase()
@@ -1077,6 +1129,7 @@ class HorizonAssemblerTest {
         val cycleSeq = when (val s = item.surfacing) {
             is SurfacingReason.ActiveReactivation -> s.info.edgeCycleSeq
             is SurfacingReason.JustAsserted -> s.cycleSeq
+            is SurfacingReason.RecentActorEvidence -> s.assertedCycleSeq
             is SurfacingReason.DormantOpen -> s.lastStatusChangeCycleSeq
         }
         listOf(item.sourceRefs.first().phraseUid, item.category, item.status, cycleSeq)
@@ -1168,5 +1221,72 @@ class HorizonAssemblerTest {
 
         assertTrue(candidatesForA.any { it.phraseUid == uidA })
         assertFalse(candidatesForA.any { it.phraseUid == uidB }, "must never surface another user's open item")
+    }
+
+    // ── RecentActorEvidence: bounded-recency Actor-attributed evidence pool ───────────────────
+
+    @Test
+    fun `Actor-attributed evidence from an earlier cycle is eligible within the recency window, not just its own cycle`() = runBlocking {
+        val email = "actor-evidence-window-${UUID.randomUUID()}@test.alfrd.internal"
+        val uid = seedActorEventPhraseWithCycle(email, "Arx developer build finished compiling", cycleSeq = 10)
+
+        // Own cycle: JustAsserted, not RecentActorEvidence.
+        val ownCycle = assembler.assemble(email, currentCycleSeq = 10).expectSuccess()
+        val ownItem = ownCycle.items.single { it.sourceRefs.first().phraseUid == uid }
+        assertTrue(ownItem.surfacing is SurfacingReason.JustAsserted, "in its own cycle it is freshly-stated content, not yet 'recent'")
+
+        // One cycle later, still within the default 3-cycle window: RecentActorEvidence, not DormantOpen.
+        val later = assembler.assemble(email, currentCycleSeq = 11).expectSuccess()
+        val laterItem = later.items.single { it.sourceRefs.first().phraseUid == uid }
+        assertTrue(laterItem.surfacing is SurfacingReason.RecentActorEvidence, "expected RecentActorEvidence, got ${laterItem.surfacing}")
+        assertEquals(ProvenanceKind.ACTOR_OBSERVATION, laterItem.provenance)
+        assertEquals(HorizonItemCategory.FACT, laterItem.category, "an Actor observation is not intention-shaped — never mislabeled INTENTION")
+    }
+
+    @Test
+    fun `Actor-attributed evidence outside the recency window is absent, not indefinitely persistent`() = runBlocking {
+        val email = "actor-evidence-boundary-${UUID.randomUUID()}@test.alfrd.internal"
+        val uid = seedActorEventPhraseWithCycle(email, "Nightly job completed", cycleSeq = 10)
+
+        // Exactly at the window edge (default activeRelevanceCycles = 3): still eligible.
+        val atEdge = assembler.assemble(email, currentCycleSeq = 13).expectSuccess()
+        assertTrue(atEdge.items.any { it.sourceRefs.first().phraseUid == uid }, "must still be eligible exactly at the window boundary")
+
+        // One cycle past the edge: no longer eligible — the bound is real, not decorative.
+        val pastEdge = assembler.assemble(email, currentCycleSeq = 14).expectSuccess()
+        assertFalse(pastEdge.items.any { it.sourceRefs.first().phraseUid == uid }, "must not persist indefinitely once the recency window has passed")
+    }
+
+    @Test
+    fun `RecentActorEvidence ranks below JustAsserted and ActiveReactivation but above DormantOpen`() = runBlocking {
+        val email = "actor-evidence-priority-${UUID.randomUUID()}@test.alfrd.internal"
+        val dormantUid = seedConversationalPhraseWithCycle(email, "An old open intention", cycleSeq = 1)
+        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = dormantUid, status = AssertionStatus.OPEN)
+        val actorUid = seedActorEventPhraseWithCycle(email, "Recent Actor evidence", cycleSeq = 9)
+        val freshUid = seedConversationalPhraseWithCycle(email, "Just said this", cycleSeq = 10)
+
+        val horizon = assembler.assemble(email, currentCycleSeq = 10).expectSuccess()
+        val order = horizon.items.map { it.sourceRefs.first().phraseUid }
+
+        assertTrue(order.indexOf(freshUid) < order.indexOf(actorUid), "JustAsserted must outrank RecentActorEvidence")
+        assertTrue(order.indexOf(actorUid) < order.indexOf(dormantUid), "RecentActorEvidence must outrank an indefinitely-old DormantOpen item")
+    }
+
+    @Test
+    fun `an eligible Actor-attributed item can still be excluded from the assembled Horizon by higher-priority competing candidates`() = runBlocking {
+        val email = "actor-evidence-crowded-${UUID.randomUUID()}@test.alfrd.internal"
+        // The target is the OLDEST among 13 same-rank RecentActorEvidence items, all within the
+        // default recency window of currentCycleSeq=100 — eligibility alone does not survive
+        // HorizonBudget.DEFAULT.maxItems=12 against 12 more-recent same-tier competitors.
+        val targetUid = seedActorEventPhraseWithCycle(email, "Target Actor evidence, oldest of the batch", cycleSeq = 97)
+        repeat(12) { i -> seedActorEventPhraseWithCycle(email, "Competing Actor evidence #$i", cycleSeq = 98) }
+
+        val horizon = assembler.assemble(email, currentCycleSeq = 100, activeRelevanceCycles = 3).expectSuccess()
+
+        assertEquals(12, horizon.items.size, "budget.maxItems must still cap the result even though all 13 candidates were eligible")
+        assertFalse(
+            horizon.items.any { it.sourceRefs.first().phraseUid == targetUid },
+            "eligibility within the recency window is not a guarantee of a place in the assembled Horizon — higher-priority/more-recent competitors can still crowd it out",
+        )
     }
 }

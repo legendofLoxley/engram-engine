@@ -2,6 +2,7 @@ package app.alfrd.engram
 
 import app.alfrd.engram.api.configureCognitiveRoutes
 import app.alfrd.engram.api.configureAuth
+import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureOnboardingRoutes
@@ -140,6 +141,7 @@ fun main() {
             val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db) })
             configureDebugConverseRoutes(debugSessionManager, db)
             configureDebugEnvironmentSignalRoutes(db)
+            configureDebugActorEventRoutes(db)
             log.info("debug-converse endpoint enabled")
         }
         routing {

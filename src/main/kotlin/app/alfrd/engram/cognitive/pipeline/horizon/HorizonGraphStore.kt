@@ -104,6 +104,51 @@ interface HorizonGraphStore {
      * crash-interrupted write, from a [RequestLedger] checkpoint that stored only uids).
      */
     suspend fun phraseText(userEmail: String, phraseUid: String): String?
+
+    /** [propagationStatus] is `"completed"` | `"incomplete"` | `null` (no propagate() attempt recorded yet). [incompletePropagationTargets] is the precise `(toPhraseUid, strength)` set still owed — see [ActorEventIngestionService] for how a retry uses this instead of a blind full recompute. */
+    data class ActorEventRecord(
+        val phraseUid: String,
+        val cycleSeq: Long,
+        val contentHash: String,
+        val propagationStatus: String?,
+        val incompletePropagationTargets: List<RelevanceEdgeSummary>,
+    )
+
+    /** The existing Actor-attributed event owned by [userEmail] with this [eventId], if any — scoped the same way [HorizonOwnership.ownedAssertsEdges] scopes every other per-user lookup. Null when never delivered (or delivered for a different user, which is never a match). */
+    suspend fun findActorEventByEventId(userEmail: String, eventId: String): ActorEventRecord?
+
+    /**
+     * Creates a new Phrase + `ASSERTS` edge exactly like [ingestEnvironmentSignal], generalized to
+     * an arbitrary [sourceType] and carrying the event-identity fields
+     * [findActorEventByEventId] reads back — all set on the same edge, in the same transaction as
+     * the Phrase/edge creation, so identity is never committed separately from the evidence it
+     * identifies. [kindMetadata] is a JSON blob of event-specific fields (e.g. `toolSucceeded`) —
+     * stored here, never only in the reused [findActorEventByEventId]-independent Source metadata,
+     * which a second event sharing [sourceName] would not update. Returns the new Phrase uid, or
+     * null on failure/unknown user — never throws, matching every other mutator in this interface.
+     * Callers are responsible for checking [findActorEventByEventId] first; this method does not
+     * itself check for a duplicate [eventId].
+     */
+    suspend fun ingestActorEvent(
+        userEmail: String,
+        cycleSeq: Long,
+        sourceName: String,
+        sourceType: String,
+        text: String,
+        eventId: String,
+        contentHash: String,
+        assignmentId: String?,
+        occurredAt: Long?,
+        kindMetadata: String,
+    ): String?
+
+    /** Updates the propagation-retry bookkeeping on the `ASSERTS` edge identified by [eventId] — see [ActorEventRecord]. Returns false if no such edge is owned by [userEmail]. */
+    suspend fun recordActorEventPropagationStatus(
+        userEmail: String,
+        eventId: String,
+        status: String,
+        incompletePropagationTargets: List<RelevanceEdgeSummary>,
+    ): Boolean
 }
 
 class ArcadeHorizonGraphStore(
@@ -130,7 +175,7 @@ class ArcadeHorizonGraphStore(
                         logger.warn("ingestEnvironmentSignal: no User vertex for email=$userEmail — skipping")
                         return@transaction
                     }
-                    val sourceVertex = findOrCreateEnvironmentSource(userVertex, sourceName, metadata)
+                    val sourceVertex = findOrCreateSource(userVertex, sourceName, ENVIRONMENT_SOURCE_TYPE, metadata)
                     val now = System.currentTimeMillis()
                     val uid = UUID.randomUUID().toString()
                     val phraseVertex = db.newVertex("Phrase").apply {
@@ -159,6 +204,127 @@ class ArcadeHorizonGraphStore(
         } catch (e: Exception) {
             logger.warn("ingestEnvironmentSignal failed for userEmail=$userEmail sourceName=$sourceName: ${e.message}")
             null
+        }
+    }
+
+    override suspend fun findActorEventByEventId(userEmail: String, eventId: String): HorizonGraphStore.ActorEventRecord? = withContext(Dispatchers.IO) {
+        try {
+            val sourceUids = HorizonOwnership.trustedSourceUids(db, userEmail)
+            if (sourceUids.isEmpty()) return@withContext null
+            val sql = """
+                SELECT @in.uid as phraseUid, cycleSeq, contentHash, propagationStatus, incompletePropagationTargets
+                FROM ASSERTS
+                WHERE eventId = :eventId AND @out.uid IN :sourceUids
+                LIMIT 1
+            """.trimIndent()
+            db.query("sql", sql, mapOf("eventId" to eventId, "sourceUids" to sourceUids)).use { rs ->
+                if (!rs.hasNext()) return@use null
+                val row = rs.next().toMap()
+                HorizonGraphStore.ActorEventRecord(
+                    phraseUid = row["phraseUid"] as? String ?: return@use null,
+                    cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
+                    contentHash = row["contentHash"] as? String ?: "",
+                    propagationStatus = row["propagationStatus"] as? String,
+                    incompletePropagationTargets = parseRelevanceEdgeSummaries(row["incompletePropagationTargets"] as? String),
+                )
+            }
+        } catch (e: Exception) {
+            logger.warn("findActorEventByEventId failed for userEmail=$userEmail eventId=$eventId: ${e.message}")
+            null
+        }
+    }
+
+    override suspend fun ingestActorEvent(
+        userEmail: String,
+        cycleSeq: Long,
+        sourceName: String,
+        sourceType: String,
+        text: String,
+        eventId: String,
+        contentHash: String,
+        assignmentId: String?,
+        occurredAt: Long?,
+        kindMetadata: String,
+    ): String? = withContext(Dispatchers.IO) {
+        if (userEmail.isBlank() || text.isBlank() || sourceName.isBlank() || eventId.isBlank()) return@withContext null
+        try {
+            withHorizonWriteLock(db, lockTimeoutMs) {
+                var newPhraseUid: String? = null
+                db.transaction {
+                    val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: run {
+                        logger.warn("ingestActorEvent: no User vertex for email=$userEmail — skipping")
+                        return@transaction
+                    }
+                    val sourceVertex = findOrCreateSource(userVertex, sourceName, sourceType, metadata = "{}")
+                    val now = System.currentTimeMillis()
+                    val uid = UUID.randomUUID().toString()
+                    val phraseVertex = db.newVertex("Phrase").apply {
+                        set("uid", uid)
+                        set("text", text)
+                        set("hash", sha256(text))
+                        set("visibility", "private")
+                        set("createdAt", now)
+                        set("updatedAt", now)
+                        save()
+                    }
+                    // Identity (eventId/contentHash/assignmentId/occurredAt) is set on the SAME edge,
+                    // in the SAME transaction, as the evidence it identifies — see the interface doc.
+                    sourceVertex.newEdge("ASSERTS", phraseVertex, false).apply {
+                        set("context", sourceType)
+                        set("timestamp", now)
+                        set("scores", "[]")
+                        set("cycleSeq", cycleSeq)
+                        set("eventId", eventId)
+                        set("contentHash", contentHash)
+                        if (assignmentId != null) set("assignmentId", assignmentId)
+                        set("occurredAt", occurredAt ?: now)
+                        set("kindMetadata", kindMetadata)
+                        save()
+                    }
+                    newPhraseUid = uid
+                }
+                newPhraseUid
+            } ?: run {
+                logger.warn("ingestActorEvent: could not acquire the Horizon write lock within ${lockTimeoutMs}ms for userEmail=$userEmail — rejecting")
+                null
+            }
+        } catch (e: Exception) {
+            logger.warn("ingestActorEvent failed for userEmail=$userEmail sourceName=$sourceName eventId=$eventId: ${e.message}")
+            null
+        }
+    }
+
+    override suspend fun recordActorEventPropagationStatus(
+        userEmail: String,
+        eventId: String,
+        status: String,
+        incompletePropagationTargets: List<RelevanceEdgeSummary>,
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            withHorizonWriteLock(db, lockTimeoutMs) {
+                var success = false
+                db.transaction {
+                    val sourceUids = HorizonOwnership.trustedSourceUids(db, userEmail)
+                    if (sourceUids.isEmpty()) return@transaction
+                    val sql = "SELECT FROM ASSERTS WHERE eventId = :eventId AND @out.uid IN :sourceUids LIMIT 1"
+                    val edge = db.query("sql", sql, mapOf("eventId" to eventId, "sourceUids" to sourceUids)).use { rs ->
+                        if (rs.hasNext()) rs.next().toElement().asEdge() else null
+                    } ?: return@transaction
+                    edge.modify().apply {
+                        set("propagationStatus", status)
+                        set("incompletePropagationTargets", json.encodeToString(incompletePropagationTargets))
+                        save()
+                    }
+                    success = true
+                }
+                success
+            } ?: run {
+                logger.warn("recordActorEventPropagationStatus: could not acquire the Horizon write lock within ${lockTimeoutMs}ms for eventId=$eventId — rejecting")
+                false
+            }
+        } catch (e: Exception) {
+            logger.warn("recordActorEventPropagationStatus failed for userEmail=$userEmail eventId=$eventId: ${e.message}")
+            false
         }
     }
 
@@ -355,7 +521,7 @@ class ArcadeHorizonGraphStore(
 
     /**
      * Reuse is scoped to a Source this *specific* [userVertex] already trusts, matched on both
-     * [sourceName] and [ENVIRONMENT_SOURCE_TYPE] — never a global name lookup. A global lookup
+     * [sourceName] and [sourceType] — never a global name lookup. A global lookup
      * (the prior implementation) would hand two different users the same Source vertex whenever
      * they happened to use the same [sourceName]: the second user's phrase would be asserted from a
      * Source the *first* user trusts (and the second user does not, since the early-return skipped
@@ -364,15 +530,15 @@ class ArcadeHorizonGraphStore(
      * leak, not merely a naming collision. Traversal is bounded by this user's own `TRUSTS`
      * out-degree, which is small (see [HorizonOwnership.trustedSourceUids]).
      */
-    private fun findOrCreateEnvironmentSource(userVertex: Vertex, sourceName: String, metadata: String): Vertex {
+    private fun findOrCreateSource(userVertex: Vertex, sourceName: String, sourceType: String, metadata: String): Vertex {
         val existing = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
-            .firstOrNull { it.get("name") == sourceName && it.get("type") == ENVIRONMENT_SOURCE_TYPE }
+            .firstOrNull { it.get("name") == sourceName && it.get("type") == sourceType }
             ?.modify()
         if (existing != null) return existing
         val sourceVertex = db.newVertex("Source").apply {
             set("uid", UUID.randomUUID().toString())
             set("name", sourceName)
-            set("type", ENVIRONMENT_SOURCE_TYPE)
+            set("type", sourceType)
             set("metadata", metadata)
             save()
         }
@@ -384,6 +550,12 @@ class ArcadeHorizonGraphStore(
     }
 
     private fun parseStatusHistory(json: String?): List<StatusHistoryEntry> = try {
+        if (json.isNullOrBlank()) emptyList() else this.json.decodeFromString(json)
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    private fun parseRelevanceEdgeSummaries(json: String?): List<RelevanceEdgeSummary> = try {
         if (json.isNullOrBlank()) emptyList() else this.json.decodeFromString(json)
     } catch (_: Exception) {
         emptyList()

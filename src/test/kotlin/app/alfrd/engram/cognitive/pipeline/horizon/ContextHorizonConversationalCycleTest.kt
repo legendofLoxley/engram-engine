@@ -89,6 +89,13 @@ class ContextHorizonConversationalCycleTest {
         }
     }
 
+    /** Exercises [ActorEventIngestionService] directly — no Director turn, no pipeline, no LLM client — exactly what `/debug/actor-event` calls. */
+    private suspend fun injectActorEvent(email: String, eventId: String, kind: ActorEventKind, sourceName: String): ActorEventIngestOutcome {
+        val propagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler)
+        val service = ActorEventIngestionService(cycleSequencer, horizonGraphStore, propagator)
+        return service.ingest(email, eventId, kind, sourceName)
+    }
+
     private fun buildPipeline(llmClient: TestLlmClient): CognitivePipeline {
         val propagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler)
         val coordinator = HorizonCycleCoordinator(
@@ -210,6 +217,46 @@ class ContextHorizonConversationalCycleTest {
             turn5.chat.responseText.contains("Arx"),
             "when invited directly, the response may surface the update — got: ${turn5.chat.responseText}",
         )
+    }
+
+    @Test
+    fun `an independently ingested Actor event reaches the next real Director turn's actual prompt with correct provenance`() = runBlocking {
+        val email = "actor-event-next-turn-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val observationText = "Nightly Arx CI pipeline finished successfully with zero failures"
+
+        val llmClient = TestLlmClient { request ->
+            if (request.tools.isNotEmpty()) {
+                LlmResponse(text = "", latencyMs = 5, retryCount = 0) // NoOperation — no intention involved in this scenario
+            } else {
+                LlmResponse(text = "Sure, happy to help with whatever's next.", latencyMs = 5, retryCount = 0)
+            }
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        // Independent ingestion — no pipeline, no session, no model call, while chat is idle.
+        val ingestOutcome = injectActorEvent(email, "evt-nightly-ci", ActorEventKind.Observation(observationText), "hermes:nightly-ci")
+        assertTrue(ingestOutcome is ActorEventIngestOutcome.Committed, "expected Committed, got $ingestOutcome")
+
+        // The very next Director turn — entirely unrelated small talk, no manual renderer call.
+        val turn = pipeline.processForDebug("What's a good name for a cat?", "s1", email, requestId = "req-next-turn")
+        val cycle = turn.trace.horizonCycle!!
+
+        val renderedItem = cycle.horizonAfterPropagation.singleOrNull { it.text == observationText }
+        assertTrue(renderedItem != null, "the independently ingested evidence must reach the next turn's assembled Horizon")
+        assertEquals("RecentActorEvidence", renderedItem!!.surfacing)
+
+        val sentPrompt = cycle.finalSystemPromptSent!!
+        assertTrue(sentPrompt.contains(observationText), "the actual response invocation's input — via the real production wiring, not a manually invoked renderer — must contain the independently ingested evidence")
+        assertTrue(
+            sentPrompt.contains("reported recently, independent of this conversation"),
+            "the Actor-attributed framing must reach the actual prompt, distinguishing it from something the user said",
+        )
+
+        // Structural provenance, verified at the same committed cycle the trace reports — not inferred from prose.
+        val horizonAtSameCycle = (horizonAssembler.assemble(email, cycle.cycleSeq!!) as AssembleOutcome.Assembled).horizon
+        val structuredItem = horizonAtSameCycle.items.single { it.text.text == observationText }
+        assertEquals(ProvenanceKind.ACTOR_OBSERVATION, structuredItem.provenance, "graph-level provenance must never default to EXPLICIT_USER_STATEMENT")
     }
 
     @Test

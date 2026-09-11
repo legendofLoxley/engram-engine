@@ -926,6 +926,7 @@ open class CognitivePipeline(
         surfacing = when (item.surfacing) {
             is SurfacingReason.ActiveReactivation -> "ActiveReactivation"
             is SurfacingReason.JustAsserted -> "JustAsserted"
+            is SurfacingReason.RecentActorEvidence -> "RecentActorEvidence"
             is SurfacingReason.DormantOpen -> "DormantOpen"
         },
     )

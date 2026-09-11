@@ -210,6 +210,32 @@ class HorizonPropagatorTest {
     }
 
     @Test
+    fun `a real markRelevant failure is reported as incomplete, never silently folded into Propagated success`() = runBlocking {
+        val email = "prop-incomplete-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val openUid = seedPhrase(email, cycleSeq = 1, text = "Getting Alfrd running on Arx is a priority for me", open = true)
+        val newUid = seedPhrase(email, cycleSeq = 3, text = "Arx developer build finished compiling", open = false)
+
+        // Real SalientTokenPropagator, real candidate lookup — only the edge write itself is forced
+        // to fail, proving the FIX inside the propagator's own accumulation loop, not a fake outcome.
+        val failingStore = object : HorizonGraphStore by store {
+            override suspend fun markRelevant(userEmail: String, cycleSeq: Long, fromPhraseUid: String, toPhraseUid: String, strength: Double): Boolean =
+                if (toPhraseUid == openUid) false else store.markRelevant(userEmail, cycleSeq, fromPhraseUid, toPhraseUid, strength)
+        }
+        val failingPropagator = SalientTokenPropagator(failingStore, assembler)
+
+        val outcome = failingPropagator.propagate(email, cycleSeq = 3, newPhrases = listOf(newUid to "Arx developer build finished compiling"))
+
+        assertTrue(outcome is PropagationOutcome.Propagated, "a partial failure is still Propagated, never coerced to Failed — the point is honesty about what's incomplete, not losing the distinction from a total failure")
+        val propagated = outcome as PropagationOutcome.Propagated
+        assertEquals(emptyList<RelevanceEdgeSummary>(), propagated.edgesCreated, "the failed write must never appear as created")
+        assertEquals(1, propagated.incompleteTargets.size)
+        assertEquals(openUid, propagated.incompleteTargets[0].toPhraseUid)
+        assertEquals(newUid, propagated.incompleteTargets[0].fromPhraseUid)
+        assertTrue(propagated.incompleteTargets[0].strength > 0.0, "the real computed strength must be preserved even though the write failed, so a precise retry doesn't need to recompute it")
+    }
+
+    @Test
     fun `NoOpHorizonPropagator always no-ops regardless of input`() = runBlocking {
         val propagator = NoOpHorizonPropagator()
         val outcome = propagator.propagate("anyone@test.alfrd.internal", 1, listOf("uid" to "Arx build finished compiling, a priority for me"))

@@ -1,15 +1,38 @@
 package app.alfrd.engram.cognitive.pipeline.horizon
 
+import kotlinx.serialization.Serializable
 import org.slf4j.LoggerFactory
 
 /** The result of [HorizonPropagator.propagate]. */
 sealed interface PropagationOutcome {
-    /** [candidatesConsidered] is exactly the bounded pool [HorizonAssembler.listOpenCandidatesWithText] returned — controlled debug evidence for what propagation actually had to work with, independent of edgesCreated. */
-    data class Propagated(val edgesCreated: List<RelevanceEdgeSummary>, val candidatesConsidered: List<PropagationCandidate> = emptyList()) : PropagationOutcome
+    /**
+     * [candidatesConsidered] is exactly the bounded pool [HorizonAssembler.listOpenCandidatesWithText]
+     * returned — controlled debug evidence for what propagation actually had to work with,
+     * independent of [edgesCreated]. [incompleteTargets] is every `(toPhraseUid, strength)` pair
+     * where a salient-token overlap was found (so [HorizonGraphStore.markRelevant] was genuinely
+     * attempted) but it returned `false` — a real write failure, e.g. an ownership check failing or
+     * the consistency lock timing out. Defaults to empty so every pre-existing construction site
+     * (including [NoOpHorizonPropagator]) is unaffected. Before this field existed, a partial
+     * failure here was indistinguishable from full success: [SalientTokenPropagator] only ever
+     * appended to [edgesCreated] on a true `markRelevant` result and otherwise silently moved on to
+     * the next candidate, so `Propagated` alone never meant "every attempted edge exists."
+     */
+    data class Propagated(
+        val edgesCreated: List<RelevanceEdgeSummary>,
+        val candidatesConsidered: List<PropagationCandidate> = emptyList(),
+        val incompleteTargets: List<RelevanceEdgeSummary> = emptyList(),
+    ) : PropagationOutcome
     data class Failed(val reason: String) : PropagationOutcome
 }
 
-/** One `relevant_to` edge propagation actually created (or found already present — see [HorizonGraphStore.markRelevant]'s idempotency), for tracing. */
+/**
+ * One `relevant_to` edge propagation actually created (or found already present — see
+ * [HorizonGraphStore.markRelevant]'s idempotency), for tracing — or, inside
+ * [PropagationOutcome.Propagated.incompleteTargets], one it tried and failed to create.
+ * `@Serializable` so [ActorEventIngestionService] can durably persist an incomplete set for precise
+ * retry (`ASSERTS.incompletePropagationTargets`) without a bespoke encoding.
+ */
+@Serializable
 data class RelevanceEdgeSummary(val fromPhraseUid: String, val toPhraseUid: String, val strength: Double)
 
 /**
@@ -79,6 +102,7 @@ class SalientTokenPropagator(
             if (candidates.isEmpty()) return PropagationOutcome.Propagated(emptyList(), candidates)
 
             val created = mutableListOf<RelevanceEdgeSummary>()
+            val incomplete = mutableListOf<RelevanceEdgeSummary>()
             for ((newUid, newText) in newPhrases) {
                 val newSalient = salientTokens(newText)
                 if (newSalient.isEmpty()) continue
@@ -90,10 +114,11 @@ class SalientTokenPropagator(
                     if (intersection.isEmpty()) continue
                     val strength = intersection.size.toDouble() / minOf(newSalient.size, candidateSalient.size)
                     val applied = horizonGraphStore.markRelevant(userEmail, cycleSeq, newUid, candidate.phraseUid, strength)
-                    if (applied) created += RelevanceEdgeSummary(newUid, candidate.phraseUid, strength)
+                    val summary = RelevanceEdgeSummary(newUid, candidate.phraseUid, strength)
+                    if (applied) created += summary else incomplete += summary
                 }
             }
-            PropagationOutcome.Propagated(created, candidates)
+            PropagationOutcome.Propagated(created, candidates, incomplete)
         } catch (e: Exception) {
             logger.warn("propagate failed for userEmail=$userEmail cycleSeq=$cycleSeq: ${e.message}")
             PropagationOutcome.Failed("propagate failed for userEmail=$userEmail: ${e.message}")

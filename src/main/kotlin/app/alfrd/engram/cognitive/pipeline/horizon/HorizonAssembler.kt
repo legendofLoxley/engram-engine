@@ -217,9 +217,21 @@ class ArcadeHorizonAssembler(
                         val freshPool = queryAsserts(sourceUids, statusFilter = null, cycleSeqFilter = currentCycleSeq, currentCycleSeq = currentCycleSeq, limit = poolLimit)
                         moreCandidatesAvailable = openPool.size >= poolLimit || freshPool.size >= poolLimit
 
+                        // Bounded-recency Actor-attributed evidence pool — see
+                        // SurfacingReason.RecentActorEvidence. Independent of open/fresh: an event
+                        // written at an earlier cycle would otherwise vanish from the Horizon the
+                        // moment its own cycle passes (it is neither open-status nor this cycle's
+                        // content), which is exactly the gap this pool closes. Same minCycle window
+                        // activeReactivation already uses — computed once below and reused, not a
+                        // second independent knob.
+                        val minCycleForActorPool = currentCycleSeq - activeRelevanceCycles
+                        val actorEvidencePool = queryAttributedEvidencePool(sourceUids, minCycleForActorPool, currentCycleSeq, poolLimit)
+                        moreCandidatesAvailable = moreCandidatesAvailable || actorEvidencePool.size >= poolLimit
+
                         val byUid = LinkedHashMap<String, RawCandidate>()
                         for (c in openPool) byUid[c.phraseUid] = c
                         for (c in freshPool) byUid.putIfAbsent(c.phraseUid, c)
+                        for (c in actorEvidencePool) byUid.putIfAbsent(c.phraseUid, c)
 
                         testMidAssemblySync?.invoke()
 
@@ -228,7 +240,7 @@ class ArcadeHorizonAssembler(
                         // phrase that never made it into either pool above (e.g. a very old open
                         // item ranked below poolLimit, or a resolved item being reactivated) — such
                         // a target is still admitted as a candidate here, not silently missed.
-                        val minCycle = currentCycleSeq - activeRelevanceCycles
+                        val minCycle = minCycleForActorPool
                         val reactivationResult = queryActiveReactivations(userEmail, minCycle, currentCycleSeq, now, activeRelevanceWallClock, poolLimit)
                         if (reactivationResult.hitLimit) moreCandidatesAvailable = true
                         for (targetUid in reactivationResult.infoByTargetUid.keys) {
@@ -506,6 +518,68 @@ class ArcadeHorizonAssembler(
         }
     }
 
+    /**
+     * Bounded-recency Actor-attributed evidence — see [SurfacingReason.RecentActorEvidence].
+     * Deliberately excludes [ENVIRONMENT_SOURCE_TYPE]: that path's own equivalent visibility gap is
+     * a named follow-up, not addressed by widening this pool to it.
+     *
+     * Resolves which of [sourceUids] are Actor-attributed *first*, via a plain `Source` lookup
+     * ([actorAttributedSourceUidsAmong]), then issues one bounded equality query per cycle in
+     * `[minCycle, currentCycleSeq]` — the exact same `@out.uid IN ... AND cycleSeq = :cycleSeq LIMIT
+     * :limit` shape [buildAssertsQuery]'s fresh-pool branch already uses successfully, never
+     * `ORDER BY cycleSeq` over a range. An earlier version filtered the whole window with
+     * `cycleSeq >= :minCycle AND cycleSeq <= :currentCycleSeq ORDER BY cycleSeq DESC LIMIT :limit`
+     * in one query; against real ArcadeDB 25.1.1 data with many rows sharing one `cycleSeq` value,
+     * that produced **duplicate rows and silently dropped others** past the `LIMIT` — confirmed
+     * empirically (a 13-row fixture came back as 36 rows spanning only 8 distinct phrases), not
+     * merely suspected, and confirmed to be specifically the indexed `ORDER BY` (a `LIMIT`-only
+     * query with the identical `WHERE` was correct). [activeRelevanceCycles] is already the caller's
+     * own bound on how many such queries this issues — small by design (default 3), never
+     * proportional to total graph size.
+     */
+    private fun queryAttributedEvidencePool(sourceUids: List<String>, minCycle: Long, currentCycleSeq: Long, limit: Int): List<RawCandidate> {
+        if (sourceUids.isEmpty()) return emptyList()
+        val actorSourceUids = actorAttributedSourceUidsAmong(sourceUids)
+        if (actorSourceUids.isEmpty()) return emptyList()
+        val out = mutableListOf<RawCandidate>()
+        var cycle = currentCycleSeq
+        while (cycle >= minCycle && out.size < limit) {
+            out += queryAssertsExactCycle(actorSourceUids, cycle, limit - out.size)
+            cycle--
+        }
+        return out
+    }
+
+    /** One cycle's worth of `ASSERTS` rows for [sourceUids] — equality on `cycleSeq`, never a range, and never `ORDER BY` over it. See [queryAttributedEvidencePool]'s doc for why. */
+    private fun queryAssertsExactCycle(sourceUids: List<String>, cycleSeq: Long, limit: Int): List<RawCandidate> {
+        if (limit <= 0) return emptyList()
+        val sql = """
+            SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, @in.text as phraseText,
+                   timestamp, cycleSeq, statusCycleSeq, status
+            FROM ASSERTS
+            WHERE @out.uid IN :sourceUids AND cycleSeq = :cycleSeq
+            LIMIT :limit
+        """.trimIndent()
+        val params = mapOf("sourceUids" to sourceUids, "cycleSeq" to cycleSeq, "limit" to limit)
+        return db.query("sql", sql, params).use { rs ->
+            val out = mutableListOf<RawCandidate>()
+            while (rs.hasNext()) out += rowToRawCandidate(rs.next().toMap()) ?: continue
+            out
+        }
+    }
+
+    /** The subset of [sourceUids] whose `Source.type` is Actor-attributed — a plain vertex-type filter, no edge `@out`/`@in` projection involved. */
+    private fun actorAttributedSourceUidsAmong(sourceUids: List<String>): List<String> {
+        if (sourceUids.isEmpty()) return emptyList()
+        val sql = "SELECT uid FROM Source WHERE uid IN :sourceUids AND type IN :actorSourceTypes"
+        val params = mapOf("sourceUids" to sourceUids, "actorSourceTypes" to ACTOR_ATTRIBUTED_SOURCE_TYPES.toList())
+        return db.query("sql", sql, params).use { rs ->
+            val out = mutableListOf<String>()
+            while (rs.hasNext()) out += rs.next().toMap()["uid"] as? String ?: continue
+            out
+        }
+    }
+
     /** Fetches a single phrase's own `ASSERTS` record on demand, scoped to [sourceUids] — used to admit a reactivation target found by [queryActiveReactivations] that isn't already in the open/fresh pools. */
     private fun queryAssertsForPhrase(sourceUids: List<String>, phraseUid: String): RawCandidate? {
         if (sourceUids.isEmpty()) return null
@@ -608,7 +682,13 @@ class ArcadeHorizonAssembler(
         val surfacing = when {
             reactivation != null -> SurfacingReason.ActiveReactivation(reactivation)
             c.cycleSeq == currentCycleSeq -> SurfacingReason.JustAsserted(c.cycleSeq)
-            else -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
+            // Explicit precondition, not a bare `else` — DormantOpen specifically means an
+            // open-status intention. Every pre-existing non-reactivated, non-fresh candidate reached
+            // this point only via openPool (status='open'), so this changes nothing for them; it is
+            // what makes room for a well-defined RecentActorEvidence branch below instead of
+            // mislabeling that pool's members as open.
+            c.status != null -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
+            else -> SurfacingReason.RecentActorEvidence(c.cycleSeq)
         }
         val status = c.status?.let { s -> runCatching { AssertionStatus.valueOf(s.uppercase()) }.getOrNull() }
         return HorizonItem(
@@ -630,24 +710,35 @@ class ArcadeHorizonAssembler(
         else -> HorizonItemCategory.FACT
     }
 
-    private fun provenanceFor(sourceType: String): ProvenanceKind =
-        if (sourceType == ENVIRONMENT_SOURCE_TYPE) ProvenanceKind.ENVIRONMENT_SIGNAL else ProvenanceKind.EXPLICIT_USER_STATEMENT
+    private fun provenanceFor(sourceType: String): ProvenanceKind = when (sourceType) {
+        ENVIRONMENT_SOURCE_TYPE -> ProvenanceKind.ENVIRONMENT_SIGNAL
+        ACTOR_OBSERVATION_SOURCE_TYPE -> ProvenanceKind.ACTOR_OBSERVATION
+        ACTOR_INTERPRETATION_SOURCE_TYPE -> ProvenanceKind.ACTOR_INTERPRETATION
+        ACTOR_TOOL_RESULT_SOURCE_TYPE -> ProvenanceKind.ACTOR_TOOL_RESULT
+        else -> ProvenanceKind.EXPLICIT_USER_STATEMENT
+    }
 
+    // RecentActorEvidence ranks above DormantOpen: bounded-recency Actor evidence is more likely to
+    // matter right now than an intention that has simply been open indefinitely — the same intuition
+    // already distinguishing JustAsserted/ActiveReactivation from DormantOpen, extended one step.
     private fun priorityRank(reason: SurfacingReason): Int = when (reason) {
         is SurfacingReason.ActiveReactivation -> 0
         is SurfacingReason.JustAsserted -> 1
-        is SurfacingReason.DormantOpen -> 2
+        is SurfacingReason.RecentActorEvidence -> 2
+        is SurfacingReason.DormantOpen -> 3
     }
 
     private fun surfacingCycleSeq(reason: SurfacingReason): Long = when (reason) {
         is SurfacingReason.ActiveReactivation -> reason.info.edgeCycleSeq
         is SurfacingReason.JustAsserted -> reason.cycleSeq
+        is SurfacingReason.RecentActorEvidence -> reason.assertedCycleSeq
         is SurfacingReason.DormantOpen -> reason.lastStatusChangeCycleSeq
     }
 
     private fun describeSurfacing(reason: SurfacingReason): String = when (reason) {
         is SurfacingReason.ActiveReactivation -> "active reactivation"
         is SurfacingReason.JustAsserted -> "just asserted"
+        is SurfacingReason.RecentActorEvidence -> "recent actor evidence"
         is SurfacingReason.DormantOpen -> "dormant open"
     }
 }
