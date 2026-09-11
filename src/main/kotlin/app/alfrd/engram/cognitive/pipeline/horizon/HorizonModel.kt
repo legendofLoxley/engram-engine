@@ -40,6 +40,19 @@ val ACTOR_ATTRIBUTED_SOURCE_TYPES: Set<String> = setOf(
     ACTOR_TOOL_RESULT_SOURCE_TYPE,
 )
 
+/**
+ * The kind-specific fields captured at ingestion ([ActorEventIngestionService]'s `ActorEventKind`)
+ * and carried, unchanged, all the way through [HorizonAssembler.assemble] to [HorizonItem.actorMetadata]
+ * — the single shared shape both the write side (`ASSERTS.kindMetadata`, JSON-encoded) and the read
+ * side decode, so the two can never drift out of agreement the way a private, ingestion-only copy
+ * would risk. Null fields are simply "not applicable to this [ProvenanceKind]" (an [Observation]
+ * carries none of them); non-null [toolSucceeded] is always exactly what [ActorEventKind.ToolResult]
+ * recorded — a **self-reported claim**, never independently verified anywhere in this pipeline. Only
+ * ever non-null on a [HorizonItem] whose `Source.type` is in [ACTOR_ATTRIBUTED_SOURCE_TYPES].
+ */
+@Serializable
+data class ActorEventMetadata(val basis: String? = null, val toolName: String? = null, val toolSucceeded: Boolean? = null)
+
 /** Tunable bounds shared by [HorizonGraphStore] and [HorizonAssembler]. Foundation defaults, not policy. */
 object HorizonLimits {
     const val MAX_ITEM_TEXT_LENGTH = 280
@@ -196,7 +209,7 @@ sealed interface SurfacingReason {
     data class RecentActorEvidence(val assertedCycleSeq: Long) : SurfacingReason
 }
 
-/** One bounded candidate in a [ContextHorizon]. */
+/** One bounded candidate in a [ContextHorizon]. [actorMetadata] is non-null exactly when [provenance] is one of the three Actor-attributed [ProvenanceKind]s — see [ActorEventMetadata]. */
 @Serializable
 data class HorizonItem(
     val category: HorizonItemCategory,
@@ -207,6 +220,7 @@ data class HorizonItem(
     val surfacing: SurfacingReason,
     val sourceRefs: List<SourceRef>,
     val sourceCount: Int,
+    val actorMetadata: ActorEventMetadata? = null,
 )
 
 /** A candidate excluded from `items` by the budget. Reference-only — no inlined text, nothing to truncate. */

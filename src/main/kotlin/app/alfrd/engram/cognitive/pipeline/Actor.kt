@@ -1,7 +1,9 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventMetadata
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.ContextHorizon
+import app.alfrd.engram.cognitive.pipeline.horizon.ProvenanceKind
 import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason
 import app.alfrd.engram.cognitive.providers.LlmClient
@@ -71,7 +73,37 @@ object HorizonItemsRenderer {
             is SurfacingReason.DormantOpen -> "noted earlier, still open"
         }
         val statusNote = item.status?.let { " [${it.name.lowercase()}]" } ?: ""
-        HorizonPromptItem(renderedLine = "\"${item.text.text}\"$statusNote — $framing", essential = essential)
+        // Provenance is orthogonal to WHY an item surfaced this cycle (framing, above) — an
+        // observation/interpretation/tool-result distinction must survive regardless of which
+        // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
+        // `when (surfacing)` above.
+        val provenanceNote = provenanceAnnotation(item.provenance, item.actorMetadata)?.let { " [$it]" } ?: ""
+        HorizonPromptItem(renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing", essential = essential)
+    }
+
+    /**
+     * Distinct wording per Actor-attributed [ProvenanceKind] — an observation, an interpretation
+     * (with its basis, when captured), and a tool's own self-reported success/failure claim are
+     * different epistemic statuses and must read as such in the actual response prompt, not be
+     * collapsed into one generic "[Actor]" tag. Null for every non-Actor-attributed provenance
+     * (explicit user statement, environment signal, model inference) — those already read as
+     * themselves via [framing]/[statusNote] and need no extra tag.
+     */
+    private fun provenanceAnnotation(provenance: ProvenanceKind, actorMetadata: ActorEventMetadata?): String? = when (provenance) {
+        ProvenanceKind.ACTOR_OBSERVATION -> "Actor-observed"
+        ProvenanceKind.ACTOR_INTERPRETATION -> {
+            val basis = actorMetadata?.basis
+            if (basis.isNullOrBlank()) "Actor interpretation" else "Actor interpretation, based on: \"$basis\""
+        }
+        ProvenanceKind.ACTOR_TOOL_RESULT -> {
+            val outcomeWord = when (actorMetadata?.toolSucceeded) {
+                true -> "reported success"
+                false -> "reported failure"
+                null -> "reported outcome unknown"
+            }
+            "tool result, $outcomeWord — self-reported, not independently verified"
+        }
+        ProvenanceKind.EXPLICIT_USER_STATEMENT, ProvenanceKind.ENVIRONMENT_SIGNAL, ProvenanceKind.MODEL_INFERENCE -> null
     }
 
     /**
@@ -98,7 +130,9 @@ object HorizonItemsRenderer {
         if (result.interpretOutcome is InterpretOutcome.LlmFailure) {
             caveats += "This turn could not be fully checked for anything you should treat as a new priority — do not claim to have captured one if the user stated one."
         }
-        val propagationFailed = result.propagationOutcome is PropagationOutcome.Failed
+        val propagationOutcome = result.propagationOutcome
+        val propagationFailed = propagationOutcome is PropagationOutcome.Failed ||
+            (propagationOutcome is PropagationOutcome.Propagated && propagationOutcome.incompleteTargets.isNotEmpty())
         val assembleFailed = result.assembleOutcome != null && result.assembleOutcome !is AssembleOutcome.Assembled
         if (propagationFailed || assembleFailed) {
             caveats += "You may be missing some of your usual contextual awareness this turn — do not claim complete recall."

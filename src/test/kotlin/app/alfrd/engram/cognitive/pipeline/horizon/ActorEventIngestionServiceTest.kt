@@ -116,6 +116,61 @@ class ActorEventIngestionServiceTest {
         return phraseUid
     }
 
+    /**
+     * Directly seeds an Actor-attributed `ASSERTS` edge with a given [propagationStatus], bypassing
+     * [ActorEventIngestionService] entirely — simulates evidence that was already committed by some
+     * prior delivery attempt whose propagation checkpoint is in a specific, known state (`null` =
+     * never started, `"pending"` = started but interrupted before its outcome was recorded), so a
+     * retry through the real service can be observed against a deterministic starting point rather
+     * than racing a real crash.
+     */
+    private fun seedActorEventWithPropagationStatus(
+        email: String, eventId: String, cycleSeq: Long, text: String, sourceName: String, propagationStatus: String?,
+    ): String {
+        val db = dbManager.getDatabase()
+        val now = System.currentTimeMillis()
+        val phraseUid = UUID.randomUUID().toString()
+        val contentHash = actorEventFingerprint(ACTOR_OBSERVATION_SOURCE_TYPE, sourceName, text, null, null)
+        db.transaction {
+            val userVertex = db.query("sql", "SELECT FROM User WHERE email = :e", mapOf("e" to email))
+                .use { rs -> rs.next().toElement().asVertex() }
+            var sourceVertex = db.query("sql", "SELECT FROM Source WHERE name = :n AND type = :t", mapOf("n" to sourceName, "t" to ACTOR_OBSERVATION_SOURCE_TYPE))
+                .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex().modify() else null }
+            if (sourceVertex == null) {
+                sourceVertex = db.newVertex("Source").apply {
+                    set("uid", UUID.randomUUID().toString())
+                    set("name", sourceName)
+                    set("type", ACTOR_OBSERVATION_SOURCE_TYPE)
+                    set("metadata", "{}")
+                    save()
+                }
+                userVertex.modify().newEdge("TRUSTS", sourceVertex, false).apply { set("scores", "[]"); save() }
+            }
+            val phraseVertex = db.newVertex("Phrase").apply {
+                set("uid", phraseUid)
+                set("text", text)
+                set("hash", phraseUid)
+                set("visibility", "private")
+                set("createdAt", now)
+                set("updatedAt", now)
+                save()
+            }
+            sourceVertex.newEdge("ASSERTS", phraseVertex, false).apply {
+                set("context", ACTOR_OBSERVATION_SOURCE_TYPE)
+                set("timestamp", now)
+                set("scores", "[]")
+                set("cycleSeq", cycleSeq)
+                set("eventId", eventId)
+                set("contentHash", contentHash)
+                set("occurredAt", now)
+                set("kindMetadata", "{}")
+                if (propagationStatus != null) set("propagationStatus", propagationStatus)
+                save()
+            }
+        }
+        return phraseUid
+    }
+
     private fun assertsCountForEventId(eventId: String): Int =
         dbManager.getDatabase().query("sql", "SELECT count(*) as c FROM ASSERTS WHERE eventId = :id", mapOf("id" to eventId))
             .use { rs -> (rs.next().toMap()["c"] as Number).toInt() }
@@ -292,6 +347,99 @@ class ActorEventIngestionServiceTest {
         assertEquals(1, assertsCountForEventId("evt-prop-fail"), "the evidence write itself succeeded and must stand")
     }
 
+    // ── Lookup failure vs. confirmed absence ────────────────────────────────────
+
+    @Test
+    fun `a transient lookup failure after a prior commit stops before allocating or writing, evidence remains singular`() = runBlocking {
+        val email = "lookup-fail-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+
+        val first = service().ingest(email, "evt-lookup-fail", ActorEventKind.Observation("Weekly backup completed"), "hermes")
+        assertTrue(first is ActorEventIngestOutcome.Committed, "expected Committed, got $first")
+
+        val failingLookupStore = object : HorizonGraphStore by store {
+            override suspend fun findActorEventByEventId(userEmail: String, eventId: String): HorizonGraphStore.ActorEventLookupResult =
+                HorizonGraphStore.ActorEventLookupResult.LookupFailed("simulated transient query failure")
+        }
+        val retryDuringOutage = service(store = failingLookupStore, propagator = SalientTokenPropagator(failingLookupStore, assembler))
+            .ingest(email, "evt-lookup-fail", ActorEventKind.Observation("Weekly backup completed"), "hermes")
+
+        assertTrue(retryDuringOutage is ActorEventIngestOutcome.LookupFailed, "expected LookupFailed, got $retryDuringOutage")
+        assertEquals(1, assertsCountForEventId("evt-lookup-fail"), "a lookup failure must never allocate or write — evidence must remain singular")
+
+        val retryAfterRecovery = service().ingest(email, "evt-lookup-fail", ActorEventKind.Observation("Weekly backup completed"), "hermes")
+        assertTrue(retryAfterRecovery is ActorEventIngestOutcome.DuplicateDelivery, "once lookup recovers, the same delivery must resolve to the original commit, got $retryAfterRecovery")
+        assertEquals(1, assertsCountForEventId("evt-lookup-fail"), "still exactly one Phrase after the lookup recovers")
+    }
+
+    @Test
+    fun `a lookup failure on a genuinely new eventId also stops before allocating or writing`() = runBlocking {
+        val email = "lookup-fail-fresh-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val failingLookupStore = object : HorizonGraphStore by store {
+            override suspend fun findActorEventByEventId(userEmail: String, eventId: String): HorizonGraphStore.ActorEventLookupResult =
+                HorizonGraphStore.ActorEventLookupResult.LookupFailed("simulated transient query failure")
+        }
+        val outcome = service(store = failingLookupStore, propagator = SalientTokenPropagator(failingLookupStore, assembler))
+            .ingest(email, "evt-fresh-lookup-fail", ActorEventKind.Observation("hello"), "hermes")
+        assertTrue(outcome is ActorEventIngestOutcome.LookupFailed, "expected LookupFailed, got $outcome")
+        assertEquals(0, assertsCountForEventId("evt-fresh-lookup-fail"), "no allocation or write may occur on a lookup failure, even for a never-before-seen eventId")
+    }
+
+    // ── Propagation checkpoint recovery ─────────────────────────────────────────
+
+    @Test
+    fun `propagation interrupted between effects and checkpoint persistence reports uncertain, never recomputes, and stays durable through reopened storage`() = runBlocking {
+        val email = "prop-pending-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        // An open intention a full propagate() recompute WOULD connect to, if it ran — proves
+        // PropagationUncertain genuinely takes no propagation action, not merely "happens to find
+        // nothing to do".
+        seedOpenIntention(email, cycleSeq = 1, text = "Arx priority is getting Alfrd running")
+        val phraseUid = seedActorEventWithPropagationStatus(
+            email, "evt-pending", cycleSeq = 2, text = "Arx developer build finished compiling", sourceName = "hermes", propagationStatus = "pending",
+        )
+
+        val retry = service().ingest(email, "evt-pending", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+
+        assertTrue(retry is ActorEventIngestOutcome.PropagationUncertain, "expected PropagationUncertain, got $retry")
+        val uncertain = retry as ActorEventIngestOutcome.PropagationUncertain
+        assertEquals(phraseUid, uncertain.existingPhraseUid, "the already-committed evidence must still be identified — commitment and propagation are independent facts")
+        assertEquals(0, relatedToCount(email), "no propagation action may be taken while the checkpoint is uncertain — never a silent full recompute against current candidates")
+        assertEquals(1, assertsCountForEventId("evt-pending"), "no duplicate evidence")
+
+        dbManager.close()
+        dbManager = DatabaseManager(testDbPath)
+        val reopenedStore = ArcadeHorizonGraphStore(dbManager.getDatabase())
+        val reopenedAssembler = ArcadeHorizonAssembler(dbManager.getDatabase())
+        val reopenedService = ActorEventIngestionService(
+            ArcadeCycleSequencer(dbManager.getDatabase()), reopenedStore, SalientTokenPropagator(reopenedStore, reopenedAssembler),
+        )
+        val retryAfterReopen = reopenedService.ingest(email, "evt-pending", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+        assertTrue(retryAfterReopen is ActorEventIngestOutcome.PropagationUncertain, "the uncertain checkpoint must be durable, not in-memory — expected PropagationUncertain again, got $retryAfterReopen")
+        assertEquals(0, relatedToCount(email), "still no propagation action after reopening storage")
+    }
+
+    @Test
+    fun `an eventId whose propagation never started is the one safe case that runs a full retry`() = runBlocking {
+        val email = "prop-never-started-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val target = seedOpenIntention(email, cycleSeq = 1, text = "Arx priority is getting Alfrd running")
+        val phraseUid = seedActorEventWithPropagationStatus(
+            email, "evt-never-started", cycleSeq = 2, text = "Arx developer build finished compiling", sourceName = "hermes", propagationStatus = null,
+        )
+
+        val retry = service().ingest(email, "evt-never-started", ActorEventKind.Observation("Arx developer build finished compiling"), "hermes")
+
+        assertTrue(retry is ActorEventIngestOutcome.DuplicateDelivery, "expected DuplicateDelivery, got $retry")
+        val dup = retry as ActorEventIngestOutcome.DuplicateDelivery
+        assertEquals(phraseUid, dup.existingPhraseUid)
+        assertNotNull(dup.propagationOutcome, "propagation was never started for this event, so a duplicate delivery must actually run it — the one accepted full-recompute case")
+        assertTrue(dup.propagationOutcome is PropagationOutcome.Propagated, "expected Propagated, got ${dup.propagationOutcome}")
+        assertEquals(1, relatedToCount(email), "the never-started propagation should connect to the pre-existing open candidate now that it finally runs")
+        assertTrue((dup.propagationOutcome as PropagationOutcome.Propagated).edgesCreated.any { it.toPhraseUid == target })
+    }
+
     // ── Isolation ────────────────────────────────────────────────────────────
 
     @Test
@@ -308,11 +456,13 @@ class ActorEventIngestionServiceTest {
         assertTrue(outcomeB is ActorEventIngestOutcome.Committed, "user B must succeed independently, not treated as a conflict with A's own use of the same id, got $outcomeB")
         assertNotEquals((outcomeA as ActorEventIngestOutcome.Committed).phraseUid, (outcomeB as ActorEventIngestOutcome.Committed).phraseUid)
 
-        val aRecord = store.findActorEventByEventId(emailA, "shared-event-id")
-        val bRecord = store.findActorEventByEventId(emailB, "shared-event-id")
-        assertNotNull(aRecord)
-        assertNotNull(bRecord)
-        assertNotEquals(aRecord!!.phraseUid, bRecord!!.phraseUid)
+        val aLookup = store.findActorEventByEventId(emailA, "shared-event-id")
+        val bLookup = store.findActorEventByEventId(emailB, "shared-event-id")
+        assertTrue(aLookup is HorizonGraphStore.ActorEventLookupResult.Found, "expected Found, got $aLookup")
+        assertTrue(bLookup is HorizonGraphStore.ActorEventLookupResult.Found, "expected Found, got $bLookup")
+        val aRecord = (aLookup as HorizonGraphStore.ActorEventLookupResult.Found).record
+        val bRecord = (bLookup as HorizonGraphStore.ActorEventLookupResult.Found).record
+        assertNotEquals(aRecord.phraseUid, bRecord.phraseUid)
         assertEquals("A's own event", store.phraseText(emailA, aRecord.phraseUid))
         assertEquals("B's own event", store.phraseText(emailB, bRecord.phraseUid))
     }

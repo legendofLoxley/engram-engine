@@ -105,7 +105,18 @@ interface HorizonGraphStore {
      */
     suspend fun phraseText(userEmail: String, phraseUid: String): String?
 
-    /** [propagationStatus] is `"completed"` | `"incomplete"` | `null` (no propagate() attempt recorded yet). [incompletePropagationTargets] is the precise `(toPhraseUid, strength)` set still owed — see [ActorEventIngestionService] for how a retry uses this instead of a blind full recompute. */
+    /**
+     * [propagationStatus] is one of four states, in the sequence a single delivery moves through:
+     * `null` (no propagate() attempt started yet — safe to run fresh), `"pending"` (a propagate()
+     * attempt against the live candidate pool was started but its outcome was never recorded —
+     * e.g. a crash mid-attempt; recovery information is missing and this state must NOT be
+     * silently treated as safe to recompute), `"incomplete"` (the attempt completed and left a
+     * specific, durably recorded `(toPhraseUid, strength)` set still owed — safe to retry
+     * precisely, never as a full recompute), or `"completed"` (nothing left to do).
+     * [incompletePropagationTargets] is that precise set — see [ActorEventIngestionService] for
+     * how a retry uses it instead of a blind full recompute, and how `"pending"` is distinguished
+     * from both `null` and `"incomplete"`.
+     */
     data class ActorEventRecord(
         val phraseUid: String,
         val cycleSeq: Long,
@@ -114,8 +125,26 @@ interface HorizonGraphStore {
         val incompletePropagationTargets: List<RelevanceEdgeSummary>,
     )
 
-    /** The existing Actor-attributed event owned by [userEmail] with this [eventId], if any — scoped the same way [HorizonOwnership.ownedAssertsEdges] scopes every other per-user lookup. Null when never delivered (or delivered for a different user, which is never a match). */
-    suspend fun findActorEventByEventId(userEmail: String, eventId: String): ActorEventRecord?
+    /**
+     * The outcome of [findActorEventByEventId] — deliberately distinct from a nullable return.
+     * "This eventId was never delivered" ([ConfirmedAbsent]) and "the lookup itself could not be
+     * completed" ([LookupFailed]) are different facts: the first legitimately authorizes a fresh
+     * commit, the second must not — a caller that cannot tell them apart risks treating a transient
+     * query error as proof of absence and creating duplicate evidence for a retried delivery.
+     */
+    sealed interface ActorEventLookupResult {
+        /** An Actor-attributed event with this eventId already exists, owned by the queried user. */
+        data class Found(val record: ActorEventRecord) : ActorEventLookupResult
+
+        /** No such eventId exists for this user — a genuine "never delivered," safe to commit fresh. */
+        object ConfirmedAbsent : ActorEventLookupResult
+
+        /** The lookup itself did not complete (query exception) — absence was never established. Callers must stop rather than infer [ConfirmedAbsent]. */
+        data class LookupFailed(val reason: String) : ActorEventLookupResult
+    }
+
+    /** The existing Actor-attributed event owned by [userEmail] with this [eventId], if any — scoped the same way [HorizonOwnership.ownedAssertsEdges] scopes every other per-user lookup. See [ActorEventLookupResult] for why this is not a nullable return. */
+    suspend fun findActorEventByEventId(userEmail: String, eventId: String): ActorEventLookupResult
 
     /**
      * Creates a new Phrase + `ASSERTS` edge exactly like [ingestEnvironmentSignal], generalized to
@@ -207,10 +236,12 @@ class ArcadeHorizonGraphStore(
         }
     }
 
-    override suspend fun findActorEventByEventId(userEmail: String, eventId: String): HorizonGraphStore.ActorEventRecord? = withContext(Dispatchers.IO) {
+    override suspend fun findActorEventByEventId(userEmail: String, eventId: String): HorizonGraphStore.ActorEventLookupResult = withContext(Dispatchers.IO) {
         try {
+            // An unknown user (or one who trusts no Source yet) has, by construction, never
+            // committed any Actor event — this is a genuine ConfirmedAbsent, not a failure.
             val sourceUids = HorizonOwnership.trustedSourceUids(db, userEmail)
-            if (sourceUids.isEmpty()) return@withContext null
+            if (sourceUids.isEmpty()) return@withContext HorizonGraphStore.ActorEventLookupResult.ConfirmedAbsent
             val sql = """
                 SELECT @in.uid as phraseUid, cycleSeq, contentHash, propagationStatus, incompletePropagationTargets
                 FROM ASSERTS
@@ -218,19 +249,25 @@ class ArcadeHorizonGraphStore(
                 LIMIT 1
             """.trimIndent()
             db.query("sql", sql, mapOf("eventId" to eventId, "sourceUids" to sourceUids)).use { rs ->
-                if (!rs.hasNext()) return@use null
+                if (!rs.hasNext()) return@use HorizonGraphStore.ActorEventLookupResult.ConfirmedAbsent
                 val row = rs.next().toMap()
-                HorizonGraphStore.ActorEventRecord(
-                    phraseUid = row["phraseUid"] as? String ?: return@use null,
-                    cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
-                    contentHash = row["contentHash"] as? String ?: "",
-                    propagationStatus = row["propagationStatus"] as? String,
-                    incompletePropagationTargets = parseRelevanceEdgeSummaries(row["incompletePropagationTargets"] as? String),
+                val phraseUid = row["phraseUid"] as? String
+                    ?: return@use HorizonGraphStore.ActorEventLookupResult.LookupFailed("matched row missing phraseUid for eventId=$eventId")
+                HorizonGraphStore.ActorEventLookupResult.Found(
+                    HorizonGraphStore.ActorEventRecord(
+                        phraseUid = phraseUid,
+                        cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
+                        contentHash = row["contentHash"] as? String ?: "",
+                        propagationStatus = row["propagationStatus"] as? String,
+                        incompletePropagationTargets = parseRelevanceEdgeSummaries(row["incompletePropagationTargets"] as? String),
+                    ),
                 )
             }
         } catch (e: Exception) {
+            // A caught exception means the lookup itself did not complete — absence was never
+            // established, so this must NOT be reported as ConfirmedAbsent (see that variant's doc).
             logger.warn("findActorEventByEventId failed for userEmail=$userEmail eventId=$eventId: ${e.message}")
-            null
+            HorizonGraphStore.ActorEventLookupResult.LookupFailed(e.message ?: "unknown lookup failure")
         }
     }
 

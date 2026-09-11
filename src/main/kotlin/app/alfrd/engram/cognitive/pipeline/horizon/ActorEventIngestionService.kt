@@ -1,6 +1,5 @@
 package app.alfrd.engram.cognitive.pipeline.horizon
 
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
@@ -63,6 +62,29 @@ sealed interface ActorEventIngestOutcome {
 
     /** Malformed input (blank required field) or an unauthorized/unknown scope — rejected before any allocation or write was attempted. */
     data class Rejected(val eventId: String, val reason: String) : ActorEventIngestOutcome
+
+    /**
+     * [HorizonGraphStore.findActorEventByEventId] could not determine whether this [eventId] was
+     * already delivered — a transient query failure, not a confirmed absence. Nothing was allocated
+     * or written this call: treating a lookup failure as "not found" would risk creating duplicate
+     * evidence for an event that, for all this call actually established, may already exist. Safe
+     * to retry the identical delivery once the underlying failure clears.
+     */
+    data class LookupFailed(val eventId: String, val reason: String) : ActorEventIngestOutcome
+
+    /**
+     * A prior delivery of this [eventId] committed evidence and started propagation
+     * ([HorizonGraphStore.ActorEventRecord.propagationStatus] `"pending"`), but a crash or failure
+     * between that start and its checkpoint means what it actually did to the graph — if
+     * anything — was never recorded. This delivery deliberately took **no** propagation action:
+     * re-running [HorizonPropagator.propagate] here would compare the original evidence against
+     * whatever is open *now*, silently authorizing a full recomputation against intentions
+     * introduced after the original attempt — exactly the outcome this type exists to prevent.
+     * [existingPhraseUid]/[existingCycleSeq] identify the already-committed evidence (unaffected —
+     * evidence commitment and propagation are independent facts); resolving the uncertainty is an
+     * explicit follow-up action, not something this call performs on its own.
+     */
+    data class PropagationUncertain(val eventId: String, val existingPhraseUid: String, val existingCycleSeq: Long, val reason: String) : ActorEventIngestOutcome
 }
 
 /**
@@ -85,24 +107,38 @@ sealed interface ActorEventIngestOutcome {
  * before either commits) or a distributed lock; neither exists in this codebase. Today's actual
  * deployment is a single Ktor/Netty process, so this is a documented limitation, not a live gap.
  *
- * **Propagation retry is precise, not a blind recompute.** The first attempt always compares the new
- * evidence against every currently open candidate ([HorizonPropagator.propagate] — that is what
- * propagation means). But once that attempt's result is durably recorded (`ASSERTS.propagationStatus`
- * / `incompletePropagationTargets`, via [HorizonGraphStore.recordActorEventPropagationStatus]), a
- * later duplicate delivery of the *same* event behaves according to what was actually left undone,
- * never by re-running the comparison against today's state:
+ * **Propagation retry is precise, not a blind recompute — and never proceeds from an uncertain
+ * checkpoint.** The first attempt always compares the new evidence against every currently open
+ * candidate ([HorizonPropagator.propagate] — that is what propagation means). Immediately before
+ * that call, this service durably records `propagationStatus = "pending"` — a checkpoint written
+ * *before* the effect it describes, not after — via
+ * [HorizonGraphStore.recordActorEventPropagationStatus]. Once the attempt returns, the real outcome
+ * (`"completed"` / `"incomplete"` + the precise `(toPhraseUid, strength)` set still owed) overwrites
+ * `"pending"`. A later duplicate delivery of the *same* event then behaves according to exactly what
+ * checkpoint state it finds, never by re-running the comparison against today's state blind:
  * - `"completed"` → skipped entirely. A successfully processed duplicate must never create new
  *   relevance effects against intentions introduced later — the only way to guarantee that is to
  *   never look at "later" again once a delivery is known complete.
+ * - `"pending"` → the attempt started but its outcome was never recorded (a crash or failure between
+ *   effects and checkpoint persistence). This is genuinely missing recovery information, not a safe
+ *   "nothing happened yet" — reported as [ActorEventIngestOutcome.PropagationUncertain] with **no**
+ *   propagation action taken. Silently falling through to a full recompute here is exactly the bug
+ *   this checkpoint exists to prevent: it would compare the original evidence against whatever is
+ *   open *now*, which may include intentions that did not exist at the time of the original attempt.
  * - `"incomplete"` with a specific recorded `(toPhraseUid, strength)` set → only those exact pairs
  *   are retried, via [HorizonGraphStore.markRelevant] directly (not [HorizonPropagator.propagate],
  *   which would recompute against today's full candidate pool) — so a retry can never connect the
- *   original evidence to something that did not exist at the time of the original attempt. Whatever
- *   *does* get created this time is stamped with a **freshly allocated cycle**, not the original
- *   event's — an effect discovered now is dated now, never backdated.
- * - No specific set recorded (the original `propagate()` call itself failed before producing one, or
- *   was never attempted) → the one narrow, accepted exception: a full [HorizonPropagator.propagate]
- *   retry against today's candidates, because there is no more precise information to retry against.
+ *   original evidence to something that did not exist at the time of the original attempt. This is
+ *   safe to interrupt and repeat: the recorded target set is never narrowed mid-retry, so a crash
+ *   partway through simply means the next retry repeats the same bounded set, and
+ *   [HorizonGraphStore.markRelevant] is itself idempotent per `(from, to)` pair. Whatever *does* get
+ *   created this time is stamped with a **freshly allocated cycle**, not the original event's — an
+ *   effect discovered now is dated now, never backdated.
+ * - `null`/absent (the original `propagate()` call was never reached — e.g. a crash between evidence
+ *   commitment and the `"pending"` checkpoint) → the one narrow, accepted exception: a full
+ *   [HorizonPropagator.propagate] retry against today's candidates. This is safe specifically
+ *   *because* nothing was ever started — there is no prior partial effect to reconcile against, so
+ *   this genuinely *is* the first attempt, not a recomputation of one already in flight.
  */
 open class ActorEventIngestionService(
     private val cycleSequencer: CycleSequencer,
@@ -127,14 +163,24 @@ open class ActorEventIngestionService(
         val sourceType = sourceTypeFor(kind)
         val fingerprint = fingerprintFor(kind, sourceName, assignmentId, occurredAt)
 
-        val existing = horizonGraphStore.findActorEventByEventId(userEmail, eventId)
-        if (existing != null) {
-            if (existing.contentHash != fingerprint) {
-                logger.warn("ingest: eventId=$eventId reused with different content for userEmail=$userEmail — rejecting as conflicting reuse")
-                return@withLock ActorEventIngestOutcome.ConflictingReuse(eventId, existing.phraseUid, "eventId already committed with different content")
+        when (val lookup = horizonGraphStore.findActorEventByEventId(userEmail, eventId)) {
+            is HorizonGraphStore.ActorEventLookupResult.LookupFailed -> {
+                // Stop here — no allocation, no write. A caught query failure is not evidence of
+                // absence; treating it as one would risk creating duplicate evidence on retry.
+                logger.warn("ingest: lookup failed for eventId=$eventId userEmail=$userEmail: ${lookup.reason} — stopping without allocating or writing")
+                return@withLock ActorEventIngestOutcome.LookupFailed(eventId, lookup.reason)
             }
-            val propagationOutcome = retryPropagationIfIncomplete(userEmail, eventId, existing, kind.text)
-            return@withLock ActorEventIngestOutcome.DuplicateDelivery(eventId, existing.phraseUid, existing.cycleSeq, propagationOutcome)
+            is HorizonGraphStore.ActorEventLookupResult.Found -> {
+                val existing = lookup.record
+                if (existing.contentHash != fingerprint) {
+                    logger.warn("ingest: eventId=$eventId reused with different content for userEmail=$userEmail — rejecting as conflicting reuse")
+                    return@withLock ActorEventIngestOutcome.ConflictingReuse(eventId, existing.phraseUid, "eventId already committed with different content")
+                }
+                return@withLock resolveDuplicateDelivery(userEmail, eventId, existing, kind.text)
+            }
+            HorizonGraphStore.ActorEventLookupResult.ConfirmedAbsent -> {
+                // Genuine "never delivered" — proceed to a fresh commit below.
+            }
         }
 
         val cycleSeq = cycleSequencer.allocateCycle(userEmail)
@@ -153,23 +199,46 @@ open class ActorEventIngestionService(
             kindMetadata = kindMetadataFor(kind),
         ) ?: return@withLock ActorEventIngestOutcome.WriteFailed(eventId, "evidence write failed (unknown user or lock timeout)")
 
-        val propagationOutcome = horizonPropagator.propagate(userEmail, cycleSeq, listOf(phraseUid to kind.text))
-        recordPropagationOutcome(userEmail, eventId, propagationOutcome)
+        val propagationOutcome = runAndRecordPropagation(userEmail, eventId, phraseUid, cycleSeq, kind.text)
 
         ActorEventIngestOutcome.Committed(eventId, phraseUid, cycleSeq, propagationOutcome)
     }
 
-    private suspend fun retryPropagationIfIncomplete(
+    /**
+     * Resolves a duplicate delivery of an already-committed [eventId] purely from its recorded
+     * checkpoint state — see this class's doc for the full state table. Never inspects "today's"
+     * candidate pool except in the one narrow case ([HorizonGraphStore.ActorEventRecord.propagationStatus]
+     * `null`) where doing so is provably a first attempt, not a recomputation.
+     */
+    private suspend fun resolveDuplicateDelivery(
         userEmail: String,
         eventId: String,
         existing: HorizonGraphStore.ActorEventRecord,
         text: String,
-    ): PropagationOutcome? {
-        if (existing.propagationStatus == "completed") return null
+    ): ActorEventIngestOutcome {
+        when (existing.propagationStatus) {
+            "completed" -> return ActorEventIngestOutcome.DuplicateDelivery(eventId, existing.phraseUid, existing.cycleSeq, propagationOutcome = null)
+            "pending" -> {
+                logger.warn(
+                    "resolveDuplicateDelivery: eventId=$eventId propagationStatus=pending (interrupted between effects and " +
+                        "checkpoint persistence) for userEmail=$userEmail — reporting uncertain, taking no propagation action",
+                )
+                return ActorEventIngestOutcome.PropagationUncertain(
+                    eventId,
+                    existing.phraseUid,
+                    existing.cycleSeq,
+                    "propagation was started but its outcome was never recorded — refusing to recompute against current state",
+                )
+            }
+            else -> Unit // "incomplete" with a recorded target set, or null/never-started — handled below.
+        }
 
-        return if (existing.incompletePropagationTargets.isNotEmpty()) {
+        if (existing.incompletePropagationTargets.isNotEmpty()) {
             val retryCycle = cycleSequencer.allocateCycle(userEmail)
-                ?: return PropagationOutcome.Failed("cycle allocation failed for precise propagation retry")
+                ?: return ActorEventIngestOutcome.DuplicateDelivery(
+                    eventId, existing.phraseUid, existing.cycleSeq,
+                    PropagationOutcome.Failed("cycle allocation failed for precise propagation retry"),
+                )
             val created = mutableListOf<RelevanceEdgeSummary>()
             val stillIncomplete = mutableListOf<RelevanceEdgeSummary>()
             for (target in existing.incompletePropagationTargets) {
@@ -178,17 +247,33 @@ open class ActorEventIngestionService(
             }
             val outcome = PropagationOutcome.Propagated(edgesCreated = created, incompleteTargets = stillIncomplete)
             recordPropagationOutcome(userEmail, eventId, outcome)
-            outcome
-        } else {
-            // No specific incomplete set was ever recorded (the original propagate() call threw, or
-            // this event's propagation was never attempted before a crash) — there is nothing precise
-            // to retry, so this is the one accepted case that re-runs the full comparison.
-            val retryCycle = cycleSequencer.allocateCycle(userEmail)
-                ?: return PropagationOutcome.Failed("cycle allocation failed for full propagation retry")
-            val outcome = horizonPropagator.propagate(userEmail, retryCycle, listOf(existing.phraseUid to text))
-            recordPropagationOutcome(userEmail, eventId, outcome)
-            outcome
+            return ActorEventIngestOutcome.DuplicateDelivery(eventId, existing.phraseUid, existing.cycleSeq, outcome)
         }
+
+        // propagationStatus == null: never started. The one safe full-recompute case — there is no
+        // prior partial effect to reconcile against, so this genuinely is a first attempt.
+        val retryCycle = cycleSequencer.allocateCycle(userEmail)
+            ?: return ActorEventIngestOutcome.DuplicateDelivery(
+                eventId, existing.phraseUid, existing.cycleSeq,
+                PropagationOutcome.Failed("cycle allocation failed for full propagation retry"),
+            )
+        val outcome = runAndRecordPropagation(userEmail, eventId, existing.phraseUid, retryCycle, text)
+        return ActorEventIngestOutcome.DuplicateDelivery(eventId, existing.phraseUid, existing.cycleSeq, outcome)
+    }
+
+    /**
+     * Runs one full [HorizonPropagator.propagate] attempt against today's candidate pool, with the
+     * `"pending"` checkpoint written *before* the attempt — never after — so a crash during
+     * [HorizonPropagator.propagate] itself (between effects and checkpoint persistence) leaves a
+     * durable, explicit trace ([ActorEventIngestOutcome.PropagationUncertain] on the next lookup)
+     * rather than silent `null`, which [resolveDuplicateDelivery] would otherwise treat as
+     * "never started" and blindly recompute.
+     */
+    private suspend fun runAndRecordPropagation(userEmail: String, eventId: String, phraseUid: String, cycleSeq: Long, text: String): PropagationOutcome {
+        horizonGraphStore.recordActorEventPropagationStatus(userEmail, eventId, "pending", emptyList())
+        val outcome = horizonPropagator.propagate(userEmail, cycleSeq, listOf(phraseUid to text))
+        recordPropagationOutcome(userEmail, eventId, outcome)
+        return outcome
     }
 
     private suspend fun recordPropagationOutcome(userEmail: String, eventId: String, outcome: PropagationOutcome) {
@@ -220,13 +305,15 @@ open class ActorEventIngestionService(
         }
     }
 
-    @Serializable
-    private data class KindMetadata(val basis: String? = null, val toolName: String? = null, val toolSucceeded: Boolean? = null)
-
-    /** Event-specific fields, stored on the event's own edge (never only in the reused Source.metadata) — see [HorizonGraphStore.ingestActorEvent]. */
+    /**
+     * Event-specific fields, stored on the event's own edge (never only in the reused
+     * Source.metadata) — see [HorizonGraphStore.ingestActorEvent]. Encoded via the shared
+     * [ActorEventMetadata] shape so [HorizonAssembler]'s decode side can never drift out of
+     * agreement with what was actually written here.
+     */
     private fun kindMetadataFor(kind: ActorEventKind): String = when (kind) {
-        is ActorEventKind.Observation -> metadataJson.encodeToString(KindMetadata())
-        is ActorEventKind.Interpretation -> metadataJson.encodeToString(KindMetadata(basis = kind.basis))
-        is ActorEventKind.ToolResult -> metadataJson.encodeToString(KindMetadata(toolName = kind.toolName, toolSucceeded = kind.toolSucceeded))
+        is ActorEventKind.Observation -> metadataJson.encodeToString(ActorEventMetadata())
+        is ActorEventKind.Interpretation -> metadataJson.encodeToString(ActorEventMetadata(basis = kind.basis))
+        is ActorEventKind.ToolResult -> metadataJson.encodeToString(ActorEventMetadata(toolName = kind.toolName, toolSucceeded = kind.toolSucceeded))
     }
 }

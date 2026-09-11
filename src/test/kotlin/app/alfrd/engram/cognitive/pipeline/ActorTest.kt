@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventMetadata
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.AssertionStatus
 import app.alfrd.engram.cognitive.pipeline.horizon.AttentionDirective
@@ -102,6 +103,30 @@ class ActorTest {
         sourceCount = 1,
     )
 
+    private fun interpretationItem(text: String, assertedCycleSeq: Long, basis: String?) = HorizonItem(
+        category = HorizonItemCategory.FACT,
+        text = BoundedText(text, truncated = false),
+        status = null,
+        attentionDirective = null as AttentionDirective?,
+        provenance = ProvenanceKind.ACTOR_INTERPRETATION,
+        surfacing = SurfacingReason.RecentActorEvidence(assertedCycleSeq),
+        sourceRefs = emptyList(),
+        sourceCount = 1,
+        actorMetadata = ActorEventMetadata(basis = basis),
+    )
+
+    private fun toolResultItem(text: String, assertedCycleSeq: Long, toolSucceeded: Boolean?) = HorizonItem(
+        category = HorizonItemCategory.FACT,
+        text = BoundedText(text, truncated = false),
+        status = null,
+        attentionDirective = null as AttentionDirective?,
+        provenance = ProvenanceKind.ACTOR_TOOL_RESULT,
+        surfacing = SurfacingReason.JustAsserted(assertedCycleSeq),
+        sourceRefs = emptyList(),
+        sourceCount = 1,
+        actorMetadata = ActorEventMetadata(toolName = "deploy_service", toolSucceeded = toolSucceeded),
+    )
+
     @Test
     fun `render marks RecentActorEvidence droppable, framing distinct from DormantOpen`() {
         val horizon = ContextHorizon(
@@ -148,6 +173,57 @@ class ActorTest {
         assertTrue(rendered[1].essential, "JustAsserted must be essential")
         assertTrue(!rendered[2].essential, "DormantOpen must be droppable")
         assertTrue(rendered[2].renderedLine.contains("noted earlier, still open"))
+    }
+
+    @Test
+    fun `render distinguishes observation, interpretation with basis, and tool result success-failure, regardless of surfacing reason`() {
+        val horizon = ContextHorizon(
+            userEmail = "u@test.alfrd.internal",
+            asOf = 0L,
+            schemaVersion = 1,
+            items = listOf(
+                recentActorEvidenceItem("Arx build finished compiling", assertedCycleSeq = 5),
+                interpretationItem("the user seems blocked on deploy", assertedCycleSeq = 5, basis = "no commits in 3 days"),
+                interpretationItem("something changed", assertedCycleSeq = 5, basis = null),
+                toolResultItem("deploy_service completed", assertedCycleSeq = 6, toolSucceeded = true),
+                toolResultItem("deploy_service completed", assertedCycleSeq = 6, toolSucceeded = false),
+            ),
+            budget = HorizonBudget(maxItems = 12, itemCount = 5, truncated = false),
+            omittedSample = emptyList(),
+            omittedAtLeast = 0,
+            moreCandidatesAvailable = false,
+        )
+
+        val rendered = HorizonItemsRenderer.render(horizon)
+
+        assertEquals(5, rendered.size)
+        assertTrue(rendered[0].renderedLine.contains("[Actor-observed]"), "an observation must be tagged distinctly from an interpretation or tool result")
+        assertTrue(rendered[1].renderedLine.contains("[Actor interpretation, based on: \"no commits in 3 days\"]"), "an interpretation must carry its basis")
+        assertTrue(rendered[2].renderedLine.contains("[Actor interpretation]"), "an interpretation with no recorded basis still reads as an interpretation, never silently as fact")
+        assertTrue(rendered[3].renderedLine.contains("reported success"), "a tool result must read as a self-reported claim")
+        assertTrue(rendered[3].renderedLine.contains("not independently verified"))
+        assertTrue(rendered[4].renderedLine.contains("reported failure"), "a failed tool result must be distinguishable from a successful one, never silently dropped")
+        assertTrue(rendered[4].renderedLine.contains("not independently verified"))
+        // The distinction must survive regardless of which SurfacingReason produced the framing —
+        // these items use two different surfacing reasons (RecentActorEvidence, JustAsserted) above.
+        assertTrue(!rendered[0].renderedLine.contains("[Actor interpretation"), "observation must never read as interpretation")
+        assertTrue(!rendered[3].renderedLine.contains("[Actor-observed]"), "a tool result must never read as a plain observation")
+    }
+
+    @Test
+    fun `render never tags an ordinary user-stated or environment-signal item with an Actor provenance note`() {
+        val horizon = ContextHorizon(
+            userEmail = "u@test.alfrd.internal",
+            asOf = 0L,
+            schemaVersion = 1,
+            items = listOf(justAssertedItem("Newton is my dog", cycleSeq = 5)),
+            budget = HorizonBudget(maxItems = 12, itemCount = 1, truncated = false),
+            omittedSample = emptyList(),
+            omittedAtLeast = 0,
+            moreCandidatesAvailable = false,
+        )
+        val rendered = HorizonItemsRenderer.render(horizon)
+        assertTrue(!rendered[0].renderedLine.contains("Actor"), "an explicit user statement must never be mistaken for Actor-attributed evidence")
     }
 
     // ---- HorizonItemsRenderer.composeIntegrityCaveat ----
@@ -248,6 +324,34 @@ class ActorTest {
         val caveat2 = HorizonItemsRenderer.composeIntegrityCaveat(assembleFailedResult)
         assertNotNull(caveat2)
         assertTrue(caveat2!!.contains("missing some"))
+    }
+
+    @Test
+    fun `a Propagated outcome with non-empty incompleteTargets caveats exactly like a Failed outcome`() {
+        // Before this fix, composeIntegrityCaveat only recognized PropagationOutcome.Failed — a
+        // Propagated outcome that left some markRelevant attempts incomplete (a real, partial write
+        // failure — see PropagationOutcome.Propagated's own doc) silently read as full success.
+        val partiallyIncompleteResult = HorizonCycleResult(
+            cycleSeq = 1,
+            interpretOutcome = null,
+            mutationOutcomes = emptyList(),
+            propagationOutcome = PropagationOutcome.Propagated(
+                edgesCreated = listOf(app.alfrd.engram.cognitive.pipeline.horizon.RelevanceEdgeSummary("p1", "p2", 1.0)),
+                incompleteTargets = listOf(app.alfrd.engram.cognitive.pipeline.horizon.RelevanceEdgeSummary("p1", "p3", 0.5)),
+            ),
+            assembleOutcome = null,
+        )
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(partiallyIncompleteResult)
+        assertNotNull(caveat, "a partially incomplete propagation must be caveated exactly like a fully failed one")
+        assertTrue(caveat!!.contains("missing some"))
+
+        val fullyCompleteResult = partiallyIncompleteResult.copy(
+            propagationOutcome = PropagationOutcome.Propagated(
+                edgesCreated = listOf(app.alfrd.engram.cognitive.pipeline.horizon.RelevanceEdgeSummary("p1", "p2", 1.0)),
+                incompleteTargets = emptyList(),
+            ),
+        )
+        assertNull(HorizonItemsRenderer.composeIntegrityCaveat(fullyCompleteResult), "a fully completed propagation must not be caveated")
     }
 
     // ---- Actor.compose budget ladder ----

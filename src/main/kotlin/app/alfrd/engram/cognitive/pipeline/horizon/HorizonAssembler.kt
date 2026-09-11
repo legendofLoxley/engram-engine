@@ -4,6 +4,7 @@ import com.arcadedb.database.Database
 import com.arcadedb.graph.Vertex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
@@ -122,7 +123,7 @@ class ArcadeHorizonAssembler(
 ) : HorizonAssembler {
 
     private val logger = LoggerFactory.getLogger(ArcadeHorizonAssembler::class.java)
-    private val json = Json { encodeDefaults = true }
+    private val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
 
     /**
      * Test-only synchronization point, invoked once per [assemble] call inside the read
@@ -154,6 +155,7 @@ class ArcadeHorizonAssembler(
         val cycleSeq: Long,           // ORIGINAL assertion cycle — never touched by a status change
         val statusCycleSeq: Long?,    // cycle of the most recent status change, if any — distinct from cycleSeq
         val status: String?,
+        val kindMetadata: String?,    // raw ActorEventMetadata JSON, set only on Actor-attributed edges — see parseActorMetadata
     )
 
     override suspend fun assemble(
@@ -462,7 +464,7 @@ class ArcadeHorizonAssembler(
         }
         val sql = """
             SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, @in.text as phraseText,
-                   timestamp, cycleSeq, statusCycleSeq, status
+                   timestamp, cycleSeq, statusCycleSeq, status, kindMetadata
             FROM ASSERTS
             WHERE ${conditions.joinToString(" AND ")}
             $orderBy
@@ -503,6 +505,7 @@ class ArcadeHorizonAssembler(
             cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
             statusCycleSeq = (row["statusCycleSeq"] as? Number)?.toLong(),
             status = row["status"] as? String,
+            kindMetadata = row["kindMetadata"] as? String,
         )
     }
 
@@ -555,7 +558,7 @@ class ArcadeHorizonAssembler(
         if (limit <= 0) return emptyList()
         val sql = """
             SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, @in.text as phraseText,
-                   timestamp, cycleSeq, statusCycleSeq, status
+                   timestamp, cycleSeq, statusCycleSeq, status, kindMetadata
             FROM ASSERTS
             WHERE @out.uid IN :sourceUids AND cycleSeq = :cycleSeq
             LIMIT :limit
@@ -585,7 +588,7 @@ class ArcadeHorizonAssembler(
         if (sourceUids.isEmpty()) return null
         val sql = """
             SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, @in.text as phraseText,
-                   timestamp, cycleSeq, statusCycleSeq, status
+                   timestamp, cycleSeq, statusCycleSeq, status, kindMetadata
             FROM ASSERTS
             WHERE @in.uid = :phraseUid AND @out.uid IN :sourceUids
             LIMIT 1
@@ -701,7 +704,28 @@ class ArcadeHorizonAssembler(
             sourceRefs = listOf(SourceRef(c.phraseUid, c.sourceUid, c.sourceType, c.assertedAt, c.cycleSeq))
                 .take(HorizonLimits.MAX_SOURCE_REFS_PER_ITEM),
             sourceCount = 1,
+            actorMetadata = parseActorMetadata(c.sourceType, c.kindMetadata),
         )
+    }
+
+    /**
+     * Decodes the `ASSERTS.kindMetadata` JSON [ActorEventIngestionService] wrote at ingestion into
+     * the same shared [ActorEventMetadata] shape it was encoded from — carrying basis/tool
+     * provenance through to the response prompt (see [HorizonItem.actorMetadata]). Never non-null
+     * for a non-Actor-attributed [sourceType]: an ordinary fact/environment-signal edge has no such
+     * column populated, and even if it somehow did, surfacing it there would misattribute a claim
+     * this pipeline never made. A decode failure (unexpected/malformed content) is logged and
+     * treated as absent metadata, never a hard failure of the whole assemble() call.
+     */
+    private fun parseActorMetadata(sourceType: String, kindMetadataJson: String?): ActorEventMetadata? {
+        if (sourceType !in ACTOR_ATTRIBUTED_SOURCE_TYPES) return null
+        if (kindMetadataJson.isNullOrBlank()) return null
+        return try {
+            json.decodeFromString<ActorEventMetadata>(kindMetadataJson)
+        } catch (e: Exception) {
+            logger.warn("parseActorMetadata: failed to decode kindMetadata for sourceType=$sourceType: ${e.message}")
+            null
+        }
     }
 
     private fun categoryFor(sourceType: String, status: String?): HorizonItemCategory = when {

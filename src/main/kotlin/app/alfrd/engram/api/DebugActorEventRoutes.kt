@@ -36,9 +36,16 @@ data class DebugActorEventRequest(
     val toolName: String? = null,
     /** Required when [kind] is `"tool_result"` — a self-reported claim, not independently verified by this endpoint or the service it calls. */
     val toolSucceeded: Boolean? = null,
-    /** A real user's email, for live verification against a synthetic identity on the actual deployed path. Prefer this over [syntheticUserId] when both could apply — matches `/debug/environment-signal`'s convention. */
+    /**
+     * A synthetic identity to ingest as, overriding [syntheticUserId] when both are given — but
+     * unlike `/debug/environment-signal`'s convention, NOT a real user's email: this route enforces
+     * (400, not merely documents) that every [userEmail] ends in [DebugConverseService.SYNTHETIC_EMAIL_DOMAIN].
+     * This route is the synthetic injection harness (see [configureDebugActorEventRoutes]'s class
+     * doc) and never a live-user entry point, so there is no "verify against a real identity" mode
+     * here the way `/debug/environment-signal` has.
+     */
     val userEmail: String? = null,
-    /** Short label mapped to a synthetic user email (`debug+<label>@test.alfrd.internal`). Ignored if [userEmail] is set. */
+    /** Short label mapped to a synthetic user email (`debug+<label>@test.alfrd.internal`) via [DebugConverseService.resolveUserId]. Ignored if [userEmail] is set. */
     val syntheticUserId: String? = null,
 )
 
@@ -64,6 +71,15 @@ data class DebugActorEventResponse(
  * through this debug-token-gated HTTP surface. Same `debug-token` auth and `DEBUG_CONVERSE_ENABLED`
  * gate as `/debug/environment-signal` and `/debug/converse` — reusing the exact infrastructure
  * already deployed and already disableable, rather than inventing a second mechanism.
+ *
+ * **Its synthetic-only scope is enforced here, not merely asserted by this doc comment.** Every
+ * resolved `userEmail` (from [DebugActorEventRequest.userEmail] or, via
+ * [DebugConverseService.resolveUserId], from [DebugActorEventRequest.syntheticUserId]) must end in
+ * [DebugConverseService.SYNTHETIC_EMAIL_DOMAIN] — a request naming any other identity is rejected
+ * with 400 before [ActorEventIngestionService.ingest] is ever called. Deliberately stricter than
+ * `/debug/environment-signal`, which intentionally also accepts a real user's email for live
+ * verification against a synthetic identity on the deployed path — that route is untouched here;
+ * this one's own doc has always called it "the synthetic injection harness," so it is held to that.
  */
 fun Application.configureDebugActorEventRoutes(db: Database) {
     val cycleSequencer = ArcadeCycleSequencer(db)
@@ -84,6 +100,19 @@ fun Application.configureDebugActorEventRoutes(db: Database) {
 
                     val userEmail = req.userEmail?.takeIf { it.isNotBlank() }
                         ?: DebugConverseService.resolveUserId(req.syntheticUserId)
+
+                    // Enforced, not merely documented: this route is the synthetic injection
+                    // harness (see class doc), never a live-user entry point. req.userEmail is
+                    // caller-supplied free text — unlike syntheticUserId (always funneled through
+                    // resolveUserId, which can only ever produce a synthetic address), it could
+                    // otherwise name any real user's identity.
+                    if (!userEmail.endsWith(DebugConverseService.SYNTHETIC_EMAIL_DOMAIN, ignoreCase = true)) {
+                        logger.warn("actor-event: rejected non-synthetic userEmail={} — this route is the synthetic injection harness only, never a live-user entry point", userEmail)
+                        return@post call.respond(
+                            HttpStatusCode.BadRequest,
+                            mapOf("error" to "userEmail must be a synthetic identity ending in '${DebugConverseService.SYNTHETIC_EMAIL_DOMAIN}' — this route is the synthetic injection harness, never a live-user entry point"),
+                        )
+                    }
                     DebugConverseService.ensureSyntheticUser(db, userEmail)
 
                     val outcome = service.ingest(
@@ -117,7 +146,9 @@ private fun DebugActorEventRequest.toActorEventKind(): ActorEventKind? = when (k
 private fun ActorEventIngestOutcome.toHttpStatus(): HttpStatusCode = when (this) {
     is ActorEventIngestOutcome.Committed, is ActorEventIngestOutcome.DuplicateDelivery -> HttpStatusCode.OK
     is ActorEventIngestOutcome.ConflictingReuse, is ActorEventIngestOutcome.Rejected -> HttpStatusCode.BadRequest
-    is ActorEventIngestOutcome.AllocationFailed, is ActorEventIngestOutcome.WriteFailed -> HttpStatusCode.ServiceUnavailable
+    is ActorEventIngestOutcome.AllocationFailed, is ActorEventIngestOutcome.WriteFailed,
+    is ActorEventIngestOutcome.LookupFailed, is ActorEventIngestOutcome.PropagationUncertain,
+    -> HttpStatusCode.ServiceUnavailable
 }
 
 private fun ActorEventIngestOutcome.toResponse(userEmail: String): DebugActorEventResponse = when (this) {
@@ -139,6 +170,11 @@ private fun ActorEventIngestOutcome.toResponse(userEmail: String): DebugActorEve
     is ActorEventIngestOutcome.AllocationFailed -> DebugActorEventResponse(userEmail = userEmail, eventId = eventId, outcome = "AllocationFailed")
     is ActorEventIngestOutcome.WriteFailed -> DebugActorEventResponse(userEmail = userEmail, eventId = eventId, outcome = "WriteFailed", reason = reason)
     is ActorEventIngestOutcome.Rejected -> DebugActorEventResponse(userEmail = userEmail, eventId = eventId, outcome = "Rejected", reason = reason)
+    is ActorEventIngestOutcome.LookupFailed -> DebugActorEventResponse(userEmail = userEmail, eventId = eventId, outcome = "LookupFailed", reason = reason)
+    is ActorEventIngestOutcome.PropagationUncertain -> DebugActorEventResponse(
+        userEmail = userEmail, eventId = eventId, outcome = "PropagationUncertain",
+        phraseUid = existingPhraseUid, cycleSeq = existingCycleSeq, reason = reason,
+    )
 }
 
 private fun describePropagation(outcome: PropagationOutcome): String = when (outcome) {

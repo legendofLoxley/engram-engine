@@ -260,6 +260,78 @@ class ContextHorizonConversationalCycleTest {
     }
 
     @Test
+    fun `an independently ingested Actor interpretation reaches the next turn's prompt with its basis, distinct from an observation`() = runBlocking {
+        val email = "actor-interp-next-turn-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val interpretationText = "The user appears to be blocked on the Arx deployment"
+        val basis = "no commits referencing Arx in the last several days"
+
+        val llmClient = TestLlmClient { request ->
+            if (request.tools.isNotEmpty()) {
+                LlmResponse(text = "", latencyMs = 5, retryCount = 0)
+            } else {
+                LlmResponse(text = "Sure, happy to help.", latencyMs = 5, retryCount = 0)
+            }
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        val ingestOutcome = injectActorEvent(email, "evt-interp-1", ActorEventKind.Interpretation(interpretationText, basis), "hermes:pattern-analysis")
+        assertTrue(ingestOutcome is ActorEventIngestOutcome.Committed, "expected Committed, got $ingestOutcome")
+
+        val turn = pipeline.processForDebug("What's a good name for a cat?", "s1", email, requestId = "req-interp-turn")
+        val cycle = turn.trace.horizonCycle!!
+
+        val sentPrompt = cycle.finalSystemPromptSent!!
+        assertTrue(sentPrompt.contains(interpretationText), "the interpretation's own text must reach the actual prompt")
+        assertTrue(
+            sentPrompt.contains("Actor interpretation, based on: \"$basis\""),
+            "an interpretation must be distinguishable from a plain observation, and its basis must be preserved through to the actual prompt",
+        )
+        assertTrue(!sentPrompt.contains("[Actor-observed]"), "an interpretation must never be rendered as an unqualified observation")
+
+        val horizonAtSameCycle = (horizonAssembler.assemble(email, cycle.cycleSeq!!) as AssembleOutcome.Assembled).horizon
+        val structuredItem = horizonAtSameCycle.items.single { it.text.text == interpretationText }
+        assertEquals(ProvenanceKind.ACTOR_INTERPRETATION, structuredItem.provenance)
+        assertEquals(basis, structuredItem.actorMetadata?.basis, "the basis must survive all the way through assembly, not just the source-level ingestion metadata")
+    }
+
+    @Test
+    fun `an independently ingested FAILED tool result reaches the next turn's prompt as a self-reported, unverified claim`() = runBlocking {
+        val email = "actor-tool-fail-next-turn-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val toolResultText = "Deployment to staging failed with a timeout"
+
+        val llmClient = TestLlmClient { request ->
+            if (request.tools.isNotEmpty()) {
+                LlmResponse(text = "", latencyMs = 5, retryCount = 0)
+            } else {
+                LlmResponse(text = "Sure, happy to help.", latencyMs = 5, retryCount = 0)
+            }
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        val ingestOutcome = injectActorEvent(
+            email, "evt-tool-fail-1",
+            ActorEventKind.ToolResult(toolResultText, toolName = "deploy_service", toolSucceeded = false),
+            "hermes:deploy-tool",
+        )
+        assertTrue(ingestOutcome is ActorEventIngestOutcome.Committed, "expected Committed, got $ingestOutcome")
+
+        val turn = pipeline.processForDebug("What's a good name for a cat?", "s1", email, requestId = "req-tool-fail-turn")
+        val cycle = turn.trace.horizonCycle!!
+
+        val sentPrompt = cycle.finalSystemPromptSent!!
+        assertTrue(sentPrompt.contains(toolResultText), "the tool result's own text must reach the actual prompt")
+        assertTrue(sentPrompt.contains("reported failure"), "a FAILED tool result must be distinguishable from a successful one in the actual prompt, never collapsed to a generic tag")
+        assertTrue(sentPrompt.contains("not independently verified"), "a tool's self-reported outcome must never be presented as independently verified fact")
+
+        val horizonAtSameCycle = (horizonAssembler.assemble(email, cycle.cycleSeq!!) as AssembleOutcome.Assembled).horizon
+        val structuredItem = horizonAtSameCycle.items.single { it.text.text == toolResultText }
+        assertEquals(ProvenanceKind.ACTOR_TOOL_RESULT, structuredItem.provenance)
+        assertEquals(false, structuredItem.actorMetadata?.toolSucceeded, "the self-reported failure must survive through assembly, never silently defaulted to success or dropped")
+    }
+
+    @Test
     fun `paraphrased and renamed equivalent still connects via shared vocabulary`() = runBlocking {
         val email = "arx-paraphrase-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
