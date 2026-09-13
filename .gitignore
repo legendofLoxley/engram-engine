@@ -19,5 +19,9 @@ frontend/.env
 .vscode/
 .kotlin/
 
+# webui-bridge (Python)
+__pycache__/
+*.pyc
+
 # Personal/session-local Claude Code overrides — not shared team policy
 .claude/settings.local.json
