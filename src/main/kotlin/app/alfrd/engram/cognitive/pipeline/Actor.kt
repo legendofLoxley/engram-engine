@@ -183,8 +183,14 @@ data class Conditioners(
     val integrityCaveat: String? = null,
 )
 
-/** Result of a single actor composition. [source] is "llm" for a real completion, "degraded" for the failure fallback. [promptDebug] is always populated — the caller decides whether to surface it (debug trace only; never the plain response). */
-data class ActorResult(val text: String, val source: String, val promptDebug: PromptDebugInfo? = null)
+/** Result of a single actor composition. [source] is "llm" for a real completion, "degraded" for the failure fallback. [promptDebug] is always populated — the caller decides whether to surface it (debug trace only; never the plain response). [providerName]/[modelName] mirror [app.alfrd.engram.cognitive.providers.LlmResponse]'s fields — null for a "degraded" result, since no client answered. */
+data class ActorResult(
+    val text: String,
+    val source: String,
+    val promptDebug: PromptDebugInfo? = null,
+    val providerName: String? = null,
+    val modelName: String? = null,
+)
 
 /**
  * What was actually sent, after budget handling — controlled debug evidence, per
@@ -274,7 +280,13 @@ class Actor(private val llmClient: LlmClient?) {
                     timeoutMs = 20_000,
                 ),
             )
-            ActorResult(response.text, source = "llm", promptDebug = debugInfo)
+            ActorResult(
+                response.text,
+                source = "llm",
+                promptDebug = debugInfo,
+                providerName = response.providerName,
+                modelName = response.modelName,
+            )
         } catch (_: Exception) {
             ActorResult(DEGRADED_TEXT, source = "degraded", promptDebug = debugInfo)
         }

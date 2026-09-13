@@ -41,6 +41,14 @@ data class LlmResponse(
     val toolCalls: List<ToolCall> = emptyList(),
     val latencyMs: Long,
     val retryCount: Int,
+    /**
+     * Which provider/model actually served this call — set by the [LlmClient] implementation
+     * itself (never inferred elsewhere) so callers/trace metadata can report the real answering
+     * client instead of assuming one. Null for implementations that don't report it (e.g. tests'
+     * fakes); existing callers that don't read these fields are unaffected.
+     */
+    val providerName: String? = null,
+    val modelName: String? = null,
 )
 
 /** Thrown when an LLM request exceeds the configured [LlmRequest.timeoutMs]. Callers must degrade gracefully. */

@@ -17,6 +17,7 @@ import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.scaffold.TrustPhaseTransitionService
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
 import app.alfrd.engram.cognitive.providers.cloud.CloudLlmClient
+import app.alfrd.engram.cognitive.providers.local.LocalLlmClient
 import com.arcadedb.database.Database
 
 /**
@@ -35,7 +36,13 @@ object CognitivePipelineFactory {
         val anthropicKey = System.getenv("ANTHROPIC_API_KEY") ?: ""
         val googleKey    = System.getenv("GOOGLE_AI_API_KEY") ?: ""
 
-        val llmClient = if (anthropicKey.isNotBlank() || googleKey.isNotBlank()) {
+        // LLM_PROVIDER=local is an explicit opt-in (e.g. a dev box with a local model endpoint) —
+        // it always wins over cloud keys so presence of both never silently prefers the cloud
+        // provider. Unset (the default, including every existing deployment), behavior is
+        // unchanged: cloud keys wire CloudLlmClient, their absence leaves the pipeline LLM-less.
+        val llmClient = if (System.getenv("LLM_PROVIDER")?.lowercase() == "local") {
+            LocalLlmClient()
+        } else if (anthropicKey.isNotBlank() || googleKey.isNotBlank()) {
             CloudLlmClient(
                 anthropicApiKey = anthropicKey,
                 googleApiKey    = googleKey,

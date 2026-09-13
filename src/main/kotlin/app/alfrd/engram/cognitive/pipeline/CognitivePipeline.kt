@@ -150,9 +150,6 @@ open class CognitivePipeline(
     private val turnCounters = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     companion object {
-        /** Human-readable name of the model [Actor] uses, for debug-trace reporting. Keep in sync with [Actor]. */
-        private const val ACTOR_MODEL_NAME = "claude-sonnet-4-5"
-
         /** Cap on [recentTurns] — 3 exchanges (user + alfrd per exchange). Short-term only, not a durable log. */
         private const val MAX_RECENT_TURNS = 6
 
@@ -750,9 +747,12 @@ open class CognitivePipeline(
             reasonNs = System.nanoTime() - reasonStartNs
             trace!!.latencyBreakdown.reasonMs =
                 java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(reasonNs)
-            val (provider, model) = if (ctx.actorResult?.source == "llm") "anthropic" to ACTOR_MODEL_NAME else null to null
-            trace.model.reasonProvider = provider
-            trace.model.reasonModel = model
+            // Read from the actual response (threaded through ActorResult from LlmResponse) rather
+            // than assuming a provider — this pipeline can be configured with either CloudLlmClient
+            // or LocalLlmClient (see CognitivePipelineFactory), and only the response itself knows
+            // which one actually answered.
+            trace.model.reasonProvider = ctx.actorResult?.providerName
+            trace.model.reasonModel = ctx.actorResult?.modelName
 
             trace.retrievalCoverage = RetrievalCoverageTrace(
                 coverage = coverage.coverage,

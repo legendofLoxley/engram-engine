@@ -108,11 +108,14 @@ fun main() {
     sessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, sessionManager) })
 
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
-    log.info("listening on port $port")
+    // Defaults to Ktor's own default (0.0.0.0) so production/container behavior is unchanged;
+    // set HOST=127.0.0.1 for a loopback-only local run.
+    val host = System.getenv("HOST") ?: "0.0.0.0"
+    log.info("listening on $host:$port")
 
     // TODO: add Ktor CallLogging plugin here for HTTP request/response tracing when needed
 
-    embeddedServer(Netty, port = port) {
+    embeddedServer(Netty, port = port, host = host) {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }

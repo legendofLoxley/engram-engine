@@ -88,7 +88,14 @@ class CloudLlmClient(
 
         val text = parseAnthropicText(response.body())
         val toolCalls = parseAnthropicToolCalls(response.body())
-        LlmResponse(text = text, toolCalls = toolCalls, latencyMs = System.currentTimeMillis() - startMs, retryCount = 0)
+        LlmResponse(
+            text = text,
+            toolCalls = toolCalls,
+            latencyMs = System.currentTimeMillis() - startMs,
+            retryCount = 0,
+            providerName = "anthropic",
+            modelName = modelId,
+        )
     }
 
     private fun buildAnthropicBody(modelId: String, request: LlmRequest): AnthropicRequest {
@@ -167,7 +174,13 @@ class CloudLlmClient(
         }
 
         val text = parseGeminiText(response.body())
-        LlmResponse(text = text, latencyMs = System.currentTimeMillis() - startMs, retryCount = 0)
+        LlmResponse(
+            text = text,
+            latencyMs = System.currentTimeMillis() - startMs,
+            retryCount = 0,
+            providerName = "google",
+            modelName = modelId,
+        )
     }
 
     private fun buildGeminiBody(request: LlmRequest): GeminiRequest {
