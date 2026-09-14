@@ -128,13 +128,64 @@ def _parse_cursor(raw: str | None) -> int:
         return 0
 
 
-def run_turn(config: dict[str, Any], store: RunStore, *, webui_session_id: str, message: str) -> str:
+#: Terminal-state strings _stream_runner_run_events() (WebUI's SSE polling
+#: loop, api/routes.py) actually recognizes as terminal. Using anything else
+#: here (e.g. the "errored" this used to send) leaves the loop polling
+#: forever — it never sees a reason to stop, so the browser never receives
+#: stream_end and the composer hangs instead of showing the error.
+TERMINAL_ERROR_STATUS = "error"
+TERMINAL_COMPLETED_STATUS = "completed"
+
+
+def unsupported_input_message(attachments: list[Any], toolsets: list[Any]) -> str:
+    parts = []
+    if attachments:
+        n = len(attachments)
+        parts.append(f"{n} attachment{'s' if n != 1 else ''}")
+    if toolsets:
+        names = ", ".join(str(t) for t in toolsets)
+        parts.append(f"tool selection ({names})")
+    joined = " and ".join(parts)
+    pronoun = "it" if len(parts) == 1 else "them"
+    return (
+        f"This development slice's Director backend does not support {joined} yet. "
+        f"Remove {pronoun} and resend your message as plain text."
+    )
+
+
+def run_turn(
+    config: dict[str, Any],
+    store: RunStore,
+    *,
+    webui_session_id: str,
+    message: str,
+    attachments: list[Any] | None = None,
+    toolsets: list[Any] | None = None,
+) -> str:
     """Executes one Director turn synchronously and records it as a completed run.
 
     Returns the new run_id. Never raises for an upstream failure — that is
     recorded as an 'apperror' run event instead, so the browser renders a
     visible chat error rather than the composer hanging or a bare 500.
+
+    Attachments/toolsets are rejected here, before any call to engram-engine
+    — the Director is never invoked for a turn it can't fully honor, and the
+    rejection reaches the user through the same apperror/done event pair (and
+    the same chat-bubble rendering) any other run failure uses, not a new
+    mechanism.
     """
+    attachments = attachments or []
+    toolsets = toolsets or []
+    if attachments or toolsets:
+        events = [
+            {"event": "apperror", "seq": 1, "payload": {
+                "type": "unsupported_input",
+                "message": unsupported_input_message(attachments, toolsets),
+            }},
+            {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
+        ]
+        return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
+
     engram_session_id = store.engram_session_for(webui_session_id)
     try:
         payload = build_engram_payload(message, config["synthetic_user_id"], session_id=engram_session_id)
@@ -143,22 +194,22 @@ def run_turn(config: dict[str, Any], store: RunStore, *, webui_session_id: str, 
         reply_text = str(result.get("reply") or "")
         events = [
             {"event": "token", "seq": 1, "payload": {"text": reply_text}},
-            {"event": "done", "seq": 2, "payload": {"status": "completed"}},
+            {"event": "done", "seq": 2, "payload": {"status": TERMINAL_COMPLETED_STATUS}},
         ]
-        return store.create(webui_session_id=webui_session_id, events=events, status="completed")
+        return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_COMPLETED_STATUS)
     except UpstreamError as e:
         detail = e.body.decode("utf-8", errors="replace")[:500]
         events = [
             {"event": "apperror", "seq": 1, "payload": {"type": "error", "message": f"engram-engine rejected the turn (HTTP {e.status}): {detail}"}},
-            {"event": "done", "seq": 2, "payload": {"status": "errored"}},
+            {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
-        return store.create(webui_session_id=webui_session_id, events=events, status="errored")
+        return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
     except Exception as e:  # network failure, timeout, etc. — surfaced, never swallowed
         events = [
             {"event": "apperror", "seq": 1, "payload": {"type": "error", "message": f"could not reach engram-engine: {e}"}},
-            {"event": "done", "seq": 2, "payload": {"status": "errored"}},
+            {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
-        return store.create(webui_session_id=webui_session_id, events=events, status="errored")
+        return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
 
 
 def _unsupported(message: str) -> dict[str, Any]:
@@ -244,7 +295,15 @@ def make_handler(config: dict[str, Any], store: RunStore) -> type[BaseHTTPReques
                 if not isinstance(message, str) or not message.strip():
                     self._send_json(400, {"error": "message is required"})
                     return
-                run_id = run_turn(config, store, webui_session_id=webui_session_id, message=message)
+                attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
+                toolsets = body.get("toolsets") if isinstance(body.get("toolsets"), list) else []
+                run_id = run_turn(
+                    config, store,
+                    webui_session_id=webui_session_id,
+                    message=message,
+                    attachments=attachments,
+                    toolsets=toolsets,
+                )
                 record = store.get(run_id)
                 self._send_json(200, {
                     "run_id": run_id,

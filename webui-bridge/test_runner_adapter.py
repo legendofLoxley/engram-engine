@@ -94,14 +94,87 @@ class RunTurnTest(unittest.TestCase):
         with patch.object(ra, "forward_to_engram", side_effect=engram_client.UpstreamError(401, b"nope")):
             run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
         record = self.store.get(run_id)
-        self.assertEqual(record["status"], "errored")
+        # Must be a status the WebUI's own SSE polling loop actually recognizes as
+        # terminal (api/routes.py's _stream_runner_run_events checks this exact
+        # string) — anything else leaves the browser's stream open forever
+        # instead of showing the error. This used to be the (unrecognized)
+        # "errored" and would have hung.
+        self.assertEqual(record["status"], "error")
         self.assertEqual(record["events"][0]["event"], "apperror")
 
     def test_network_failure_surfaces_as_apperror_event_not_a_silent_success(self):
         with patch.object(ra, "forward_to_engram", side_effect=ConnectionRefusedError("nope")):
             run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
         record = self.store.get(run_id)
-        self.assertEqual(record["status"], "errored")
+        self.assertEqual(record["status"], "error")
+
+
+class UnsupportedInputMessageTest(unittest.TestCase):
+    def test_attachments_only(self):
+        msg = ra.unsupported_input_message([{"name": "a.png"}], [])
+        self.assertIn("1 attachment", msg)
+        self.assertNotIn("tool selection", msg)
+
+    def test_multiple_attachments_pluralized(self):
+        msg = ra.unsupported_input_message([{"name": "a"}, {"name": "b"}], [])
+        self.assertIn("2 attachments", msg)
+
+    def test_toolsets_only_names_them(self):
+        msg = ra.unsupported_input_message([], ["web_search", "code_exec"])
+        self.assertIn("tool selection (web_search, code_exec)", msg)
+
+    def test_both_combined(self):
+        msg = ra.unsupported_input_message([{"name": "a"}], ["web_search"])
+        self.assertIn("attachment", msg)
+        self.assertIn("tool selection", msg)
+
+
+class RunTurnRejectsUnsupportedInputTest(unittest.TestCase):
+    """Attachments/tool selections must be rejected before the Director is
+    ever invoked — not silently dropped, not processed as if they'd been
+    honored.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.store = ra.RunStore()
+
+    def test_attachments_reject_without_calling_engram(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                attachments=[{"name": "photo.png"}],
+            )
+            mocked.assert_not_called()
+        record = self.store.get(run_id)
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["events"][0]["event"], "apperror")
+        self.assertEqual(record["events"][0]["payload"]["type"], "unsupported_input")
+        self.assertIn("attachment", record["events"][0]["payload"]["message"])
+        self.assertEqual(record["events"][1]["event"], "done")
+        self.assertEqual(record["events"][1]["payload"]["status"], "error")
+
+    def test_toolsets_reject_without_calling_engram(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                toolsets=["web_search"],
+            )
+            mocked.assert_not_called()
+        record = self.store.get(run_id)
+        self.assertEqual(record["events"][0]["payload"]["type"], "unsupported_input")
+        self.assertIn("tool selection", record["events"][0]["payload"]["message"])
+
+    def test_plain_message_with_no_attachments_or_toolsets_is_unaffected(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi back", "sessionId": "e-1"}) as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                attachments=[], toolsets=[],
+            )
+            mocked.assert_called_once()
+        record = self.store.get(run_id)
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["events"][0]["event"], "token")
 
 
 class RunnerHttpIntegrationTest(unittest.TestCase):
@@ -205,6 +278,60 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
             resp = conn.getresponse()
             self.assertEqual(resp.status, 400)
             mocked.assert_not_called()
+
+    def test_attachment_through_the_real_endpoint_is_rejected_not_forwarded(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            conn = self._conn()
+            body = json.dumps({
+                "session_id": "webui-session-attach",
+                "message": "please look at this file",
+                "attachments": [{"name": "screenshot.png"}],
+            }).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            # The run itself still "starts" successfully at the HTTP layer — the
+            # rejection is a run event (apperror+done), the existing mechanism
+            # the native chat UI already renders errors through — not an HTTP
+            # failure that would surface as a raw/opaque error.
+            self.assertEqual(resp.status, 200)
+            start_payload = json.loads(resp.read())
+            run_id = start_payload["run_id"]
+            mocked.assert_not_called()
+
+            conn2 = self._conn()
+            conn2.request("GET", f"/v1/runs/{run_id}/events?cursor=0", headers=self._auth_headers())
+            events_payload = json.loads(conn2.getresponse().read())
+            self.assertEqual(events_payload["events"][0]["event"], "apperror")
+            self.assertEqual(events_payload["events"][0]["payload"]["type"], "unsupported_input")
+            self.assertIn("attachment", events_payload["events"][0]["payload"]["message"])
+
+            conn3 = self._conn()
+            conn3.request("GET", f"/v1/runs/{run_id}", headers=self._auth_headers())
+            status_payload = json.loads(conn3.getresponse().read())
+            # Must be the exact terminal string WebUI's polling loop recognizes,
+            # or the browser-facing stream never receives stream_end.
+            self.assertEqual(status_payload["status"], "error")
+            self.assertEqual(status_payload["terminal_state"], "error")
+
+    def test_toolsets_through_the_real_endpoint_is_rejected_not_forwarded(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            conn = self._conn()
+            body = json.dumps({
+                "session_id": "webui-session-tools",
+                "message": "search the web for this",
+                "toolsets": ["web_search"],
+            }).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            run_id = json.loads(resp.read())["run_id"]
+            mocked.assert_not_called()
+
+            conn2 = self._conn()
+            conn2.request("GET", f"/v1/runs/{run_id}/events?cursor=0", headers=self._auth_headers())
+            events_payload = json.loads(conn2.getresponse().read())
+            self.assertEqual(events_payload["events"][0]["payload"]["type"], "unsupported_input")
+            self.assertIn("tool selection", events_payload["events"][0]["payload"]["message"])
 
 
 if __name__ == "__main__":
