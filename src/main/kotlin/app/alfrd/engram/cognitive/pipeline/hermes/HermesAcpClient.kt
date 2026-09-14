@@ -1,0 +1,282 @@
+package app.alfrd.engram.cognitive.pipeline.hermes
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import org.slf4j.LoggerFactory
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+/** What a real Hermes ACP session actually produced for one [HermesAssignment]. */
+sealed interface HermesAssignmentOutcome {
+    data class Completed(
+        val findingsText: String,
+        val toolName: String,
+        val toolTargetPath: String?,
+        /** Self-reported from the observed tool-call + stop-reason shape — not independently
+         *  re-verified by re-reading the file ourselves (mirrors this codebase's existing
+         *  [app.alfrd.engram.cognitive.pipeline.horizon.ActorEventKind.ToolResult] honesty
+         *  convention: a tool result is a claim, not a verified fact). */
+        val toolSucceeded: Boolean,
+    ) : HermesAssignmentOutcome
+    data class Failed(val reason: String) : HermesAssignmentOutcome
+}
+
+/**
+ * A minimal client for the real hermes-agent Agent Client Protocol (ACP) interface — the
+ * "installed Hermes invocation contract" for this box, confirmed by direct inspection: the
+ * production `hermes-halo` image already bundles a working `hermes-acp` entry point (the
+ * `acp` package and `venv/bin/hermes-acp` are present in the vendor image as shipped; no
+ * image rebuild was needed). ACP is JSON-RPC 2.0 over newline-delimited stdio — confirmed
+ * directly from the installed `acp/connection.py` docstring, not assumed.
+ *
+ * Every assignment spawns a fresh, isolated dev instance of the *exact* vendor image
+ * (`docker run --rm`, one-shot, torn down after) — never the production `hermes-halo`
+ * container and never its mounted personal data at `/var/lib/halo-home/hermes/data`. The
+ * dev instance gets its own empty `HERMES_HOME` (`HERMES_DEV_HOME_DIR`) and a read-only bind
+ * mount of a workspace directory containing exactly the one permitted fixture
+ * (`HERMES_DEV_WORKSPACE_DIR`, `:ro`) as the ACP session's `cwd` — this is what "permission
+ * limited to reading that fixture" means concretely: a sandboxed cwd Hermes's own tools
+ * resolve paths against, backed by a read-only mount so no write is physically possible,
+ * with [handleInboundRequest] below as a second, independent layer (deny any permission
+ * request that doesn't target the fixture) rather than the only enforcement.
+ *
+ * `clientCapabilities.fs` is advertised as `false` for both read/write, so Hermes never asks
+ * this client to proxy file I/O — it uses its own real internal tool against its own
+ * sandboxed filesystem, which is the "real tool mechanism" the task requires, not a
+ * client-side simulation of one.
+ */
+class HermesAcpClient(
+    private val dockerImage: String = System.getenv("HERMES_DEV_IMAGE") ?: "halo-home/hermes-halo:0.0.1",
+    private val homeDir: String = System.getenv("HERMES_DEV_HOME_DIR") ?: "/home/halo/development/hermes-dev/home",
+    private val workspaceDir: String = System.getenv("HERMES_DEV_WORKSPACE_DIR") ?: "/home/halo/development/hermes-dev/workspace",
+    private val containerWorkspacePath: String = System.getenv("HERMES_DEV_CONTAINER_WORKSPACE") ?: "/home/hermes/workspace",
+    private val promptTimeoutMs: Long = System.getenv("HERMES_DEV_PROMPT_TIMEOUT_MS")?.toLongOrNull() ?: 180_000L,
+) {
+    private val logger = LoggerFactory.getLogger(HermesAcpClient::class.java)
+
+    suspend fun inspectFixture(assignment: HermesAssignment, fixtureFilename: String): HermesAssignmentOutcome =
+        withContext(Dispatchers.IO) {
+            val process = try {
+                ProcessBuilder(buildCommand()).redirectErrorStream(false).start()
+            } catch (e: Exception) {
+                logger.warn("hermes-acp: failed to spawn dev container for assignment {}: {}", assignment.assignmentId, e.message)
+                return@withContext HermesAssignmentOutcome.Failed("spawn_failed: ${e.message}")
+            }
+
+            // The blocking readLine() loop in exchange() has no cooperative-cancellation
+            // checkpoint of its own — this watchdog is what actually bounds a hung/slow turn:
+            // destroying the process closes its stdout pipe, which unblocks readLine() with EOF.
+            val watchdog = Thread {
+                try {
+                    if (!process.waitFor(promptTimeoutMs, TimeUnit.MILLISECONDS)) {
+                        logger.warn("hermes-acp: assignment {} exceeded {}ms — killing subprocess", assignment.assignmentId, promptTimeoutMs)
+                        process.destroyForcibly()
+                    }
+                } catch (_: InterruptedException) {
+                    // Normal path: exchange() finished and this thread was interrupted before the deadline.
+                }
+            }.apply { isDaemon = true; start() }
+
+            try {
+                exchange(process, assignment, fixtureFilename)
+            } catch (e: Exception) {
+                logger.warn("hermes-acp: assignment {} failed: {}", assignment.assignmentId, e.message, e)
+                HermesAssignmentOutcome.Failed(e.message ?: (e::class.simpleName ?: "unknown_error"))
+            } finally {
+                watchdog.interrupt()
+                process.destroyForcibly()
+            }
+        }
+
+    /**
+     * The vendor image's own entrypoint hardcodes `exec hermes "$@"`, so a plain `docker run
+     * ... hermes-acp` would try to run `hermes hermes-acp` (not a subcommand). Overriding
+     * `--entrypoint` to a small inline shell keeps the one useful step from that entrypoint
+     * (symlinking the mnemosyne memory plugin — harmless no-op since `memory.memory_enabled:
+     * false` in the dev config) and then execs the real installed `hermes-acp` binary
+     * directly. No vendor image layer is modified — this only changes the container's
+     * startup command for this one-shot dev run.
+     */
+    private fun buildCommand(): List<String> = listOf(
+        "docker", "run", "--rm", "-i",
+        "--add-host", "host.docker.internal:host-gateway",
+        "-v", "$homeDir:/home/hermes/.hermes",
+        "-v", "$workspaceDir:$containerWorkspacePath:ro",
+        "--entrypoint", "/bin/bash",
+        dockerImage,
+        "-c",
+        "mkdir -p /home/hermes/.hermes/plugins && " +
+            "ln -sfn /opt/hermes-agent/venv/lib/python3.11/site-packages/hermes_memory_provider " +
+            "/home/hermes/.hermes/plugins/mnemosyne 2>/dev/null; " +
+            "exec /opt/hermes-agent/venv/bin/hermes-acp",
+    )
+
+    /**
+     * The full `initialize` → `session/new` → `session/prompt` handshake, blocking-sequential
+     * by design (one assignment, one session, no concurrent exchange to coordinate) — verified
+     * against the real installed runtime before this client was written (a raw JSON-RPC smoke
+     * script against this exact image/config reproduced a genuine `read_file` tool call and a
+     * reply containing the fixture's own marker token).
+     */
+    private fun exchange(process: Process, assignment: HermesAssignment, fixtureFilename: String): HermesAssignmentOutcome {
+        val stdin = BufferedWriter(OutputStreamWriter(process.outputStream, Charsets.UTF_8))
+        val stdout = BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8))
+        val nextId = AtomicInteger(0)
+
+        fun sendRequest(method: String, params: JsonObject, id: Int) {
+            val line = buildJsonObject {
+                put("jsonrpc", JsonPrimitive("2.0"))
+                put("id", JsonPrimitive(id))
+                put("method", JsonPrimitive(method))
+                put("params", params)
+            }.toString()
+            stdin.write(line); stdin.write("\n"); stdin.flush()
+        }
+
+        fun sendResult(id: JsonElement, result: JsonObject) {
+            val line = buildJsonObject {
+                put("jsonrpc", JsonPrimitive("2.0"))
+                put("id", id)
+                put("result", result)
+            }.toString()
+            stdin.write(line); stdin.write("\n"); stdin.flush()
+        }
+
+        var observedToolName: String? = null
+        var observedToolPath: String? = null
+        val messageText = StringBuilder()
+
+        fun handleNotification(method: String, params: JsonObject?) {
+            if (method != "session/update" || params == null) return
+            val update = params["update"]?.jsonObject ?: return
+            when (update["sessionUpdate"]?.jsonPrimitive?.contentOrNull) {
+                "tool_call" -> {
+                    observedToolName = update["kind"]?.jsonPrimitive?.contentOrNull ?: observedToolName
+                    observedToolPath = update["locations"]?.jsonArray
+                        ?.firstOrNull()?.jsonObject?.get("path")?.jsonPrimitive?.contentOrNull
+                        ?: observedToolPath
+                }
+                "agent_message_chunk" -> {
+                    update["content"]?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull
+                        ?.let { messageText.append(it) }
+                }
+                else -> Unit
+            }
+        }
+
+        // The only inbound request this slice expects: approving (or not) a permission check
+        // for a tool call. Allowed only when every location it names is the permitted fixture;
+        // anything else — a different path, a write, a shell command — is denied. This is
+        // defense in depth on top of the read-only mount and sandboxed cwd, not the only
+        // enforcement (a plain read tool did not trigger this at all in the verified smoke
+        // test, since `approvals.mode: auto` in the dev config didn't gate it — this handler
+        // exists for correctness regardless of that config detail).
+        fun handleInboundRequest(method: String, id: JsonElement, params: JsonObject?) {
+            if (method != "session/request_permission" || params == null) {
+                sendResult(id, buildJsonObject {
+                    put("outcome", buildJsonObject { put("outcome", JsonPrimitive("selected")); put("optionId", JsonPrimitive("deny")) })
+                })
+                return
+            }
+            val locations = params["toolCall"]?.jsonObject?.get("locations")?.jsonArray
+            val targetsFixtureOnly = locations != null && locations.isNotEmpty() &&
+                locations.all { it.jsonObject["path"]?.jsonPrimitive?.contentOrNull?.contains(fixtureFilename) == true }
+            val options = params["options"]?.jsonArray.orEmpty().map { it.jsonObject }
+            val optionId = if (targetsFixtureOnly) {
+                options.firstOrNull { it["optionId"]?.jsonPrimitive?.contentOrNull in setOf("allow_once", "allow_session") }
+                    ?.get("optionId")?.jsonPrimitive?.contentOrNull
+            } else null
+            val resolvedOptionId = optionId
+                ?: options.firstOrNull { it["optionId"]?.jsonPrimitive?.contentOrNull?.startsWith("deny") == true }
+                    ?.get("optionId")?.jsonPrimitive?.contentOrNull
+                ?: "deny"
+            sendResult(id, buildJsonObject {
+                put("outcome", buildJsonObject { put("outcome", JsonPrimitive("selected")); put("optionId", JsonPrimitive(resolvedOptionId)) })
+            })
+        }
+
+        fun readUntil(targetId: Int): JsonObject {
+            while (true) {
+                val line = stdout.readLine()
+                    ?: throw IllegalStateException("hermes-acp closed stdout before responding to request $targetId")
+                if (line.isBlank()) continue
+                val msg = Json.parseToJsonElement(line).jsonObject
+                val id = msg["id"]
+                if (id != null && (msg.containsKey("result") || msg.containsKey("error"))) {
+                    if (id.jsonPrimitive.intOrNull == targetId) {
+                        if (msg.containsKey("error")) {
+                            throw IllegalStateException("hermes-acp error for request $targetId: ${msg["error"]}")
+                        }
+                        return msg["result"]?.jsonObject ?: JsonObject(emptyMap())
+                    }
+                    continue
+                }
+                val method = msg["method"]?.jsonPrimitive?.contentOrNull ?: continue
+                if (id != null) handleInboundRequest(method, id, msg["params"]?.jsonObject)
+                else handleNotification(method, msg["params"]?.jsonObject)
+            }
+        }
+
+        val initId = nextId.getAndIncrement()
+        sendRequest("initialize", buildJsonObject {
+            put("protocolVersion", JsonPrimitive(1))
+            put("clientCapabilities", buildJsonObject {
+                put("fs", buildJsonObject { put("readTextFile", JsonPrimitive(false)); put("writeTextFile", JsonPrimitive(false)) })
+                put("terminal", JsonPrimitive(false))
+            })
+            put("clientInfo", buildJsonObject { put("name", JsonPrimitive("alfrd-director")); put("version", JsonPrimitive("0.1.0")) })
+        }, initId)
+        readUntil(initId)
+
+        val sessionId2 = nextId.getAndIncrement()
+        sendRequest("session/new", buildJsonObject {
+            put("cwd", JsonPrimitive(containerWorkspacePath))
+            put("mcpServers", JsonArray(emptyList()))
+        }, sessionId2)
+        val sessionResult = readUntil(sessionId2)
+        val sessionId = sessionResult["sessionId"]?.jsonPrimitive?.contentOrNull
+            ?: return HermesAssignmentOutcome.Failed("session/new returned no sessionId")
+
+        val promptId = nextId.getAndIncrement()
+        sendRequest("session/prompt", buildJsonObject {
+            put("sessionId", JsonPrimitive(sessionId))
+            put("prompt", JsonArray(listOf(
+                buildJsonObject {
+                    put("type", JsonPrimitive("text"))
+                    put("text", JsonPrimitive(assignment.task))
+                },
+            )))
+        }, promptId)
+        val promptResult = readUntil(promptId)
+        val stopReason = promptResult["stopReason"]?.jsonPrimitive?.contentOrNull
+
+        val toolName = observedToolName
+        val toolPath = observedToolPath
+        return if (toolName != null) {
+            HermesAssignmentOutcome.Completed(
+                findingsText = messageText.toString().trim().ifBlank { "Hermes completed the read with no text reply." },
+                toolName = toolName,
+                toolTargetPath = toolPath,
+                toolSucceeded = stopReason == "end_turn" && toolPath?.contains(fixtureFilename) == true,
+            )
+        } else {
+            HermesAssignmentOutcome.Failed("no tool call observed (stopReason=$stopReason)")
+        }
+    }
+}

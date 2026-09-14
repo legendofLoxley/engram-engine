@@ -17,6 +17,9 @@ import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
@@ -78,6 +81,18 @@ open class CognitivePipeline(
      * constructs [CognitivePipeline] without this parameter is unaffected by this change.
      */
     private val horizonCycleCoordinator: HorizonCycleCoordinator? = null,
+    /**
+     * When wired, [HermesDelegationTrigger.detect] is checked against every turn's utterance;
+     * a match issues one correlated [HermesAssignment] to the real Hermes runtime (see
+     * `app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatcher`) and folds an
+     * acknowledgment into this turn's directive — it never blocks this turn or changes its
+     * response latency. Null (the default) preserves today's behavior byte-for-byte, same
+     * convention as [horizonCycleCoordinator]. Typed as the [HermesDelegationDispatching]
+     * interface (not the concrete class) so tests can fake dispatch with a plain lambda. This
+     * is a bounded, single-assignment-kind capability for one demonstration slice, not a
+     * general delegation framework.
+     */
+    private val hermesDelegationDispatcher: HermesDelegationDispatching? = null,
 ) {
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
@@ -668,10 +683,36 @@ open class CognitivePipeline(
         val currentTopicPhase = currentTopic?.let {
             try { engramClient.getTopicConfidence(ctx.userEmail, it).phase } catch (_: Exception) { null }
         }
+
+        // ── Hermes delegation (bounded, single-assignment-kind slice) ──────────
+        // Fires the real assignment now, but never waits on it — see HermesDelegationDispatcher's
+        // doc for why that's what "let completion ingest when no Director turn is active" means
+        // concretely. This turn's own reply is composed immediately below, unaffected by how long
+        // Hermes actually takes.
+        val hermesDelegation = hermesDelegationDispatcher?.takeIf { HermesDelegationTrigger.detect(ctx.utterance) }?.let { dispatcher ->
+            val assignment = HermesAssignment(
+                assignmentId = java.util.UUID.randomUUID().toString(),
+                userEmail = ctx.userEmail,
+                task = "Please read the file ${HermesDelegationTrigger.FIXTURE_FILENAME} in your current " +
+                    "working directory using your file-reading tool, then report exactly the Marker value " +
+                    "it contains and nothing else.",
+                originalRequest = ctx.utterance,
+                issuedAtCycleSeq = horizonCycleResult?.cycleSeq,
+            )
+            dispatcher.dispatchAsync(assignment)
+            assignment
+        }
+        val baseDirective = ctx.branchResult?.directive ?: "Respond naturally and briefly."
+        val directive = if (hermesDelegation != null) {
+            baseDirective + "\n\nYou just asked Hermes to look into \"${HermesDelegationTrigger.FIXTURE_FILENAME}\" " +
+                "on the user's behalf. Tell them plainly that you've kicked that off and will let them know " +
+                "what Hermes finds — do not guess at the file's contents yourself."
+        } else baseDirective
+
         val conditioners = Conditioners(
             modality         = ctx.modality,
             responseStrategy = ctx.branchResult?.responseStrategy ?: ResponseStrategy.SIMPLE,
-            directive        = ctx.branchResult?.directive ?: "Respond naturally and briefly.",
+            directive        = directive,
             attunement       = attunement,
             persona          = persona.persona,
             selfDescription  = persona.selfDescription,

@@ -141,7 +141,7 @@ fun main() {
         if (System.getenv("DEBUG_CONVERSE_ENABLED") == "true") {
             // Isolated session pool — debug sessions never share state with production sessions.
             // No sessionManager passed to factory → FirstSessionHandler is disabled for synthetic users.
-            val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db) })
+            val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, enableHermesDelegation = true) })
             configureDebugConverseRoutes(debugSessionManager, db)
             configureDebugEnvironmentSignalRoutes(db)
             configureDebugActorEventRoutes(db)

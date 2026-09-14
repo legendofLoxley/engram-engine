@@ -497,3 +497,67 @@ class GreetingTurnGateTest {
         assertTrue(turn3.contains("NOT the first turn", ignoreCase = true), "Expected the smalltalk directive, got: $turn3")
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes delegation — CognitivePipeline wiring (dispatch is faked here; the real
+// HermesAcpClient/ACP round trip is exercised only against live hardware, not this
+// suite — see webui-bridge/README.md and the increment's own demonstration record).
+// ─────────────────────────────────────────────────────────────────────────────
+
+class CognitivePipelineHermesDelegationTest {
+
+    private val echoLlm = TestLlmClient { req: LlmRequest ->
+        LlmResponse(text = req.systemPrompt ?: "", latencyMs = 0L, retryCount = 0)
+    }
+
+    @Test
+    fun `utterance naming the fixture with an inspection verb dispatches one correlated assignment`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+        )
+
+        val response = pipeline.process(
+            "Can you check director-hermes-fixture.txt for me?", "session-hermes-1", "user-hermes@example.com",
+        )
+
+        assertEquals(1, dispatched.size, "Expected exactly one assignment dispatched")
+        val assignment = dispatched.single()
+        assertEquals("user-hermes@example.com", assignment.userEmail)
+        assertEquals("Can you check director-hermes-fixture.txt for me?", assignment.originalRequest)
+        assertTrue(
+            assignment.task.contains(app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.FIXTURE_FILENAME),
+            "Assignment task must name the fixture, got: ${assignment.task}",
+        )
+        assertTrue(assignment.assignmentId.isNotBlank())
+        assertTrue(
+            response.contains("Hermes", ignoreCase = true),
+            "Expected the acknowledgment directive to reach the actor's prompt, got: $response",
+        )
+    }
+
+    @Test
+    fun `utterance without the fixture name never dispatches`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+        )
+
+        pipeline.process("What time does school start?", "session-hermes-2", "user-hermes@example.com")
+
+        assertTrue(dispatched.isEmpty(), "Must not dispatch for an utterance that never names the fixture")
+    }
+
+    @Test
+    fun `no dispatcher wired leaves a matching utterance's reply unaffected`() = runTest {
+        val pipeline = CognitivePipeline(llmClient = echoLlm)
+
+        val response = pipeline.process(
+            "Please inspect director-hermes-fixture.txt", "session-hermes-3", "user-hermes@example.com",
+        )
+
+        assertFalse(response.contains("asked Hermes", ignoreCase = true), "No dispatcher wired means no delegation directive")
+    }
+}

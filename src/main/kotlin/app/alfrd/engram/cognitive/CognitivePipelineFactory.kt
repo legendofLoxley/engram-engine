@@ -5,6 +5,9 @@ import app.alfrd.engram.cognitive.pipeline.FirstSessionHandler
 import app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator
 import app.alfrd.engram.cognitive.pipeline.Interpreter
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesAcpClient
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatcher
+import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
@@ -32,7 +35,15 @@ import com.arcadedb.database.Database
  */
 object CognitivePipelineFactory {
 
-    fun create(db: Database? = null, sessionManager: SessionManager? = null): CognitivePipeline {
+    /**
+     * @param enableHermesDelegation Wires a real [HermesDelegationDispatcher] into the returned
+     *   pipeline (only possible when [db] is non-null — it shares the same `ActorEventIngestionService`
+     *   dependencies as `/debug/actor-event`). Defaults to `false` so every existing call site
+     *   (including every test that constructs a pipeline via this factory) is unaffected. Pass
+     *   `true` only for the isolated debug/dev session pool this bounded slice targets — see
+     *   `Application.kt`'s `DEBUG_CONVERSE_ENABLED` block.
+     */
+    fun create(db: Database? = null, sessionManager: SessionManager? = null, enableHermesDelegation: Boolean = false): CognitivePipeline {
         val anthropicKey = System.getenv("ANTHROPIC_API_KEY") ?: ""
         val googleKey    = System.getenv("GOOGLE_AI_API_KEY") ?: ""
 
@@ -81,6 +92,20 @@ object CognitivePipelineFactory {
             )
         }
 
+        // Shares the exact dependency shape DebugActorEventRoutes.kt already builds for
+        // /debug/actor-event — same ActorEventIngestionService construction, just handed to a
+        // real dispatcher instead of a debug-token-gated HTTP handler.
+        val hermesDelegationDispatcher = if (enableHermesDelegation && db != null) {
+            val horizonGraphStore = ArcadeHorizonGraphStore(db)
+            val horizonAssembler = ArcadeHorizonAssembler(db)
+            val ingestionService = ActorEventIngestionService(
+                cycleSequencer = ArcadeCycleSequencer(db),
+                horizonGraphStore = horizonGraphStore,
+                horizonPropagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler),
+            )
+            HermesDelegationDispatcher(HermesAcpClient(), ingestionService)
+        } else null
+
         return CognitivePipeline(
             engramClient          = engramClient,
             llmClient             = llmClient,
@@ -91,6 +116,7 @@ object CognitivePipelineFactory {
             confidenceService     = confidenceService,
             episodicLogService    = episodicLogService,
             horizonCycleCoordinator = horizonCycleCoordinator,
+            hermesDelegationDispatcher = hermesDelegationDispatcher,
         )
     }
 }

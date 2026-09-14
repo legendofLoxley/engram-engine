@@ -280,3 +280,43 @@ itself, not merely kept out by network placement.
   plain (non-error-styled) assistant bubble after a reload — the content is
   preserved, the styling isn't; WebUI's error-card rendering only exists in
   the live SSE path, not in its from-disk message rendering.
+- Vendor WebUI's own reconnect-after-reload banner ("A response was in
+  progress when you last left") and browser tab title (stays "Untitled")
+  are unrelated pre-existing UI cosmetics, not something this slice or the
+  Hermes delegation increment below touches.
+
+## Director → Hermes delegation (first real increment)
+
+One narrow, bounded slice, on top of everything above: a conversational
+utterance naming a specific labeled fixture file (see
+`HermesDelegationTrigger.FIXTURE_FILENAME` in
+`app.alfrd.engram.cognitive.pipeline.hermes`) makes the Director issue one
+correlated assignment to the *real* installed Hermes runtime — not the
+production `hermes-halo` container, an isolated **dev** instance of the
+exact same vendor image, run one-shot per assignment (`docker run --rm`)
+against its own empty `HERMES_HOME` and a read-only-mounted workspace
+containing only the fixture. Hermes performs a real internal `read_file`
+tool call (confirmed live, not assumed) via its actual invocation
+interface — Agent Client Protocol (ACP), JSON-RPC over stdio, already
+built into the vendor image (`venv/bin/hermes-acp`) — and the attributed
+result is ingested via the existing `ActorEventIngestionService`,
+independently of any Director turn. A *later* turn picks it up through the
+already-existing `SurfacingReason.RecentActorEvidence` Horizon pool; the
+Director (not Hermes) composes the reply the user sees.
+
+- Isolated dev Hermes home/workspace: `/home/halo/development/hermes-dev/`
+  (host-level, not committed — mirrors the `hermes-webui-dev/` pattern).
+- Client/dispatcher: `HermesAcpClient`, `HermesDelegationDispatcher`,
+  `HermesDelegationTrigger`, `HermesAssignment` under
+  `cognitive/pipeline/hermes/`. Wired only into the debug/dev session pool
+  (`CognitivePipelineFactory.create(db, enableHermesDelegation = true)` in
+  `Application.kt`'s `DEBUG_CONVERSE_ENABLED` block) — the production
+  `/cognitive/chat` path is untouched.
+- Deliberately one assignment kind, one trigger, one fixture — not a
+  general delegation/orchestration framework. See the increment's own
+  demonstration record for exact evidence and observed limitations
+  (in particular: evidence can be committed, eligible, and selected into
+  `Conditioners.horizonItems` and still not survive the Actor's own
+  prompt-budget ladder for a conversation with enough competing history —
+  an existing, documented characteristic of the Horizon/Actor budget
+  system, not something this increment introduces or fixes).
