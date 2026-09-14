@@ -57,6 +57,29 @@ def load_runner_config(environ: dict[str, str] | None = None) -> dict[str, Any]:
     config["runner_host"] = str(source.get("RUNNER_HOST") or "127.0.0.1")
     config["runner_port"] = int(source.get("RUNNER_PORT") or "8091")
     config["runner_api_key"] = api_key
+    # The one provider id this instance actually serves. Compared
+    # case-insensitively against the WebUI-supplied "provider" field so an
+    # explicit cloud-model pick can be rejected instead of silently answered
+    # by the local backend anyway (see unsupported_provider_message).
+    config["local_model_provider"] = str(source.get("LOCAL_MODEL_PROVIDER") or "local").strip().lower()
+    # The one model id this instance actually serves (bare id, no "provider/"
+    # prefix — e.g. "Qwen3.6-35B-A3B-UD-Q5_K_XL"). This dev WebUI instance has
+    # no cloud provider configured at all (no API keys), so its model picker
+    # has no catalog of cloud models to choose from either — the ONLY way to
+    # pick something else is the composer's free-text "Custom Model ID"
+    # field, which sends whatever the user typed as "model" with NO
+    # "provider" field at all (that split only happens server-side in
+    # WebUI's legacy, non-runner chat path). Checking "provider" alone would
+    # never catch this — a typed "anthropic/claude-sonnet-4-6" sails through
+    # with model_provider empty. Optional: unset means skip this check
+    # (provider-only, as before).
+    config["local_model_id"] = str(source.get("LOCAL_MODEL_ID") or "").strip() or None
+    # Optional: WebUI's own on-disk session store (the host path backing the
+    # container's bind-mounted HERMES_WEBUI_STATE_DIR), used only to seed this
+    # adapter's in-memory transcript from whatever WebUI already durably saved
+    # — see load_persisted_webui_messages. Absent by default; a missing/unset
+    # dir just means no seeding, never a startup failure.
+    config["webui_sessions_dir"] = str(source.get("WEBUI_SESSIONS_DIR") or "").strip() or None
     return config
 
 
@@ -97,7 +120,14 @@ class RunStore:
         with self._lock:
             self._session_map[webui_session_id] = engram_session_id
 
-    def append_turn_messages(self, webui_session_id: str, user_message: str, assistant_reply: str) -> list[dict[str, str]]:
+    def append_turn_messages(
+        self,
+        webui_session_id: str,
+        user_message: str,
+        assistant_reply: str,
+        *,
+        seed: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
         """Appends this turn's user+assistant messages to the session's running
         transcript and returns the full transcript so far (a copy).
 
@@ -108,8 +138,18 @@ class RunStore:
         in WebUI's own SessionDB, which a runner integration is not supposed to
         open directly. This is the minimal stand-in: enough of a `messages` list
         for that one read site to render correctly, not a SessionDB replacement.
+
+        `seed` (typically WebUI's own already-persisted transcript for this
+        session — see load_persisted_webui_messages) is only used the first
+        time this session is seen by THIS process. It exists so a restarted
+        adapter's empty in-memory history does not become the transcript of
+        record and overwrite a longer, already-durable conversation the next
+        time a `done` event is sent — this in-memory dict must never be the
+        sole source of a session's saved history across a restart.
         """
         with self._lock:
+            if webui_session_id not in self._message_history and seed:
+                self._message_history[webui_session_id] = list(seed)
             history = self._message_history.setdefault(webui_session_id, [])
             history.append({"role": "user", "content": user_message})
             history.append({"role": "assistant", "content": assistant_reply})
@@ -182,6 +222,96 @@ def unsupported_input_message(attachments: list[Any], toolsets: list[Any]) -> st
     )
 
 
+def unsupported_provider_message(requested_provider: str, local_provider: str, requested_model: str | None = None) -> str:
+    if requested_model and requested_provider:
+        picked = f"'{requested_model}' (provider '{requested_provider}')"
+    elif requested_model:
+        picked = f"'{requested_model}'"
+    else:
+        picked = f"provider '{requested_provider}'"
+    return (
+        f"This development instance only serves its local Director-routed model "
+        f"(provider '{local_provider}'). {picked} is not available here — no "
+        f"cloud model was invoked. Pick the local model and resend."
+    )
+
+
+def load_persisted_webui_messages(sessions_dir: str | None, webui_session_id: str) -> list[dict[str, str]]:
+    """Best-effort read of WebUI's own on-disk transcript for one session
+    (HERMES_WEBUI_STATE_DIR's sessions/<id>.json, reachable from this host
+    process via the same bind-mounted dir the WebUI container writes into).
+
+    Used only to seed RunStore's in-memory transcript on first reference to a
+    session, so this adapter's own memory is never the sole source of a
+    session's saved history — see RunStore.append_turn_messages. Returns []
+    on any miss (no configured dir, no file yet, unexpected shape) rather than
+    raising: seeding is a best-effort reconciliation, not a hard dependency.
+    """
+    if not sessions_dir or not webui_session_id:
+        return []
+    path = os.path.join(sessions_dir, f"{webui_session_id}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return []
+    result = []
+    for m in messages:
+        if isinstance(m, dict) and isinstance(m.get("role"), str) and isinstance(m.get("content"), str):
+            result.append({"role": m["role"], "content": m["content"]})
+    return result
+
+
+def _reject_turn(
+    config: dict[str, Any],
+    store: RunStore,
+    *,
+    webui_session_id: str,
+    user_message: str,
+    rejection_type: str,
+    rejection_message: str,
+) -> str:
+    """Records a rejected turn (attachments/toolsets, or an unsupported
+    model/provider pick) as a completed-but-errored run, WITHOUT calling
+    engram-engine.
+
+    Tracks the rejection in the same running transcript success replies use
+    (RunStore.append_turn_messages) and includes it in the `done` event's
+    `session.messages`, exactly like a successful turn — otherwise a reload
+    silently drops the rejected turn from the visible conversation (the user
+    typed something and saw an error, then a refresh erases both), which is
+    the same class of gap the success-path session-persistence fix closes.
+    Reproduced live: reloading after a rejected cloud-model turn made it
+    vanish before this.
+
+    session_id is required on the apperror payload itself for a different
+    reason: messages.js's apperror handler only renders the message into the
+    visible transcript when the event's session_id/session.session_id matches
+    the browser's current session — omit it and the error is accepted by the
+    stream but shown nowhere (also reproduced live, as a blank assistant
+    bubble).
+    """
+    seed = load_persisted_webui_messages(config.get("webui_sessions_dir"), webui_session_id)
+    transcript = store.append_turn_messages(webui_session_id, user_message, rejection_message, seed=seed)
+    events = [
+        {"event": "apperror", "seq": 1, "payload": {
+            "type": rejection_type,
+            "message": rejection_message,
+            "session_id": webui_session_id,
+        }},
+        {"event": "done", "seq": 2, "payload": {
+            "status": TERMINAL_ERROR_STATUS,
+            "session": {"session_id": webui_session_id, "messages": transcript},
+        }},
+    ]
+    return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
+
+
 def run_turn(
     config: dict[str, Any],
     store: RunStore,
@@ -190,6 +320,8 @@ def run_turn(
     message: str,
     attachments: list[Any] | None = None,
     toolsets: list[Any] | None = None,
+    model: str | None = None,
+    model_provider: str | None = None,
 ) -> str:
     """Executes one Director turn synchronously and records it as a completed run.
 
@@ -197,23 +329,44 @@ def run_turn(
     recorded as an 'apperror' run event instead, so the browser renders a
     visible chat error rather than the composer hanging or a bare 500.
 
-    Attachments/toolsets are rejected here, before any call to engram-engine
-    — the Director is never invoked for a turn it can't fully honor, and the
-    rejection reaches the user through the same apperror/done event pair (and
-    the same chat-bubble rendering) any other run failure uses, not a new
-    mechanism.
+    Attachments/toolsets and an unsupported model/provider pick are rejected
+    here, before any call to engram-engine — the Director is never invoked
+    for a turn it can't fully honor, and the rejection reaches the user
+    through the same apperror/done event pair (and the same chat-bubble
+    rendering) any other run failure uses, not a new mechanism.
     """
     attachments = attachments or []
     toolsets = toolsets or []
     if attachments or toolsets:
-        events = [
-            {"event": "apperror", "seq": 1, "payload": {
-                "type": "unsupported_input",
-                "message": unsupported_input_message(attachments, toolsets),
-            }},
-            {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
-        ]
-        return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
+        return _reject_turn(
+            config, store, webui_session_id=webui_session_id, user_message=message,
+            rejection_type="unsupported_input",
+            rejection_message=unsupported_input_message(attachments, toolsets),
+        )
+
+    requested_provider = str(model_provider or "").strip()
+    # Blank/missing provider is the common case (a brand-new session, or a
+    # session that has never had its model explicitly changed) and is always
+    # allowed — this only rejects a REAL, non-matching provider value, so it
+    # can't reject on account of a field WebUI simply didn't send.
+    provider_mismatch = bool(requested_provider) and requested_provider.lower() != config["local_model_provider"]
+
+    requested_model = str(model or "").strip()
+    local_model_id = config.get("local_model_id")
+    # A bare model id compared against the tail of whatever was sent, so a
+    # "provider/model" or "@provider:model" typed into the composer's
+    # free-text Custom Model ID field (this instance's only way to pick
+    # something other than the local model, since no cloud provider is
+    # configured — see load_runner_config) still compares against just the
+    # model part.
+    model_mismatch = bool(requested_model and local_model_id and requested_model.rsplit("/", 1)[-1].lower() != local_model_id.lower())
+
+    if provider_mismatch or model_mismatch:
+        return _reject_turn(
+            config, store, webui_session_id=webui_session_id, user_message=message,
+            rejection_type="unsupported_model",
+            rejection_message=unsupported_provider_message(requested_provider, config["local_model_provider"], model),
+        )
 
     engram_session_id = store.engram_session_for(webui_session_id)
     try:
@@ -221,7 +374,8 @@ def run_turn(
         result = forward_to_engram(config["engram_base_url"], config["engram_debug_token"], payload)
         store.remember_engram_session(webui_session_id, result.get("sessionId"))
         reply_text = str(result.get("reply") or "")
-        transcript = store.append_turn_messages(webui_session_id, message, reply_text)
+        seed = load_persisted_webui_messages(config.get("webui_sessions_dir"), webui_session_id)
+        transcript = store.append_turn_messages(webui_session_id, message, reply_text, seed=seed)
         model, provider = effective_model_fields(result)
         events = [
             {"event": "token", "seq": 1, "payload": {"text": reply_text}},
@@ -245,13 +399,21 @@ def run_turn(
     except UpstreamError as e:
         detail = e.body.decode("utf-8", errors="replace")[:500]
         events = [
-            {"event": "apperror", "seq": 1, "payload": {"type": "error", "message": f"engram-engine rejected the turn (HTTP {e.status}): {detail}"}},
+            {"event": "apperror", "seq": 1, "payload": {
+                "type": "error",
+                "message": f"engram-engine rejected the turn (HTTP {e.status}): {detail}",
+                "session_id": webui_session_id,
+            }},
             {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
         return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
     except Exception as e:  # network failure, timeout, etc. — surfaced, never swallowed
         events = [
-            {"event": "apperror", "seq": 1, "payload": {"type": "error", "message": f"could not reach engram-engine: {e}"}},
+            {"event": "apperror", "seq": 1, "payload": {
+                "type": "error",
+                "message": f"could not reach engram-engine: {e}",
+                "session_id": webui_session_id,
+            }},
             {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
         return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
@@ -369,12 +531,18 @@ def make_handler(config: dict[str, Any], store: RunStore) -> type[BaseHTTPReques
                     return
                 attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
                 toolsets = body.get("toolsets") if isinstance(body.get("toolsets"), list) else []
+                # HttpRunnerClient.start_run() sends these as "model"/"provider"
+                # (StartRunRequest.model / .provider) — see api/runner_client.py.
+                model = body.get("model") if isinstance(body.get("model"), str) else None
+                model_provider = body.get("provider") if isinstance(body.get("provider"), str) else None
                 run_id = run_turn(
                     config, store,
                     webui_session_id=webui_session_id,
                     message=message,
                     attachments=attachments,
                     toolsets=toolsets,
+                    model=model,
+                    model_provider=model_provider,
                 )
                 record = store.get(run_id)
                 response = {

@@ -26,6 +26,21 @@ class LoadRunnerConfigTest(unittest.TestCase):
         cfg = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
         self.assertEqual(cfg["runner_host"], "127.0.0.1")
         self.assertEqual(cfg["runner_port"], 8091)
+        self.assertEqual(cfg["local_model_provider"], "local")
+        self.assertIsNone(cfg["webui_sessions_dir"])
+        self.assertIsNone(cfg["local_model_id"])
+
+    def test_local_model_provider_overridable_and_lowercased(self):
+        cfg = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "LOCAL_MODEL_PROVIDER": "Custom"})
+        self.assertEqual(cfg["local_model_provider"], "custom")
+
+    def test_local_model_id_passed_through(self):
+        cfg = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "LOCAL_MODEL_ID": "Qwen3.6-35B-A3B-UD-Q5_K_XL"})
+        self.assertEqual(cfg["local_model_id"], "Qwen3.6-35B-A3B-UD-Q5_K_XL")
+
+    def test_webui_sessions_dir_passed_through(self):
+        cfg = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "WEBUI_SESSIONS_DIR": "/tmp/sessions"})
+        self.assertEqual(cfg["webui_sessions_dir"], "/tmp/sessions")
 
 
 class IsAuthorizedTest(unittest.TestCase):
@@ -80,6 +95,88 @@ class RunStoreTest(unittest.TestCase):
         other = store.append_turn_messages("w-2", "c", "d")
         self.assertEqual(other, [{"role": "user", "content": "c"}, {"role": "assistant", "content": "d"}])
 
+    def test_seed_is_used_only_on_first_reference_to_a_session(self):
+        # Regression: this in-memory store must never be the SOLE source of a
+        # session's saved history. A seed (WebUI's own already-persisted
+        # transcript) primes an unseen session so a restarted adapter's empty
+        # memory does not later overwrite a longer, already-durable
+        # conversation with a done event carrying only the new turn.
+        store = ra.RunStore()
+        seed = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
+        first = store.append_turn_messages("w-1", "hi", "hello", seed=seed)
+        self.assertEqual(first, seed + [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+
+    def test_seed_ignored_once_session_already_known_in_memory(self):
+        store = ra.RunStore()
+        store.append_turn_messages("w-1", "first", "a")
+        # A seed passed on a LATER turn for an already-tracked session must not
+        # re-prepend/duplicate — in-memory state, once established, is authoritative
+        # for the rest of this process's life.
+        second = store.append_turn_messages("w-1", "second", "b", seed=[{"role": "user", "content": "unrelated"}])
+        self.assertEqual(
+            second,
+            [
+                {"role": "user", "content": "first"}, {"role": "assistant", "content": "a"},
+                {"role": "user", "content": "second"}, {"role": "assistant", "content": "b"},
+            ],
+        )
+
+    def test_empty_seed_does_not_error(self):
+        store = ra.RunStore()
+        result = store.append_turn_messages("w-1", "hi", "hello", seed=[])
+        self.assertEqual(result, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+
+
+class LoadPersistedWebuiMessagesTest(unittest.TestCase):
+    def test_no_sessions_dir_configured_returns_empty(self):
+        self.assertEqual(ra.load_persisted_webui_messages(None, "w-1"), [])
+
+    def test_missing_file_returns_empty(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(ra.load_persisted_webui_messages(d, "no-such-session"), [])
+
+    def test_reads_messages_from_a_real_webui_session_file(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "w-1.json"), "w") as f:
+                json.dump({
+                    "session_id": "w-1",
+                    "messages": [
+                        {"role": "user", "content": "hi", "timestamp": 123},
+                        {"role": "assistant", "content": "hello", "extra_field": "ignored"},
+                    ],
+                }, f)
+            result = ra.load_persisted_webui_messages(d, "w-1")
+        self.assertEqual(result, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+
+    def test_malformed_json_returns_empty_not_raises(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "w-1.json"), "w") as f:
+                f.write("{not json")
+            self.assertEqual(ra.load_persisted_webui_messages(d, "w-1"), [])
+
+    def test_non_list_messages_field_returns_empty(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "w-1.json"), "w") as f:
+                json.dump({"session_id": "w-1", "messages": "not-a-list"}, f)
+            self.assertEqual(ra.load_persisted_webui_messages(d, "w-1"), [])
+
+    def test_malformed_entries_within_messages_are_skipped(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "w-1.json"), "w") as f:
+                json.dump({"session_id": "w-1", "messages": [
+                    {"role": "user", "content": "ok"},
+                    {"role": "assistant"},  # missing content
+                    "not-a-dict",
+                    {"content": "missing role"},
+                ]}, f)
+            result = ra.load_persisted_webui_messages(d, "w-1")
+        self.assertEqual(result, [{"role": "user", "content": "ok"}])
+
 
 class RunTurnTest(unittest.TestCase):
     def setUp(self):
@@ -130,12 +227,16 @@ class RunTurnTest(unittest.TestCase):
             ],
         )
 
-    def test_error_done_events_are_unchanged_by_the_session_fix(self):
-        # apperror's own browser handler finalizes the stream and returns before
-        # "done" is ever processed (it sets _streamFinalized itself), so the
-        # crash above never applied to the error/rejection paths — this pins
-        # that those still don't carry a session object, so no one "fixes" them
-        # again believing the earlier bug applied here too.
+    def test_upstream_failure_done_events_omit_session(self):
+        # apperror's own browser handler finalizes the stream and returns
+        # before "done" is ever processed (it sets _streamFinalized itself),
+        # so the browser-crash bug this once guarded against never applied
+        # here — this pins that a genuine upstream/network failure (nothing
+        # the Director actually said, transient, retry-worthy) still doesn't
+        # carry a session object. Deliberately NOT the same as a rejection
+        # (attachments/toolsets/model) — see
+        # RunTurnRejectsUnsupportedInputTest / …ModelProviderTest, which DO
+        # carry a session so a reload doesn't silently drop a rejected turn.
         with patch.object(ra, "forward_to_engram", side_effect=engram_client.UpstreamError(401, b"nope")):
             run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
         done_payload = self.store.get(run_id)["events"][1]["payload"]
@@ -160,12 +261,19 @@ class RunTurnTest(unittest.TestCase):
         # "errored" and would have hung.
         self.assertEqual(record["status"], "error")
         self.assertEqual(record["events"][0]["event"], "apperror")
+        # Regression: messages.js's apperror handler only renders the message
+        # into the visible transcript when the event's session_id matches the
+        # browser's current session — omitted entirely, it never matches, and
+        # the error is accepted by the stream but shown nowhere (reproduced
+        # live as a blank assistant bubble before this field was added).
+        self.assertEqual(record["events"][0]["payload"]["session_id"], "w-1")
 
     def test_network_failure_surfaces_as_apperror_event_not_a_silent_success(self):
         with patch.object(ra, "forward_to_engram", side_effect=ConnectionRefusedError("nope")):
             run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
         record = self.store.get(run_id)
         self.assertEqual(record["status"], "error")
+        self.assertEqual(record["events"][0]["payload"]["session_id"], "w-1")
 
 
 class EffectiveModelFieldsTest(unittest.TestCase):
@@ -265,8 +373,38 @@ class RunTurnRejectsUnsupportedInputTest(unittest.TestCase):
         self.assertEqual(record["events"][0]["event"], "apperror")
         self.assertEqual(record["events"][0]["payload"]["type"], "unsupported_input")
         self.assertIn("attachment", record["events"][0]["payload"]["message"])
+        self.assertEqual(record["events"][0]["payload"]["session_id"], "w-1")
         self.assertEqual(record["events"][1]["event"], "done")
         self.assertEqual(record["events"][1]["payload"]["status"], "error")
+
+    def test_rejected_turn_done_event_carries_a_session_so_reload_does_not_lose_it(self):
+        # A rejected turn is still something the user typed and saw a response
+        # to — omitting it from session.messages meant a page reload silently
+        # erased both, even though the successful-turn transcript persisted
+        # correctly (reproduced live: reload after a rejected cloud-model pick
+        # made that whole exchange vanish).
+        with patch.object(ra, "forward_to_engram") as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="describe this photo",
+                attachments=[{"name": "photo.png"}],
+            )
+            mocked.assert_not_called()
+        done_payload = self.store.get(run_id)["events"][1]["payload"]
+        self.assertIn("session", done_payload)
+        self.assertEqual(done_payload["session"]["session_id"], "w-1")
+        self.assertEqual(done_payload["session"]["messages"][0], {"role": "user", "content": "describe this photo"})
+        self.assertIn("attachment", done_payload["session"]["messages"][1]["content"])
+
+    def test_rejected_turn_transcript_accumulates_with_later_successful_turns(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            ra.run_turn(self.config, self.store, webui_session_id="w-1", message="first", attachments=[{"name": "a.png"}])
+            mocked.assert_not_called()
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}):
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="second")
+        messages = self.store.get(run_id)["events"][1]["payload"]["session"]["messages"]
+        self.assertEqual(len(messages), 4)
+        self.assertEqual(messages[2], {"role": "user", "content": "second"})
+        self.assertEqual(messages[3], {"role": "assistant", "content": "hi"})
 
     def test_toolsets_reject_without_calling_engram(self):
         with patch.object(ra, "forward_to_engram") as mocked:
@@ -289,6 +427,178 @@ class RunTurnRejectsUnsupportedInputTest(unittest.TestCase):
         record = self.store.get(run_id)
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["events"][0]["event"], "token")
+
+
+class UnsupportedProviderMessageTest(unittest.TestCase):
+    def test_names_both_provider_and_model_when_given(self):
+        msg = ra.unsupported_provider_message("anthropic", "local", "claude-sonnet-4-6")
+        self.assertIn("anthropic", msg)
+        self.assertIn("claude-sonnet-4-6", msg)
+        self.assertIn("local", msg)
+        self.assertIn("no cloud model was invoked", msg)
+
+    def test_falls_back_to_provider_only_when_no_model_given(self):
+        msg = ra.unsupported_provider_message("anthropic", "local", None)
+        self.assertIn("provider 'anthropic'", msg)
+
+
+class RunTurnRejectsUnsupportedModelProviderTest(unittest.TestCase):
+    """Selecting a cloud provider must not silently do nothing, and must not
+    let the local backend answer while implying a cloud model was invoked —
+    it has to be rejected the same visible way attachments/toolsets are.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.store = ra.RunStore()
+
+    def test_cloud_provider_pick_rejected_without_calling_engram(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                model="claude-sonnet-4-6", model_provider="anthropic",
+            )
+            mocked.assert_not_called()
+        record = self.store.get(run_id)
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["events"][0]["event"], "apperror")
+        self.assertEqual(record["events"][0]["payload"]["type"], "unsupported_model")
+        self.assertIn("anthropic", record["events"][0]["payload"]["message"])
+        self.assertEqual(record["events"][0]["payload"]["session_id"], "w-1")
+        self.assertEqual(record["events"][1]["payload"]["status"], "error")
+
+    def test_provider_matching_local_identity_is_allowed(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi back", "sessionId": "e-1"}) as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                model="Qwen3.6-35B-A3B-UD-Q5_K_XL", model_provider="local",
+            )
+            mocked.assert_called_once()
+        self.assertEqual(self.store.get(run_id)["status"], "completed")
+
+    def test_provider_match_is_case_insensitive(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi back", "sessionId": "e-1"}) as mocked:
+            ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                model_provider="Local",
+            )
+            mocked.assert_called_once()
+
+    def test_blank_provider_is_allowed_not_rejected(self):
+        # The common case: a brand-new or never-explicitly-changed session
+        # sends no provider at all. This must behave exactly as before — the
+        # local backend answers, it is never treated as an unsupported pick.
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi back", "sessionId": "e-1"}) as mocked:
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi", model_provider=None)
+            mocked.assert_called_once()
+        self.assertEqual(self.store.get(run_id)["status"], "completed")
+
+    def test_custom_local_provider_id_is_configurable(self):
+        config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "LOCAL_MODEL_PROVIDER": "custom"})
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}) as mocked:
+            ra.run_turn(config, self.store, webui_session_id="w-1", message="hi", model_provider="custom")
+            mocked.assert_called_once()
+        with patch.object(ra, "forward_to_engram") as mocked2:
+            run_id = ra.run_turn(config, self.store, webui_session_id="w-2", message="hi", model_provider="local")
+            mocked2.assert_not_called()
+        self.assertEqual(self.store.get(run_id)["status"], "error")
+
+
+class RunTurnRejectsUnsupportedModelIdTest(unittest.TestCase):
+    """Regression: this dev WebUI instance has no cloud provider configured
+    at all, so its only way to pick a different model is the composer's
+    free-text "Custom Model ID" field — which sends the typed value as
+    "model" with NO "provider" field (confirmed live: typing
+    "anthropic/claude-sonnet-4-6" there and sending sailed straight through
+    to the local Director, because the provider-only check saw a blank
+    provider and allowed it). LOCAL_MODEL_ID closes that gap.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k",
+            "LOCAL_MODEL_ID": "Qwen3.6-35B-A3B-UD-Q5_K_XL",
+        })
+        self.store = ra.RunStore()
+
+    def test_custom_model_id_with_no_provider_field_is_rejected(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            run_id = ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                model="anthropic/claude-sonnet-4-6", model_provider=None,
+            )
+            mocked.assert_not_called()
+        record = self.store.get(run_id)
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["events"][0]["payload"]["type"], "unsupported_model")
+        self.assertIn("claude-sonnet-4-6", record["events"][0]["payload"]["message"])
+
+    def test_matching_local_model_id_is_allowed(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}) as mocked:
+            ra.run_turn(
+                self.config, self.store, webui_session_id="w-1", message="hi",
+                model="Qwen3.6-35B-A3B-UD-Q5_K_XL",
+            )
+            mocked.assert_called_once()
+
+    def test_matching_local_model_id_is_case_insensitive(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}) as mocked:
+            ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi", model="qwen3.6-35b-a3b-ud-q5_k_xl")
+            mocked.assert_called_once()
+
+    def test_blank_model_is_allowed_not_rejected(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}) as mocked:
+            ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi", model=None)
+            mocked.assert_called_once()
+
+    def test_no_local_model_id_configured_skips_this_check(self):
+        # Without LOCAL_MODEL_ID set, model text is not checked at all — only
+        # the provider-based check (RunTurnRejectsUnsupportedModelProviderTest)
+        # applies, preserving prior behavior for operators who don't set it.
+        config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}) as mocked:
+            ra.run_turn(config, self.store, webui_session_id="w-1", message="hi", model="anthropic/claude-sonnet-4-6")
+            mocked.assert_called_once()
+
+
+class RunTurnSeedsTranscriptFromWebuiPersistedSessionTest(unittest.TestCase):
+    """Confirms run_turn actually wires load_persisted_webui_messages into the
+    transcript it reports, using config['webui_sessions_dir'] — not just that
+    the two pieces work in isolation.
+    """
+
+    def test_first_turn_after_restart_prepends_webui_persisted_history(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "w-1.json"), "w") as f:
+                json.dump({"session_id": "w-1", "messages": [
+                    {"role": "user", "content": "earlier turn"},
+                    {"role": "assistant", "content": "earlier reply"},
+                ]}, f)
+            config = ra.load_runner_config({
+                "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "WEBUI_SESSIONS_DIR": d,
+            })
+            store = ra.RunStore()
+            with patch.object(ra, "forward_to_engram", return_value={"reply": "new reply", "sessionId": "e-1"}):
+                run_id = ra.run_turn(config, store, webui_session_id="w-1", message="new turn")
+            transcript = store.get(run_id)["events"][1]["payload"]["session"]["messages"]
+        self.assertEqual(
+            transcript,
+            [
+                {"role": "user", "content": "earlier turn"},
+                {"role": "assistant", "content": "earlier reply"},
+                {"role": "user", "content": "new turn"},
+                {"role": "assistant", "content": "new reply"},
+            ],
+        )
+
+    def test_no_sessions_dir_configured_behaves_exactly_as_before(self):
+        config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        store = ra.RunStore()
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}):
+            run_id = ra.run_turn(config, store, webui_session_id="w-1", message="hello")
+        transcript = store.get(run_id)["events"][1]["payload"]["session"]["messages"]
+        self.assertEqual(transcript, [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}])
 
 
 class RunnerHttpIntegrationTest(unittest.TestCase):
@@ -451,6 +761,48 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
             self.assertEqual(status_payload["status"], "error")
             self.assertEqual(status_payload["terminal_state"], "error")
 
+    def test_cloud_provider_through_the_real_endpoint_is_rejected_not_forwarded(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            conn = self._conn()
+            body = json.dumps({
+                "session_id": "webui-session-cloud",
+                "message": "hello",
+                "model": "gpt-5.5",
+                "provider": "openai",
+            }).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            run_id = json.loads(resp.read())["run_id"]
+            mocked.assert_not_called()
+
+            conn2 = self._conn()
+            conn2.request("GET", f"/v1/runs/{run_id}/events?cursor=0", headers=self._auth_headers())
+            events_payload = json.loads(conn2.getresponse().read())
+            self.assertEqual(events_payload["events"][0]["payload"]["type"], "unsupported_model")
+            self.assertIn("openai", events_payload["events"][0]["payload"]["message"])
+
+            conn3 = self._conn()
+            conn3.request("GET", f"/v1/runs/{run_id}", headers=self._auth_headers())
+            status_payload = json.loads(conn3.getresponse().read())
+            self.assertEqual(status_payload["status"], "error")
+            self.assertEqual(status_payload["terminal_state"], "error")
+
+    def test_matching_local_provider_through_the_real_endpoint_succeeds(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-9"}) as mocked:
+            conn = self._conn()
+            body = json.dumps({
+                "session_id": "webui-session-local-provider",
+                "message": "hello",
+                "model": "Qwen3.6-35B-A3B-UD-Q5_K_XL",
+                "provider": "local",
+            }).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read())["status"], "completed")
+            mocked.assert_called_once()
+
     def test_toolsets_through_the_real_endpoint_is_rejected_not_forwarded(self):
         with patch.object(ra, "forward_to_engram") as mocked:
             conn = self._conn()
@@ -470,6 +822,55 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
             events_payload = json.loads(conn2.getresponse().read())
             self.assertEqual(events_payload["events"][0]["payload"]["type"], "unsupported_input")
             self.assertIn("tool selection", events_payload["events"][0]["payload"]["message"])
+
+
+class RunnerHttpWithLocalModelIdConfiguredIntegrationTest(unittest.TestCase):
+    """A separate real-HTTP server instance with LOCAL_MODEL_ID set, exercising
+    the free-text-Custom-Model-ID scenario reproduced live in the browser: a
+    typed "provider/model" string with no "provider" field in the request.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "engram-secret",
+            "RUNNER_API_KEY": "runner-secret",
+            "RUNNER_PORT": "0",
+            "LOCAL_MODEL_ID": "Qwen3.6-35B-A3B-UD-Q5_K_XL",
+        })
+        self.store = ra.RunStore()
+        handler = ra.make_handler(self.config, self.store)
+        self.httpd = ra.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_custom_model_id_field_with_no_provider_is_rejected_through_the_real_endpoint(self):
+        with patch.object(ra, "forward_to_engram") as mocked:
+            conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+            body = json.dumps({
+                "session_id": "webui-session-custom-model-id",
+                "message": "hello",
+                "model": "anthropic/claude-sonnet-4-6",
+                # No "provider" key at all — exactly what the browser sent
+                # when this was reproduced live via the Custom Model ID field.
+            }).encode()
+            conn.request("POST", "/v1/runs", body=body, headers={
+                "Content-Type": "application/json", "Authorization": "Bearer runner-secret",
+            })
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            run_id = json.loads(resp.read())["run_id"]
+            mocked.assert_not_called()
+
+            conn2 = HTTPConnection("127.0.0.1", self.port, timeout=5)
+            conn2.request("GET", f"/v1/runs/{run_id}/events?cursor=0", headers={"Authorization": "Bearer runner-secret"})
+            events_payload = json.loads(conn2.getresponse().read())
+            self.assertEqual(events_payload["events"][0]["payload"]["type"], "unsupported_model")
+            self.assertIn("claude-sonnet-4-6", events_payload["events"][0]["payload"]["message"])
 
 
 if __name__ == "__main__":

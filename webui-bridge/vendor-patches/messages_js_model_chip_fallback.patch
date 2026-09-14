@@ -1,0 +1,21 @@
+--- a/messages.js	2026-09-13 21:19:43.247946450 -0400
++++ b/messages.js	2026-09-13 21:19:43.249353313 -0400
+@@ -1848,7 +1848,17 @@
+       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
+       localStorage.setItem('hermes-webui-model', startData.effective_model);
+       if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
+-      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
++      // engram-engine dev-bridge patch: _applyModelToDropdown only sets the
++      // chip when effective_model already matches a *registered catalog*
++      // option, and silently no-ops otherwise — which is exactly what an
++      // uncatalogued runner-local model is. _ensureModelOptionInDropdown
++      // (defined a few hundred lines up, in this same file) already exists
++      // for precisely this case: it tries _applyModelToDropdown first and,
++      // only if that fails to match, creates a synthetic <option> for the
++      // model and syncs the chip itself. Using it here is a superset of the
++      // previous behavior, not a new mechanism.
++      if($('modelSelect')&&typeof _ensureModelOptionInDropdown==='function') _ensureModelOptionInDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
++      else if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
+       if(typeof syncTopbar==='function') syncTopbar();
+     }else if(startData&&startData.effective_model_provider && S.session){
+       S.session.model_provider=startData.effective_model_provider;

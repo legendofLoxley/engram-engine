@@ -1,0 +1,53 @@
+--- a/routes.py	2026-09-13 21:19:43.247168777 -0400
++++ b/routes.py	2026-09-13 21:19:43.247832958 -0400
+@@ -17277,6 +17277,37 @@
+     return None
+ 
+ 
++def _persist_runner_done_session(payload) -> None:
++    """engram-engine dev-bridge patch: a runner-local "done" event's
++    session.messages is otherwise only ever applied to the browser's
++    in-memory S.session (static/messages.js _finishDone) — nothing writes it
++    to WebUI's own on-disk Session store, so a page reload (which re-fetches
++    the session from disk via get_session()) loses the whole runner-backed
++    conversation. This mirrors what the legacy (non-runner) chat path already
++    does for every turn: load the session, set its messages, save it. See
++    engram-engine's webui-bridge/vendor-patches/ for the full patch context.
++    """
++    if not isinstance(payload, dict):
++        return
++    session_data = payload.get("session")
++    if not isinstance(session_data, dict):
++        return
++    session_id = session_data.get("session_id")
++    messages = session_data.get("messages")
++    if not session_id or not isinstance(messages, list):
++        return
++    try:
++        from api.models import get_session
++
++        s = get_session(session_id, metadata_only=False)
++        if s is None:
++            return
++        s.messages = list(messages)
++        s.save()
++    except Exception:
++        logger.debug("failed to persist runner-local session messages for %s", session_id, exc_info=True)
++
++
+ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -> bool:
+     """Stream events from a configured runner without WebUI-owned runtime maps."""
+     run_id = str(run_id or "").strip()
+@@ -17313,8 +17344,11 @@
+                 if not isinstance(entry, dict):
+                     continue
+                 event = _runner_event_name(entry)
+-                _sse_with_id(handler, event, _runner_event_payload(entry), _runner_event_id(run_id, entry))
++                payload = _runner_event_payload(entry)
++                _sse_with_id(handler, event, payload, _runner_event_id(run_id, entry))
+                 emitted = True
++                if event == "done":
++                    _persist_runner_done_session(payload)
+                 if event in ("stream_end", "error", "cancel"):
+                     terminal = True
+             next_cursor = getattr(event_stream, "cursor", None)

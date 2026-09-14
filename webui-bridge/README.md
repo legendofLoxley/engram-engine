@@ -72,43 +72,141 @@ engram-engine's own debug bearer token is a *second*, independent secret held
 only in this adapter process's environment — the WebUI container never sees
 it, and neither does the browser.
 
-## Two live-browser bugs found and fixed after the initial slice
+## Live-browser bugs found and fixed
 
 Verifying through a real connected browser (not just curl against the wire
-format) surfaced two issues no amount of HTTP-level testing would have caught:
+format) surfaced issues no amount of HTTP-level testing would have caught.
 
 **A `done` event with no `session` object crashes the browser.** WebUI's own
 `messages.js` (`_finishDone`) unconditionally reads `d.session.messages` with
-no null-check on `d.session` itself. The initial `done` payload here was just
-`{"status": "completed"}` — reproduced live as
+no null-check on `d.session` itself. A `done` payload without a `session` key
+reproduced live as
 `TypeError: Cannot read properties of undefined (reading 'messages')`,
 leaving the composer stuck showing "processing" forever with no visible
-error. `run_turn()` now tracks a running `{role, content}` transcript per
-WebUI session (`RunStore.append_turn_messages`) and includes
-`session: {session_id, messages: transcript}` in the success path's `done`
-event — enough for that one read site, not a SessionDB replacement. The
-error/rejection paths' `done` events don't need this: WebUI's `apperror`
-handler sets `_streamFinalized` itself, before `done` is ever processed, so
-they were already safe (verified live, not just reasoned through).
+error. `run_turn()` tracks a running `{role, content}` transcript per WebUI
+session (`RunStore.append_turn_messages`) and includes
+`session: {session_id, messages: transcript}` in every `done` event —
+including a rejected turn's, and including error/rejection paths — see
+below for why.
 
-**The composer's model chip showed a hardcoded placeholder.** hermes-webui's
-`boot.js` ships a static fallback label ("GPT-5.4 Mini") shown before the
-real model hydrates — but this adapter never told WebUI what model actually
-answered, so nothing ever overwrote it. `run_turn()` now reads
-`trace.model.reasonProvider`/`reasonModel` from engram-engine's own
-`/debug/converse` response (the same fields CognitivePipeline populates from
-the real `LlmResponse` that answered — see `effective_model_fields()`) and
-reports them as `effective_model`/`effective_model_provider` in the
-`/v1/runs` response, which `routes.py._chat_start_response_from_run_start`
-already forwards to the browser. Verified live: `localStorage` and
-`S.session.model` do get set correctly. The chip's *visible* text still
-doesn't update, though: `_applyModelToDropdown` requires a match in WebUI's
-static provider catalog (`/api/providers` — Anthropic, Bedrock, etc., no
-"local"/Director entry), and silently no-ops when a model doesn't match one
-of its options. Making the chip visually correct would mean registering a
-synthetic provider in that catalog — a vendor-source change, not something
-this adapter can do from the runner side alone. Reporting this as the
-concrete remaining gap rather than working around it with a bigger patch.
+**The composer's model chip needed two separate fixes — one config-only, one
+a small vendor patch.** hermes-webui's `boot.js` ships a static fallback
+label ("GPT-5.4 Mini") shown before the real model hydrates. Before the first
+message, this is fixed with *no vendor-source change at all*:
+`HERMES_WEBUI_DEFAULT_MODEL=<model id>` on the WebUI container feeds
+`get_effective_default_model()` → `/api/settings.default_model`, and
+`boot.js`'s existing (unmodified) hydration code already creates a synthetic
+`<option>` for an uncatalogued default and applies it — this dev instance has
+no cloud provider configured at all (no API keys, no `config.yaml` — see
+"Why a vendor patch was needed" below), so this is the *only* model shown,
+which is the truth.
+
+After a message, `run_turn()` reports `effective_model`/`effective_model_provider`
+(derived from `trace.model.reasonProvider`/`reasonModel` in engram-engine's
+own `/debug/converse` response — see `effective_model_fields()`), and
+`routes.py._chat_start_response_from_run_start` already forwards these to the
+browser. But `messages.js`'s handler for them called `_applyModelToDropdown`,
+which only sets the chip when the value already matches a *registered
+catalog* option and silently no-ops otherwise — exactly what an uncatalogued
+runner-local model is. The same file already defines
+`_ensureModelOptionInDropdown` for precisely this case (try
+`_applyModelToDropdown` first, create a synthetic option and sync the chip
+only if that fails) — see `vendor-patches/messages_js_model_chip_fallback.patch`,
+which swaps in the existing, more-capable function at that one call site.
+Verified live in both states: the chip shows the real model before any
+message, and stays correct through a turn.
+
+**Selecting a different model must not silently answer locally anyway, or
+silently do nothing.** This dev instance has no cloud provider configured, so
+the *only* way to pick something other than the local model is the
+composer's free-text "Custom Model ID" field. Typing e.g.
+`anthropic/claude-sonnet-4-6` there and sending reached the adapter as
+`{"model": "anthropic/claude-sonnet-4-6"}` with **no `"provider"` key at
+all** — a provider-only check (reject when `provider` is present and
+mismatched) never sees this, and sailed the turn straight through to the
+local Director, silently answering as if the request had been honored.
+`run_turn()` now also compares the bare tail of `model` against
+`LOCAL_MODEL_ID` (when configured) and rejects a mismatch through the same
+`apperror`/`done` mechanism attachments/toolsets use — verified live: the
+composer now shows a clear, visible error naming both what was requested and
+what this instance actually serves, and the Director is never invoked.
+
+Making that error *visible* needed one more fix: the browser's `apperror`
+handler (`messages.js`) only renders the message into the transcript when the
+event's `session_id` (or `session.session_id`) matches the browser's current
+session — an `apperror` payload with neither present is accepted by the SSE
+stream but never shown, leaving a blank assistant bubble (reproduced live —
+the rejection reached the adapter and was logged correctly, but nothing
+appeared on screen). Every `apperror` payload now includes `session_id`. This
+also retroactively fixes the same silent-rendering gap in the
+already-shipped attachments/toolsets rejection.
+
+**Runner-local turns were never durably saved server-side, so a page reload
+lost them.** `run_turn()`'s `session.messages` is read by the browser's live
+JS state (`S.session`/`S.messages`) but nothing wrote it to WebUI's own
+on-disk `Session` store (`get_session()`/`Session.save()`) — confirmed by
+inspecting `sessions/<id>.json` directly: every runner-backed session had
+`message_count: 0` even after a real, successfully-rendered conversation.
+Reloading, or WebUI's own sidebar/history, would show nothing. Fixed with a
+small vendor patch (`vendor-patches/routes_py_runner_session_persistence.patch`):
+`_stream_runner_run_events` — the one function that already sees every event
+from any runner-compliant adapter, not just this one — now persists a `done`
+event's `session.messages` onto the real WebUI `Session` object and saves it,
+mirroring exactly what the legacy (non-runner) chat path already does for
+every turn. Verified live: a fresh conversation, reload, transcript intact;
+a brand-new second conversation correctly recalling facts from the first via
+the Director's graph (not WebUI's own history — see "Identity binding"),
+confirming both persistence and cross-session recall work together. A
+rejected turn (attachments/toolsets or an unsupported model) is included too
+— reproduced live that omitting it made a rejected exchange vanish on
+reload even though real Director turns persisted correctly.
+
+**This adapter's own in-memory transcript is a cache, not the source of
+truth — WebUI's on-disk session is.** `RunStore._message_history` is a plain
+dict that resets on every adapter restart. Without reconciliation, a restart
+mid-conversation would report only the post-restart turns in the next `done`
+event, and the routes.py patch above would then *overwrite* WebUI's already
+longer, correctly-persisted history with that truncated view — the opposite
+of the bug it fixes. `run_turn()` seeds `RunStore` from WebUI's own
+`sessions/<id>.json` (`load_persisted_webui_messages()`, via
+`WEBUI_SESSIONS_DIR` — the same host path the WebUI container's state dir is
+bind-mounted from) the first time it sees a session in this process's
+lifetime, before appending the new turn. `WEBUI_SESSIONS_DIR` is optional;
+unset, this behaves exactly as before (seeding is a best-effort
+reconciliation, never a hard dependency — any read failure returns `[]`).
+
+## Why some fixes are vendor-source patches, not config
+
+The pinned WebUI image ships **without PyYAML** (`import yaml` fails; `pip
+list` is empty) — confirmed directly in the running container. Every
+config.yaml-based path (`api/onboarding.py`'s self-hosted-provider setup,
+`api/config.py`'s `set_hermes_default_model`) needs it and fails immediately.
+So the "first use any supported provider/catalog configuration" options —
+registering this instance as a `custom` self-hosted provider, or setting the
+default model via config.yaml — are genuinely unavailable in this build, not
+just undocumented. `HERMES_WEBUI_DEFAULT_MODEL` (an env var,
+`api/config.py`'s `DEFAULT_MODEL`) doesn't touch config.yaml and works fine;
+that's why only the *chip-after-a-message* and *session-persistence* fixes
+needed an actual source patch.
+
+`vendor-patches/` holds two small, isolated, reproducible patches:
+
+- `routes_py_runner_session_persistence.patch` — see above.
+- `messages_js_model_chip_fallback.patch` — see above.
+
+`vendor-patches/apply.sh` regenerates the patched files from the pinned
+image's actual source (extracted from a *running* container at the expected
+digest — the image only populates `/app` from an internal `/apptoo` at
+*container start*, so a `docker create`d-but-never-started container has no
+source to copy yet) and applies both patches with `git apply`. The pinned
+image itself is never modified or rebuilt: the patched files are bind-mounted
+over `/apptoo` (not `/app`) at container start — the entrypoint
+(`/hermeswebui_init.bash`) rsyncs `/apptoo/ -> /app/` with `--chown` on every
+start to align ownership with the runtime UID, and a bind mount directly at
+`/app/...` makes that chown fail across the mount boundary (confirmed: the
+container exits 1 immediately). Mounting the *source* side instead means
+rsync reads the patched content and writes a freshly, correctly owned copy
+into `/app` through the same path every other vendor file takes.
 
 ## Identity binding
 
@@ -122,24 +220,35 @@ same bound identity, so graph recall still works.
 
 ## Running
 
+Two host-level launch scripts (outside this repo, since they embed
+deployment-specific paths and read local secret files — not committed):
+
 ```bash
 # 1. engram-engine's isolated dev backend must already be running
 #    (reachable at ENGRAM_BASE_URL, default http://127.0.0.1:8082)
 
-# 2. Start this adapter, bound to an address the WebUI container can reach
-ENGRAM_DEBUG_TOKEN="$(cat /path/to/debug-token-file)" \
-RUNNER_API_KEY="$(cat /path/to/runner-key-file)" \
-RUNNER_HOST=172.17.0.1 RUNNER_PORT=8091 \
-python3 webui-bridge/runner_adapter.py
+# 2. Regenerate the patched vendor files if they don't exist yet, or this
+#    repo's patches changed:
+webui-bridge/vendor-patches/apply.sh
 
-# 3. Point the WebUI container at it
-docker run ... \
-  --add-host=host.docker.internal:host-gateway \
-  -e HERMES_WEBUI_RUNTIME_ADAPTER=runner-local \
-  -e HERMES_WEBUI_RUNNER_BASE_URL=http://host.docker.internal:8091 \
-  -e HERMES_WEBUI_RUNNER_API_KEY="$(cat /path/to/runner-key-file)" \
-  ...
+# 3. Start the WebUI container: the pinned image + vendor patches overlaid
+#    at /apptoo + HERMES_WEBUI_DEFAULT_MODEL:
+/home/halo/development/run-hermes-webui-dev.sh
+
+# 4. Start this adapter, bound to an address the WebUI container can reach:
+/home/halo/development/run-runner-adapter.sh
 ```
+
+Adapter environment variables (all but `RUNNER_API_KEY`/`ENGRAM_DEBUG_TOKEN`
+optional):
+
+| Variable | Purpose |
+|---|---|
+| `RUNNER_HOST` / `RUNNER_PORT` | Bind address (Docker bridge gateway, see "Network path") |
+| `RUNNER_API_KEY` | Must match `HERMES_WEBUI_RUNNER_API_KEY` on the container |
+| `LOCAL_MODEL_PROVIDER` | The one provider id this instance serves (default `local`) — a WebUI-supplied `provider` that doesn't match this is rejected |
+| `LOCAL_MODEL_ID` | The one model id this instance serves — a WebUI-supplied `model` whose tail doesn't match this is rejected. Unset skips this check (provider-only) |
+| `WEBUI_SESSIONS_DIR` | Host path to WebUI's `sessions/` dir, for transcript seeding (see above) |
 
 Use the WebUI's own UI (or `/api/session/new` + `/api/chat/start` +
 `/api/chat/stream`) exactly as normal — no new page, no new controls.
@@ -163,8 +272,11 @@ itself, not merely kept out by network placement.
   actions — each reports a clear "not supported in this development slice"
   result if the UI's controls for them are used, rather than silently
   dropping the request.
-- Attachments/toolsets sent by the composer are explicitly rejected (a clear
-  `apperror` before the Director is ever called) — not yet implemented.
-- The composer's model chip does not visually reflect the real backend (see
-  above) — the underlying data is correct, but WebUI's static provider
-  catalog has no entry for it.
+- Attachments/toolsets, and any model/provider other than the one this
+  instance actually serves, are explicitly rejected (a clear, visible
+  `apperror` before the Director is ever called, included in the persisted
+  transcript) — not yet implemented.
+- A rejected turn's `apperror` renders as a red error card live, but as a
+  plain (non-error-styled) assistant bubble after a reload — the content is
+  preserved, the styling isn't; WebUI's error-card rendering only exists in
+  the live SSE path, not in its from-disk message rendering.
