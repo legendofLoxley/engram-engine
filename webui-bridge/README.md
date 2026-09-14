@@ -72,6 +72,44 @@ engram-engine's own debug bearer token is a *second*, independent secret held
 only in this adapter process's environment — the WebUI container never sees
 it, and neither does the browser.
 
+## Two live-browser bugs found and fixed after the initial slice
+
+Verifying through a real connected browser (not just curl against the wire
+format) surfaced two issues no amount of HTTP-level testing would have caught:
+
+**A `done` event with no `session` object crashes the browser.** WebUI's own
+`messages.js` (`_finishDone`) unconditionally reads `d.session.messages` with
+no null-check on `d.session` itself. The initial `done` payload here was just
+`{"status": "completed"}` — reproduced live as
+`TypeError: Cannot read properties of undefined (reading 'messages')`,
+leaving the composer stuck showing "processing" forever with no visible
+error. `run_turn()` now tracks a running `{role, content}` transcript per
+WebUI session (`RunStore.append_turn_messages`) and includes
+`session: {session_id, messages: transcript}` in the success path's `done`
+event — enough for that one read site, not a SessionDB replacement. The
+error/rejection paths' `done` events don't need this: WebUI's `apperror`
+handler sets `_streamFinalized` itself, before `done` is ever processed, so
+they were already safe (verified live, not just reasoned through).
+
+**The composer's model chip showed a hardcoded placeholder.** hermes-webui's
+`boot.js` ships a static fallback label ("GPT-5.4 Mini") shown before the
+real model hydrates — but this adapter never told WebUI what model actually
+answered, so nothing ever overwrote it. `run_turn()` now reads
+`trace.model.reasonProvider`/`reasonModel` from engram-engine's own
+`/debug/converse` response (the same fields CognitivePipeline populates from
+the real `LlmResponse` that answered — see `effective_model_fields()`) and
+reports them as `effective_model`/`effective_model_provider` in the
+`/v1/runs` response, which `routes.py._chat_start_response_from_run_start`
+already forwards to the browser. Verified live: `localStorage` and
+`S.session.model` do get set correctly. The chip's *visible* text still
+doesn't update, though: `_applyModelToDropdown` requires a match in WebUI's
+static provider catalog (`/api/providers` — Anthropic, Bedrock, etc., no
+"local"/Director entry), and silently no-ops when a model doesn't match one
+of its options. Making the chip visually correct would mean registering a
+synthetic provider in that catalog — a vendor-source change, not something
+this adapter can do from the runner side alone. Reporting this as the
+concrete remaining gap rather than working around it with a bigger patch.
+
 ## Identity binding
 
 Every turn is bound to one fixed `ENGRAM_SYNTHETIC_USER_ID` — the caller
@@ -125,5 +163,8 @@ itself, not merely kept out by network placement.
   actions — each reports a clear "not supported in this development slice"
   result if the UI's controls for them are used, rather than silently
   dropping the request.
-- Attachments/toolsets sent by the composer are currently ignored rather than
-  rejected — not yet addressed in this slice.
+- Attachments/toolsets sent by the composer are explicitly rejected (a clear
+  `apperror` before the Director is ever called) — not yet implemented.
+- The composer's model chip does not visually reflect the real backend (see
+  above) — the underlying data is correct, but WebUI's static provider
+  catalog has no entry for it.

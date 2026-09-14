@@ -66,6 +66,20 @@ class RunStoreTest(unittest.TestCase):
         store = ra.RunStore()
         self.assertIsNone(store.events_since("nope", 0))
 
+    def test_append_turn_messages_accumulates_per_session(self):
+        store = ra.RunStore()
+        first = store.append_turn_messages("w-1", "hi", "hello")
+        self.assertEqual(first, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+        second = store.append_turn_messages("w-1", "how are you", "good")
+        self.assertEqual(len(second), 4)
+        self.assertEqual(second[:2], first)
+
+    def test_append_turn_messages_isolated_per_webui_session(self):
+        store = ra.RunStore()
+        store.append_turn_messages("w-1", "a", "b")
+        other = store.append_turn_messages("w-2", "c", "d")
+        self.assertEqual(other, [{"role": "user", "content": "c"}, {"role": "assistant", "content": "d"}])
+
 
 class RunTurnTest(unittest.TestCase):
     def setUp(self):
@@ -81,6 +95,51 @@ class RunTurnTest(unittest.TestCase):
         self.assertEqual(record["events"][0]["payload"]["text"], "hello")
         self.assertEqual(record["events"][1]["event"], "done")
         self.assertEqual(self.store.engram_session_for("w-1"), "e-1")
+
+    def test_success_done_event_carries_a_session_object(self):
+        # Regression for a live browser crash: WebUI's messages.js done-event
+        # handler (_finishDone) unconditionally reads d.session.messages with
+        # no null-check on d.session itself. A done payload with no `session`
+        # key throws "Cannot read properties of undefined (reading 'messages')"
+        # and the browser's stream is left stuck showing "processing" forever
+        # — reproduced live against this exact code path before this fix.
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hello", "sessionId": "e-1"}):
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
+        record = self.store.get(run_id)
+        done_payload = record["events"][1]["payload"]
+        self.assertIn("session", done_payload)
+        self.assertEqual(done_payload["session"]["session_id"], "w-1")
+        self.assertEqual(
+            done_payload["session"]["messages"],
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
+        )
+
+    def test_transcript_accumulates_across_turns_in_the_same_webui_session(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "a", "sessionId": "e-1"}):
+            ra.run_turn(self.config, self.store, webui_session_id="w-1", message="first")
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "b", "sessionId": "e-1"}):
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="second")
+        messages = self.store.get(run_id)["events"][1]["payload"]["session"]["messages"]
+        self.assertEqual(
+            messages,
+            [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "a"},
+                {"role": "user", "content": "second"},
+                {"role": "assistant", "content": "b"},
+            ],
+        )
+
+    def test_error_done_events_are_unchanged_by_the_session_fix(self):
+        # apperror's own browser handler finalizes the stream and returns before
+        # "done" is ever processed (it sets _streamFinalized itself), so the
+        # crash above never applied to the error/rejection paths — this pins
+        # that those still don't carry a session object, so no one "fixes" them
+        # again believing the earlier bug applied here too.
+        with patch.object(ra, "forward_to_engram", side_effect=engram_client.UpstreamError(401, b"nope")):
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
+        done_payload = self.store.get(run_id)["events"][1]["payload"]
+        self.assertNotIn("session", done_payload)
 
     def test_second_turn_reuses_mapped_engram_session(self):
         with patch.object(ra, "forward_to_engram", return_value={"reply": "a", "sessionId": "e-1"}) as mocked:
@@ -107,6 +166,61 @@ class RunTurnTest(unittest.TestCase):
             run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
         record = self.store.get(run_id)
         self.assertEqual(record["status"], "error")
+
+
+class EffectiveModelFieldsTest(unittest.TestCase):
+    def test_extracts_provider_and_basename_without_gguf_extension(self):
+        result = {"trace": {"model": {
+            "reasonProvider": "local",
+            "reasonModel": "/var/lib/llama/models/Qwen3.6-35B-A3B-MTP-Q5_K_XL/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
+        }}}
+        model, provider = ra.effective_model_fields(result)
+        self.assertEqual(provider, "local")
+        self.assertEqual(model, "Qwen3.6-35B-A3B-UD-Q5_K_XL")
+
+    def test_absent_when_no_llm_answered_the_turn(self):
+        # A phrase-pool/SOCIAL turn: engram-engine's own trace has no reasonProvider.
+        result = {"trace": {"model": {"reasonProvider": None, "reasonModel": None}}}
+        self.assertEqual(ra.effective_model_fields(result), (None, None))
+
+    def test_absent_when_trace_missing_entirely(self):
+        self.assertEqual(ra.effective_model_fields({}), (None, None))
+
+    def test_non_path_model_name_passed_through(self):
+        result = {"trace": {"model": {"reasonProvider": "anthropic", "reasonModel": "claude-sonnet-4-6"}}}
+        model, provider = ra.effective_model_fields(result)
+        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertEqual(provider, "anthropic")
+
+
+class RunTurnReportsEffectiveModelTest(unittest.TestCase):
+    """Regression for the composer's model chip permanently showing the static
+    placeholder default ("GPT-5.4 Mini") instead of the backend that actually
+    answered — traced to WebUI never being told an effective_model at all.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.store = ra.RunStore()
+
+    def test_success_records_effective_model_from_engram_trace(self):
+        engram_result = {
+            "reply": "hi", "sessionId": "e-1",
+            "trace": {"model": {"reasonProvider": "local", "reasonModel": "/models/qwen3.6-35b-a3b.gguf"}},
+        }
+        with patch.object(ra, "forward_to_engram", return_value=engram_result):
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
+        record = self.store.get(run_id)
+        self.assertEqual(record["effective_model"], "qwen3.6-35b-a3b")
+        self.assertEqual(record["effective_model_provider"], "local")
+
+    def test_success_with_no_llm_in_trace_records_no_effective_model(self):
+        engram_result = {"reply": "Good afternoon.", "sessionId": "e-1", "trace": {"model": {}}}
+        with patch.object(ra, "forward_to_engram", return_value=engram_result):
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hi")
+        record = self.store.get(run_id)
+        self.assertIsNone(record["effective_model"])
+        self.assertIsNone(record["effective_model_provider"])
 
 
 class UnsupportedInputMessageTest(unittest.TestCase):
@@ -261,6 +375,30 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
             status_payload = json.loads(resp3.read())
             self.assertEqual(status_payload["status"], "completed")
             self.assertEqual(status_payload["terminal_state"], "completed")
+
+    def test_effective_model_surfaces_through_the_real_start_response(self):
+        engram_result = {
+            "reply": "hi", "sessionId": "e-9",
+            "trace": {"model": {"reasonProvider": "local", "reasonModel": "/models/qwen3.6-35b-a3b.gguf"}},
+        }
+        with patch.object(ra, "forward_to_engram", return_value=engram_result):
+            conn = self._conn()
+            body = json.dumps({"session_id": "webui-session-model", "message": "hello"}).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            start_payload = json.loads(resp.read())
+        self.assertEqual(start_payload["effective_model"], "qwen3.6-35b-a3b")
+        self.assertEqual(start_payload["effective_model_provider"], "local")
+
+    def test_no_effective_model_keys_when_engram_reports_none(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-9"}):
+            conn = self._conn()
+            body = json.dumps({"session_id": "webui-session-nomodel", "message": "hello"}).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            start_payload = json.loads(resp.read())
+        self.assertNotIn("effective_model", start_payload)
+        self.assertNotIn("effective_model_provider", start_payload)
 
     def test_cancel_reports_not_active_rather_than_pretending_to_cancel(self):
         conn = self._conn()

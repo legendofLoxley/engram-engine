@@ -83,6 +83,7 @@ class RunStore:
         self._lock = threading.Lock()
         self._runs: dict[str, dict[str, Any]] = {}
         self._session_map: dict[str, str] = {}  # webui session_id -> engram sessionId
+        self._message_history: dict[str, list[dict[str, str]]] = {}  # webui session_id -> [{role, content}]
 
     def engram_session_for(self, webui_session_id: str | None) -> str | None:
         if not webui_session_id:
@@ -96,7 +97,33 @@ class RunStore:
         with self._lock:
             self._session_map[webui_session_id] = engram_session_id
 
-    def create(self, *, webui_session_id: str, events: list[dict[str, Any]], status: str) -> str:
+    def append_turn_messages(self, webui_session_id: str, user_message: str, assistant_reply: str) -> list[dict[str, str]]:
+        """Appends this turn's user+assistant messages to the session's running
+        transcript and returns the full transcript so far (a copy).
+
+        WebUI's own frontend (messages.js's done-event handler) unconditionally
+        reads `d.session.messages` when a run completes successfully — it has no
+        independent memory of a runner-backed conversation's history, since (per
+        the vendor's own agent-api-contract.md audit) that history normally lives
+        in WebUI's own SessionDB, which a runner integration is not supposed to
+        open directly. This is the minimal stand-in: enough of a `messages` list
+        for that one read site to render correctly, not a SessionDB replacement.
+        """
+        with self._lock:
+            history = self._message_history.setdefault(webui_session_id, [])
+            history.append({"role": "user", "content": user_message})
+            history.append({"role": "assistant", "content": assistant_reply})
+            return list(history)
+
+    def create(
+        self,
+        *,
+        webui_session_id: str,
+        events: list[dict[str, Any]],
+        status: str,
+        effective_model: str | None = None,
+        effective_model_provider: str | None = None,
+    ) -> str:
         run_id = uuid.uuid4().hex
         with self._lock:
             self._runs[run_id] = {
@@ -104,6 +131,8 @@ class RunStore:
                 "events": events,
                 "status": status,
                 "created_at": time.time(),
+                "effective_model": effective_model,
+                "effective_model_provider": effective_model_provider,
             }
         return run_id
 
@@ -192,11 +221,27 @@ def run_turn(
         result = forward_to_engram(config["engram_base_url"], config["engram_debug_token"], payload)
         store.remember_engram_session(webui_session_id, result.get("sessionId"))
         reply_text = str(result.get("reply") or "")
+        transcript = store.append_turn_messages(webui_session_id, message, reply_text)
+        model, provider = effective_model_fields(result)
         events = [
             {"event": "token", "seq": 1, "payload": {"text": reply_text}},
-            {"event": "done", "seq": 2, "payload": {"status": TERMINAL_COMPLETED_STATUS}},
+            # WebUI's own done-event handler (messages.js _finishDone) unconditionally
+            # reads d.session.messages with no null-check on d.session itself — a
+            # done event without a `session` object throws
+            # "TypeError: Cannot read properties of undefined (reading 'messages')"
+            # and leaves the browser's stream stuck showing "processing" forever
+            # (reproduced live; see webui-bridge/README.md). `session` here is a
+            # minimal stand-in sized to satisfy that one read site, not a
+            # SessionDB replacement.
+            {"event": "done", "seq": 2, "payload": {
+                "status": TERMINAL_COMPLETED_STATUS,
+                "session": {"session_id": webui_session_id, "messages": transcript},
+            }},
         ]
-        return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_COMPLETED_STATUS)
+        return store.create(
+            webui_session_id=webui_session_id, events=events, status=TERMINAL_COMPLETED_STATUS,
+            effective_model=model, effective_model_provider=provider,
+        )
     except UpstreamError as e:
         detail = e.body.decode("utf-8", errors="replace")[:500]
         events = [
@@ -210,6 +255,33 @@ def run_turn(
             {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
         return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
+
+
+def effective_model_fields(engram_result: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Derives the (model, provider) pair to report to WebUI from engram-engine's
+    own debug-converse trace (trace.model.reasonProvider/reasonModel) — the same
+    fields CognitivePipeline populates from the actual LlmResponse that answered
+    the turn (see engram-engine's LlmResponse.providerName/modelName), not a
+    label WebUI or this adapter invents.
+
+    Absent for a turn a phrase-pool branch answered without calling an LLM at
+    all (e.g. a short-circuited SOCIAL turn) — trace.model.reasonProvider is
+    null in that case, and this returns (None, None) so the caller omits both
+    fields rather than reporting a fabricated model for a turn with none.
+
+    reasonModel is often a full gguf file path for a local model; this reports
+    only its basename (extension stripped) so the WebUI model chip shows a
+    short label instead of a raw filesystem path.
+    """
+    model_trace = (engram_result.get("trace") or {}).get("model") or {}
+    provider = model_trace.get("reasonProvider")
+    raw_model = model_trace.get("reasonModel")
+    if not provider or not raw_model:
+        return None, None
+    label = os.path.basename(str(raw_model))
+    if label.endswith(".gguf"):
+        label = label[: -len(".gguf")]
+    return label, provider
 
 
 def _unsupported(message: str) -> dict[str, Any]:
@@ -305,13 +377,24 @@ def make_handler(config: dict[str, Any], store: RunStore) -> type[BaseHTTPReques
                     toolsets=toolsets,
                 )
                 record = store.get(run_id)
-                self._send_json(200, {
+                response = {
                     "run_id": run_id,
                     "stream_id": run_id,
                     "session_id": webui_session_id,
                     "status": record["status"] if record else "completed",
                     "active_controls": [],
-                })
+                }
+                # WebUI's routes.py._chat_start_response_from_run_start only forwards
+                # these two keys to the browser when present in this payload, and
+                # messages.js uses them to correct the model chip away from its
+                # static placeholder default ("GPT-5.4 Mini") to whatever actually
+                # answered. Omitted (not sent as null) when engram-engine's own
+                # trace didn't name an LLM for this turn — see effective_model_fields.
+                if record and record.get("effective_model"):
+                    response["effective_model"] = record["effective_model"]
+                if record and record.get("effective_model_provider"):
+                    response["effective_model_provider"] = record["effective_model_provider"]
+                self._send_json(200, response)
                 return
 
             if len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "cancel":
