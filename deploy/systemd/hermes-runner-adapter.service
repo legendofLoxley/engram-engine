@@ -1,0 +1,40 @@
+[Unit]
+Description=webui-bridge runner adapter (hermes-webui runner-local -> engram-engine)
+Documentation=file:///home/halo/development/engram-engine/deploy/README.md
+# RUNNER_HOST=172.17.0.1 is the docker0 bridge gateway address (see
+# webui-bridge/README.md "Network path") — that interface exists only once
+# Docker has brought up its default bridge network, so ordering after
+# docker.service avoids an early-boot bind failure. Wants=, not Requires=:
+# if docker.service is ever down, Restart=on-failure keeps retrying rather
+# than refusing to start (and staying stopped) entirely.
+After=network-online.target docker.service engram-dev.service
+Wants=network-online.target docker.service
+# See engram-dev.service's identical comment: this is a [Unit]-section key,
+# not [Service] — confirmed by the same "Unknown key" warning if misplaced.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=halo
+WorkingDirectory=/home/halo/development/engram-engine/webui-bridge
+# See engram-dev.service's identical comment: ExecStart must go through
+# /usr/bin/bash, not exec the script directly — confirmed live via a real
+# SELinux AVC denial (init_t executing a user_home_t file), not a
+# theoretical concern.
+ExecStart=/usr/bin/bash /home/halo/development/engram-engine/deploy/scripts/run-runner-adapter.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+# See engram-dev.service's identical comment: a Python process killed by
+# SIGTERM (no custom handler) also exits 143, which without this would show
+# a deliberate `systemctl stop` as "failed".
+SuccessExitStatus=143
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-runner-adapter
+
+[Install]
+WantedBy=multi-user.target

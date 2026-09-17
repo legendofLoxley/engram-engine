@@ -220,12 +220,20 @@ same bound identity, so graph recall still works.
 
 ## Running
 
-Two host-level launch scripts (outside this repo, since they embed
-deployment-specific paths and read local secret files — not committed):
+As of the `deploy/` packaging pass, all three components (engram-engine,
+this adapter, and the WebUI container) run under supervision — see
+`deploy/README.md` for the full install/start/stop/update/rollback
+procedure. `deploy/scripts/install.sh` is the one-command path.
+
+The launch scripts themselves are now committed at `deploy/scripts/run-*.sh`
+(they read secret file paths and embed this box's fixed deployment paths,
+but the scripts themselves — unlike the secrets and persistent data they
+reference — are reproducible from the repo, not host-only):
 
 ```bash
 # 1. engram-engine's isolated dev backend must already be running
 #    (reachable at ENGRAM_BASE_URL, default http://127.0.0.1:8082)
+#    — under supervision: sudo systemctl start engram-dev.service
 
 # 2. Regenerate the patched vendor files if they don't exist yet, or this
 #    repo's patches changed:
@@ -233,10 +241,11 @@ webui-bridge/vendor-patches/apply.sh
 
 # 3. Start the WebUI container: the pinned image + vendor patches overlaid
 #    at /apptoo + HERMES_WEBUI_DEFAULT_MODEL:
-/home/halo/development/run-hermes-webui-dev.sh
+deploy/scripts/run-hermes-webui-dev.sh
 
 # 4. Start this adapter, bound to an address the WebUI container can reach:
-/home/halo/development/run-runner-adapter.sh
+deploy/scripts/run-runner-adapter.sh
+#    — under supervision: sudo systemctl start hermes-runner-adapter.service
 ```
 
 Adapter environment variables (all but `RUNNER_API_KEY`/`ENGRAM_DEBUG_TOKEN`

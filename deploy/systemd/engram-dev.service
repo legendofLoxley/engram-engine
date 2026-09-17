@@ -1,0 +1,61 @@
+[Unit]
+Description=engram-engine isolated dev backend (Director + embedded ArcadeDB)
+Documentation=file:///home/halo/development/engram-engine/deploy/README.md
+# Soft ordering only, not a hard dependency: engram-engine must still start
+# (and keep running) even if the shared llama-server is briefly down — see
+# deploy/README.md "Failure behavior". A turn against an unreachable model
+# already degrades gracefully (CognitivePipeline's existing actorResult
+# "degraded" path) rather than throwing; the point of Restart=on-failure with
+# no Requires= here is that a transient model outage must never become an
+# engram-engine outage too.
+After=network-online.target llama-server.service
+Wants=network-online.target
+# Unbounded restart attempts (rate-limited to one per RestartSec=5 below, not
+# a tight loop). StartLimitIntervalSec/Burst are [Unit]-section keys, not
+# [Service] — verified live: systemd logs "Unknown key 'StartLimitIntervalSec'
+# in section [Service], ignoring" when placed there, silently no-op'ing the
+# intended unbounded-retry behavior.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=halo
+WorkingDirectory=/home/halo/development/engram-engine
+# ExecStart runs the script via /usr/bin/bash rather than executing it
+# directly. Verified live: systemd (PID 1, domain init_t) executing a
+# user_home_t-labeled file directly is denied by this box's enforcing
+# SELinux policy (avc: denied { execute } ... scontext=init_t
+# tcontext=user_home_t) even though the same file runs fine from an
+# interactive unconfined_t shell — that's the exact difference between a
+# manual run and a systemd-supervised one. Invoking bash (an allowed
+# executable for init_t) and passing the repo path as its script argument
+# only needs read access to that path, which is not denied.
+ExecStart=/usr/bin/bash /home/halo/development/engram-engine/deploy/scripts/run-engram-dev.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+# The JVM's shutdown hook (Application.kt — closes the ArcadeDB handle
+# cleanly) runs on SIGTERM, but the process's own exit code from a signal is
+# 128+15=143, which systemd otherwise reports as "Result: exit-code" /
+# inactive (failed) even for a deliberate `systemctl stop` — verified live.
+# SuccessExitStatus=143 tells systemd this specific code is an intentional,
+# clean stop, not a crash (Restart=on-failure never fires for it either way,
+# since a real `systemctl stop` always suppresses the restart regardless of
+# exit code — this only fixes the cosmetic/monitoring-visible "failed" state).
+SuccessExitStatus=143
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+# Deliberately no ProtectHome=/ReadWritePaths= allowlist: this unit's data
+# (data/dev/engram-db), logs (log/, logs/) and the secret-token file it reads
+# at startup all live under /home/halo/development, and this is a
+# single-owner dev box, not a hardened multi-tenant surface. A path allowlist
+# here would need to track every new log/data path this actively-iterating
+# branch adds; getting one wrong fails as an opaque EROFS on write, not a
+# clear error. Revisit once the on-disk layout stabilizes.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=engram-dev
+
+[Install]
+WantedBy=multi-user.target
