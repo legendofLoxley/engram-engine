@@ -654,6 +654,7 @@ def run_turn(
 
         if assignment_id:
             ack_index = len(transcript) - 1  # the assistant entry append_turn_messages just added
+            dispatch_time = time.time()
             events = [{"event": "token", "seq": 1, "payload": {"text": reply_text}}]
             run_id = store.create(
                 webui_session_id=webui_session_id, events=events, status=PENDING_HERMES_STATUS,
@@ -665,11 +666,16 @@ def run_turn(
                 webui_session_id=webui_session_id,
                 user_message=message,
                 ack_text=reply_text,
-                created_at=time.time(),
+                created_at=dispatch_time,
             )
             thread = threading.Thread(
                 target=_deliver_hermes_completion,
                 args=(config, store, run_id, webui_session_id, assignment_id, reply_text, ack_index),
+                # dispatch_time lets the delivery thread's OWN poll loop detect a
+                # confirmed backend restart within a few poll intervals, rather than
+                # only ever discovering it later via reconcile_interrupted_assignments
+                # at a future adapter startup — see _deliver_hermes_completion's own doc.
+                kwargs={"dispatch_time": dispatch_time},
                 daemon=True,
             )
             thread.start()
@@ -780,6 +786,79 @@ def handle_cancel_request(config: dict[str, Any], store: RunStore, run_id: str) 
     }
 
 
+class InterruptionReason:
+    """Closed set of reasons this adapter itself must decide AND author delivered
+    text for — every one of them is a situation where the real decision-maker for
+    an ordinary outcome, engram-engine's own `HermesCompletionDirector` (Kotlin),
+    cannot be consulted at all: either the JVM that owned this specific assignment
+    has been replaced by a restart, or engram-engine cannot currently be reached
+    to ask. `HermesCompletionDirector` is never bypassed when it IS reachable —
+    see InterruptionDirector's own doc for why this class exists at all.
+    """
+    CONFIRMED_BACKEND_RESTART = "confirmed_backend_restart"
+    BACKEND_UNREACHABLE = "backend_unreachable"
+    NO_RESPONSE_IN_TIME = "no_response_in_time"
+
+
+class InterruptionDirector:
+    """The one place this adapter decides and authors an interruption's exact
+    delivered text — this transport's own deliberate mirror of
+    `HermesCompletionDirector` (Kotlin), which is the one place EVERY ordinary
+    outcome (accept/withhold a real, reachable Director decision) is decided.
+    Every reason `InterruptionReason` names is a case that object cannot possibly
+    author, because the JVM it lives in either no longer owns this assignment (a
+    restart since replaced it) or cannot currently be asked at all (unreachable) —
+    this is never consulted, and never overrides `HermesCompletionDirector`, when
+    a real decision IS available (see `_deliver_hermes_completion` and
+    `reconcile_interrupted_assignments`'s own call sites: both call this only in
+    their "no completion was ever recorded" branches).
+
+    Centralizing this (rather than composing each message inline, ad hoc, at each
+    call site — how earlier code in this same increment did it) is what makes
+    this adapter's own decision-making traceable to one place, the same as the
+    Kotlin side's. No model call is needed or made here: like
+    `HermesCompletionDecision.Accepted`'s own "no extra model call" rationale,
+    composing a plain, honest, reason-scoped sentence needs none.
+    """
+
+    @staticmethod
+    def decide(reason: str) -> str:
+        if reason == InterruptionReason.CONFIRMED_BACKEND_RESTART:
+            return (
+                "The development backend restarted while this was still outstanding, so "
+                "there's no way for me to confirm whether it finished. This conversation is "
+                "ready for another message whenever you'd like."
+            )
+        if reason == InterruptionReason.BACKEND_UNREACHABLE:
+            return (
+                "I can't currently reach the development backend to check on this, so I "
+                "don't know whether it finished. This conversation is ready for another "
+                "message whenever you'd like."
+            )
+        if reason == InterruptionReason.NO_RESPONSE_IN_TIME:
+            return (
+                "Hermes hasn't reported back within the expected time — something may "
+                "have gone wrong with that request."
+            )
+        raise ValueError(f"unknown interruption reason: {reason!r}")
+
+
+def _backend_confirmed_restarted_since(
+    base_url: str, dispatch_time: float, *, health_fn=fetch_engram_health,
+) -> bool:
+    """True only if engram-engine answers /health right now AND its own reported
+    process start time (now - uptimeSeconds) is AFTER dispatch_time — i.e. the
+    JVM currently running is provably not the one that dispatched this
+    assignment. False covers both "definitely still the same instance" and
+    "can't tell right now" identically; a caller that needs to distinguish those
+    checks reachability itself (see this function's own call sites).
+    """
+    reachable, uptime = health_fn(base_url)
+    if not reachable or uptime is None:
+        return False
+    return (time.time() - uptime) > dispatch_time
+
+
 def _deliver_hermes_completion(
     config: dict[str, Any],
     store: RunStore,
@@ -792,6 +871,8 @@ def _deliver_hermes_completion(
     max_wait_seconds: float = HERMES_COMPLETION_MAX_WAIT_SECONDS,
     poll_interval_seconds: float = HERMES_COMPLETION_POLL_INTERVAL_SECONDS,
     fetch_fn=fetch_hermes_assignment_completion,
+    dispatch_time: float | None = None,
+    health_fn=fetch_engram_health,
 ) -> None:
     """Runs in a background thread, one per delegation-triggering turn. Polls
     /debug/hermes-assignment/{assignment_id} — the explicit delivery channel,
@@ -801,16 +882,30 @@ def _deliver_hermes_completion(
     on its next poll and renders/persists it automatically: no further user
     message, no new vendor-source patch (see PENDING_HERMES_STATUS's doc).
 
-    This function is pure transport for whatever it gets back: `completion["text"]`
-    is already the Director's own composed reply (HermesCompletionDirector, Kotlin
-    side, decides accept/withhold and writes the exact wording) — this adapter
-    renders it verbatim and must never wrap, rephrase, or branch on `executionOutcome`/
-    `decision` itself. The one exception is the timeout branch below, where
-    engram-engine never got a chance to decide anything at all, because no
-    response ever arrived here.
+    This function is pure transport for a real completion: `completion["text"]`
+    is already `HermesCompletionDirector`'s own composed reply (Kotlin side,
+    decides accept/withhold and writes the exact wording) — this adapter renders
+    it verbatim and must never wrap, rephrase, or branch on `executionOutcome`/
+    `decision` itself. Every branch below where no completion was ever recorded
+    delegates its own wording to `InterruptionDirector` instead — see that
+    class's own doc for why this adapter, not the Kotlin Director, is entitled to
+    decide those specific cases.
 
-    fetch_fn is injectable purely for testing this function's own logic
-    (timeout vs. a real completion arriving) without real HTTP or real time.
+    dispatch_time (when given — run_turn always supplies it; reconciliation's own
+    resumed-poll call site does too) lets THIS ALREADY-RUNNING thread notice a
+    confirmed backend restart within a few poll_interval_seconds, rather than
+    only discovering it later, and only if the adapter itself also happens to
+    restart, via reconcile_interrupted_assignments at some future startup. This
+    is what makes "restart only engram-dev.service, adapter untouched" recover
+    promptly instead of silently falling through to the plain, slower
+    NO_RESPONSE_IN_TIME timeout at max_wait_seconds. Omitting dispatch_time (as
+    every pre-existing test of this function's core accept/withhold/timeout
+    mechanics does) disables only this one early-exit check — every other
+    behavior is unchanged.
+
+    fetch_fn/health_fn are injectable purely for testing this function's own
+    logic (timeout vs. a real completion vs. a confirmed restart) without real
+    HTTP or real time.
 
     Runs exactly once per run_id (run_turn spawns exactly one such thread per
     delegation) and always finalizes to a real terminal status before
@@ -819,22 +914,23 @@ def _deliver_hermes_completion(
     """
     deadline = time.time() + max_wait_seconds
     completion: dict[str, Any] | None = None
+    confirmed_restart = False
     while time.time() < deadline:
         completion = fetch_fn(
             config["engram_base_url"], config["engram_debug_token"], assignment_id, config["synthetic_user_id"],
         )
         if completion is not None:
             break
+        if dispatch_time is not None and _backend_confirmed_restarted_since(
+            config["engram_base_url"], dispatch_time, health_fn=health_fn,
+        ):
+            confirmed_restart = True
+            break
         time.sleep(poll_interval_seconds)
 
     if completion is None:
-        # The one case this adapter itself is entitled to compose wording for: engram-engine
-        # never got a chance to decide anything, because no response ever arrived here at all.
-        # Every other case below is a real Director decision (HermesCompletionDirector, Kotlin
-        # side) — its `text` is rendered exactly as received, never rewrapped or reinterpreted.
-        delivery_text = (
-            "Hermes hasn't reported back within the expected time — something may "
-            "have gone wrong with that request."
+        delivery_text = InterruptionDirector.decide(
+            InterruptionReason.CONFIRMED_BACKEND_RESTART if confirmed_restart else InterruptionReason.NO_RESPONSE_IN_TIME,
         )
         final_status = TERMINAL_ERROR_STATUS
     else:
@@ -866,8 +962,21 @@ def _deliver_hermes_completion(
     # see persist_webui_session_messages's own doc for why that assumption does not
     # hold here (no browser may be watching after a restart, or the tab may simply be
     # closed). Also removes this assignment's durable marker: whatever happened here
-    # (a real completion, a timeout) is now fully recorded, so a future adapter
-    # restart must not try to reconcile it again.
+    # (a real completion, a timeout, a confirmed restart) is now fully recorded, so a
+    # future adapter restart must not try to reconcile it again.
+    #
+    # THE ONE ACCEPTED CRASH WINDOW in this whole feature is exactly between these two
+    # calls: both are separate local filesystem writes, not one atomic operation. If
+    # THIS adapter process is killed after persist_webui_session_messages returns but
+    # before _remove_pending_marker completes, the marker survives even though its
+    # resolution already reached disk. The next adapter startup's reconciliation pass
+    # then finds that same marker, does not know it was already resolved, and appends
+    # this exact turn (the same user message + the same resolution text) a SECOND
+    # time. User-visible consequence: that one exchange appears twice, back to back,
+    # in the conversation transcript — not silence, not corruption, just a duplicated
+    # pair of messages. Narrow (microseconds, two sequential local writes with nothing
+    # else between them) and not engineered around further — see deploy/README.md's
+    # "Remaining limits" for why this is accepted rather than papered over.
     persist_webui_session_messages(config.get("webui_sessions_dir"), webui_session_id, updated_transcript)
     _remove_pending_marker(config.get("hermes_pending_dir"), assignment_id)
 
@@ -916,6 +1025,12 @@ def _finalize_reconciled_marker(
     its marker. Shared by every reconcile_interrupted_assignments branch that
     resolves immediately, rather than by resuming a live poll (see
     _deliver_hermes_completion for that path's own equivalent cleanup).
+
+    Carries the exact same accepted crash-window risk as
+    _deliver_hermes_completion's own equivalent tail, for the identical reason: the
+    write below and the marker removal are two separate local filesystem
+    operations, not one atomic step. See that function's own doc for the precise
+    window and its user-visible consequence (a duplicated turn, not silence).
     """
     sessions_dir = config.get("webui_sessions_dir")
     existing = load_persisted_webui_messages(sessions_dir, webui_session_id)
@@ -944,7 +1059,12 @@ def reconcile_interrupted_assignments(
     (i.e. THIS adapter process restarted before that turn ever resolved), decides
     — and truthfully delivers — exactly what happened, then removes the marker.
     Never re-dispatches to Hermes; the backend, not this function, is what actually
-    executes/owns an assignment (see this module's own top-of-file doc).
+    executes/owns an assignment (see this module's own top-of-file doc). This
+    function decides WHICH of the three outcomes below applies, using /health —
+    but the actual delivered wording for the first two, where nothing was ever
+    recorded, is `InterruptionDirector`'s alone (see that class's own doc);
+    the third case delivers `HermesCompletionDirector`'s real, already-recorded
+    text verbatim, exactly like the ordinary path.
 
     The one piece of information that makes an honest decision possible at all:
     engram-engine's /health now reports uptimeSeconds (added for unrelated
@@ -984,11 +1104,7 @@ def reconcile_interrupted_assignments(
             _finalize_reconciled_marker(
                 config, pending_dir,
                 assignment_id=assignment_id, webui_session_id=webui_session_id, user_message=user_message,
-                combined_text=f"{ack_text}\n\n" + (
-                    "I can't currently reach the development backend to check on this, so I "
-                    "don't know whether it finished. This conversation is ready for another "
-                    "message whenever you'd like."
-                ),
+                combined_text=f"{ack_text}\n\n{InterruptionDirector.decide(InterruptionReason.BACKEND_UNREACHABLE)}",
             )
             continue
 
@@ -997,11 +1113,7 @@ def reconcile_interrupted_assignments(
             _finalize_reconciled_marker(
                 config, pending_dir,
                 assignment_id=assignment_id, webui_session_id=webui_session_id, user_message=user_message,
-                combined_text=f"{ack_text}\n\n" + (
-                    "The development backend restarted while this was still outstanding, so "
-                    "there's no way for me to confirm whether it finished. This conversation is "
-                    "ready for another message whenever you'd like."
-                ),
+                combined_text=f"{ack_text}\n\n{InterruptionDirector.decide(InterruptionReason.CONFIRMED_BACKEND_RESTART)}",
             )
             continue
 
@@ -1035,6 +1147,11 @@ def reconcile_interrupted_assignments(
                 "max_wait_seconds": max_wait_seconds,
                 "poll_interval_seconds": poll_interval_seconds,
                 "fetch_fn": fetch_fn,
+                # So a SECOND restart while this resumed poll is still running is caught
+                # promptly too, not just at the next adapter startup — same reasoning as
+                # run_turn's own original dispatch (see _deliver_hermes_completion's doc).
+                "dispatch_time": created_at,
+                "health_fn": health_fn,
             },
             daemon=True,
         )

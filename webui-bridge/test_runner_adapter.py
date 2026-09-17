@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import unittest
 from http.client import HTTPConnection
 from unittest.mock import patch
@@ -950,6 +951,10 @@ class RunTurnHermesDelegationTest(unittest.TestCase):
         self.assertEqual(thread_args[3], "w-1")
         self.assertEqual(thread_args[4], "assign-1")
         self.assertTrue(kwargs.get("daemon"))
+        # dispatch_time lets the delivery thread notice a confirmed backend restart
+        # itself, without needing the adapter to also restart first — see
+        # _deliver_hermes_completion's own doc.
+        self.assertIsInstance(kwargs["kwargs"]["dispatch_time"], (int, float))
         mock_threading.Thread.return_value.start.assert_called_once()
 
     def test_a_turn_with_no_delegation_in_the_trace_behaves_exactly_as_before(self):
@@ -1030,6 +1035,142 @@ class HandleCancelRequestTest(unittest.TestCase):
         record_b = self.store.get(run_b)
         self.assertEqual(record_b["status"], ra.PENDING_HERMES_STATUS)
         self.assertEqual(record_b["assignment_id"], "assign-b")
+
+
+class InterruptionDirectorTest(unittest.TestCase):
+    """InterruptionDirector is the one place this adapter decides/authors
+    interruption wording — this pins its exact output per reason, independent of
+    whatever calls it (_deliver_hermes_completion, reconcile_interrupted_assignments).
+    """
+
+    def test_confirmed_backend_restart_never_claims_success_or_a_definite_stop_or_failure(self):
+        text = ra.InterruptionDirector.decide(ra.InterruptionReason.CONFIRMED_BACKEND_RESTART)
+        self.assertIn("backend restarted", text)
+        self.assertIn("no way for me to confirm", text)
+        for forbidden in ("Hermes finished", "stopped", "failed"):
+            self.assertNotIn(forbidden, text)
+
+    def test_backend_unreachable_is_distinct_wording_from_confirmed_restart(self):
+        text = ra.InterruptionDirector.decide(ra.InterruptionReason.BACKEND_UNREACHABLE)
+        self.assertIn("can't currently reach", text)
+        self.assertNotIn("restarted", text, "must not claim a confirmed restart when the truth is merely 'unreachable'")
+
+    def test_no_response_in_time_preserves_the_original_pre_existing_wording(self):
+        text = ra.InterruptionDirector.decide(ra.InterruptionReason.NO_RESPONSE_IN_TIME)
+        self.assertIn("hasn't reported back", text)
+
+    def test_unknown_reason_raises_rather_than_silently_composing_something(self):
+        with self.assertRaises(ValueError):
+            ra.InterruptionDirector.decide("not-a-real-reason")
+
+
+class BackendConfirmedRestartedSinceTest(unittest.TestCase):
+    def test_true_when_reported_start_time_is_after_dispatch(self):
+        with patch.object(ra, "time") as mock_time:
+            mock_time.time.return_value = 2000.0  # now=2000, uptime=5 -> started at 1995
+            result = ra._backend_confirmed_restarted_since("http://x", dispatch_time=1000.0, health_fn=lambda base_url: (True, 5.0))
+        self.assertTrue(result)
+
+    def test_false_when_reported_start_time_is_before_dispatch_same_instance(self):
+        with patch.object(ra, "time") as mock_time:
+            mock_time.time.return_value = 1050.0  # now=1050, uptime=100 -> started at 950
+            result = ra._backend_confirmed_restarted_since("http://x", dispatch_time=1000.0, health_fn=lambda base_url: (True, 100.0))
+        self.assertFalse(result)
+
+    def test_false_when_unreachable_never_claims_a_restart_it_cannot_confirm(self):
+        result = ra._backend_confirmed_restarted_since("http://x", dispatch_time=1000.0, health_fn=lambda base_url: (False, None))
+        self.assertFalse(result)
+
+
+class DeliverHermesCompletionLiveRestartDetectionTest(unittest.TestCase):
+    """Covers the acceptance gap a plain adapter-only restart doesn't exercise:
+    restarting ONLY engram-dev.service while this thread is already running and
+    polling. Without dispatch_time/health_fn, this thread would poll uselessly
+    for the full max_wait_seconds before falling back to the generic
+    NO_RESPONSE_IN_TIME message — these tests pin the faster, more specific path.
+    """
+
+    def setUp(self):
+        self.store = ra.RunStore()
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.ack_text = "I've asked Hermes to look into it."
+        transcript = self.store.append_turn_messages("w-1", "check the fixture", self.ack_text)
+        self.ack_index = len(transcript) - 1
+        self.run_id = self.store.create(
+            webui_session_id="w-1", events=[{"event": "token", "seq": 1, "payload": {"text": self.ack_text}}],
+            status=ra.PENDING_HERMES_STATUS,
+        )
+
+    def test_a_confirmed_restart_detected_mid_poll_delivers_promptly_not_after_the_full_timeout(self):
+        calls = {"health": 0}
+
+        def _health(base_url):
+            calls["health"] += 1
+            return True, 5.0  # backend uptime 5s — far less than this test's own elapsed dispatch age
+
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            max_wait_seconds=30.0, poll_interval_seconds=0.01,  # would take 30s WITHOUT the early exit below
+            fetch_fn=lambda *a, **k: None,
+            dispatch_time=time.time() - 100.0,  # dispatched well before this "restarted" backend's own uptime
+            health_fn=_health,
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS)
+        self.assertIn("backend restarted", record["events"][1]["payload"]["text"])
+        self.assertGreater(calls["health"], 0, "the health check must actually have been consulted")
+
+    def test_same_instance_still_times_out_normally_with_the_generic_message(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            max_wait_seconds=0.03, poll_interval_seconds=0.01,
+            fetch_fn=lambda *a, **k: None,
+            dispatch_time=time.time(),
+            health_fn=lambda base_url: (True, 999.0),  # backend has been up far longer than dispatch_time — same instance
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS)
+        self.assertIn("hasn't reported back", record["events"][1]["payload"]["text"])
+        self.assertNotIn("restarted", record["events"][1]["payload"]["text"])
+
+    def test_unreachable_health_during_the_wait_does_not_falsely_confirm_a_restart(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            max_wait_seconds=0.03, poll_interval_seconds=0.01,
+            fetch_fn=lambda *a, **k: None,
+            dispatch_time=time.time(),
+            health_fn=lambda base_url: (False, None),
+        )
+        record = self.store.get(self.run_id)
+        self.assertIn("hasn't reported back", record["events"][1]["payload"]["text"])
+
+    def test_no_dispatch_time_given_never_consults_health_at_all_unchanged_legacy_behavior(self):
+        called = {"health": False}
+
+        def _health(base_url):
+            called["health"] = True
+            return True, 0.0
+
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            max_wait_seconds=0.02, poll_interval_seconds=0.01,
+            fetch_fn=lambda *a, **k: None,
+            health_fn=_health,  # would immediately "confirm" a restart if ever consulted
+        )
+        self.assertFalse(called["health"], "omitting dispatch_time must disable this check entirely, matching every pre-existing caller of this function")
+        record = self.store.get(self.run_id)
+        self.assertIn("hasn't reported back", record["events"][1]["payload"]["text"])
+
+    def test_a_real_completion_arriving_first_is_delivered_even_with_dispatch_time_set(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            dispatch_time=time.time(),
+            health_fn=lambda base_url: (True, 5.0),  # would look like a restart, but a real completion wins first
+            fetch_fn=lambda *a, **k: {"executionOutcome": "Completed", "decision": "Accepted", "text": "DH-FIXTURE-abc123"},
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
+        self.assertIn("DH-FIXTURE-abc123", record["events"][1]["payload"]["text"])
 
 
 class DeliverHermesCompletionTest(unittest.TestCase):
@@ -1477,6 +1618,11 @@ class ReconcileInterruptedAssignmentsTest(unittest.TestCase):
         self.assertEqual(kwargs["args"][3], "w-1")
         self.assertEqual(kwargs["args"][4], "assign-1")
         self.assertTrue(kwargs.get("daemon"))
+        # The resumed poll must ALSO carry the original dispatch_time forward — so a
+        # second restart while it's still waiting is caught promptly too, not only
+        # discoverable via a third adapter startup.
+        self.assertEqual(kwargs["kwargs"]["dispatch_time"], 1000.0)
+        self.assertIn("health_fn", kwargs["kwargs"])
         mock_threading.Thread.return_value.start.assert_called_once()
         # The marker is deliberately left in place — the resumed thread (mocked away here,
         # so it never actually runs) is what would remove it once it concludes.

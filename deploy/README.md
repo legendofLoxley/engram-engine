@@ -241,7 +241,9 @@ conversation happen to be in flight at that exact moment.
 ## Interrupted-conversation recovery
 
 Implemented and verified live on 2026-09-17, on `codex/interrupted-conversation-recovery`
-(branched from the packaging commit above). Directly follows from "Observed:
+(branched from the packaging commit above; two increments, commits `2344886`
+then `<follow-up>` after an acceptance re-check found and closed a real gap —
+see "Follow-up correction" below). Directly follows from "Observed:
 mid-assignment restart behavior" — a bounded fix for exactly the two failure
 modes documented there, not a general durable job queue and not automatic
 task resumption. Nothing in the Kotlin backend changed: the two facts this
@@ -282,16 +284,29 @@ was inspected directly:
   every resolution (not just during reconciliation), which incidentally
   closes a related pre-existing gap: a closed browser tab no longer causes an
   ordinarily-successful delegation's result to go unpersisted either.
+- `InterruptionDirector`/`InterruptionReason` (added in the follow-up
+  correction — see below) is the one place this adapter itself decides and
+  authors interruption wording, mirroring `HermesCompletionDirector`
+  (Kotlin)'s own role and doc pattern. **Where the interruption response is
+  decided and authored:** every case it covers is one where the real
+  `HermesCompletionDirector` cannot be consulted at all — either the JVM that
+  owned the assignment has been replaced by a restart, or engram-engine is
+  currently unreachable — so it is never bypassing a reachable Director, only
+  filling in where none exists to ask. No model call: composing a plain,
+  honest, reason-scoped sentence needs none.
+- `_deliver_hermes_completion`'s own poll loop (not just reconciliation) now
+  also calls `fetch_engram_health` — see "Follow-up correction" below for why
+  this was added and what gap it closes.
 - `reconcile_interrupted_assignments` runs once, in a background thread, at
-  adapter startup. For each leftover marker, `fetch_engram_health` distinguishes:
-  - **Health unreachable** (bounded retry, ~30s) → "can't currently confirm,"
-    never a claimed stop/failure.
+  adapter startup — for whatever a delivery thread could not resolve itself
+  because it died with a previous *adapter* process. For each leftover
+  marker, `fetch_engram_health` distinguishes:
+  - **Health unreachable** (bounded retry, ~30s) → `InterruptionDirector`
+    reports "can't currently confirm," never a claimed stop/failure.
   - **Backend's reported uptime started after the marker's dispatch time**
     → confirmed loss (the JVM that owned `HermesActiveAssignmentRegistry`/
     `HermesAssignmentCompletionStore` for this assignment no longer exists) →
-    an honest, Director-voiced interruption notice, composed by the adapter
-    itself for the same reason the pre-existing 240s-timeout message already
-    is (engram-engine never got a chance to decide anything).
+    `InterruptionDirector`'s honest interruption notice.
   - **Backend is the same instance** (only the adapter restarted) → the
     assignment was never actually lost. Either its completion is already
     recorded (delivered verbatim, no adapter restart symptom visible at all
@@ -300,14 +315,27 @@ was inspected directly:
 
 **Never automatically replays an interrupted action** — every branch above
 either reports honestly or resumes *reading* an assignment the backend
-already owns; none of them re-invoke `HermesAcpClient`. Repeated
-reconciliation is idempotent by construction: each marker is removed exactly
-once, by whichever path resolves it, so a second reconciliation pass (or a
-second adapter restart before the first fully resolves) finds nothing left to
-duplicate. One accepted, narrow race: a crash between the direct session-file
-write and the marker's removal would cause the *next* startup to reconcile
-the same marker again, duplicating that one turn in the transcript — a
-dev-tool-scoped risk, not engineered around further (see "Remaining limits").
+already owns; none of them re-invoke `HermesAcpClient`.
+
+**Accepted crash window — stated precisely, not as a blanket "idempotent by
+construction" claim.** Each marker is removed exactly once, by whichever path
+resolves it — under normal operation (no crash) this is exactly what makes a
+second reconciliation pass, or a second adapter restart before the first
+fully resolves, find nothing left to duplicate. But `persist_webui_session_messages`
+(writing the resolved turn to the session file) and `_remove_pending_marker`
+(deleting the marker) are two separate local filesystem operations, not one
+atomic step, in both `_deliver_hermes_completion`'s tail and
+`_finalize_reconciled_marker`. **The exact window**: if this adapter process
+is killed after the first call returns but before the second completes, the
+marker survives even though its resolution already reached disk. **The
+user-visible consequence**: the next adapter startup's reconciliation finds
+that same marker, has no way to know it was already resolved, and appends the
+identical turn (same user message, same resolution text) a second time —
+that one exchange appears twice, back to back, in the transcript. Not
+silence, not corruption, not data loss — a duplicated pair of messages.
+Narrow (microseconds, nothing else runs between the two calls) and accepted
+rather than adding cross-process file locking for this bounded, dev-only
+feature.
 
 **Live-demonstrated, both restart targets, using the same test-only delay
 gate as the cancellation work above (reverted to 0 immediately after):**
@@ -320,14 +348,17 @@ gate as the cancellation work above (reverted to 0 immediately after):**
   ("...Hermes finished checking that — it reported: DH-FIXTURE-7f2a91c4"),
   fully persisted. Reload showed it correctly; a follow-up message in the
   same conversation answered normally. **Zero data loss.**
-- **Backend restart** (`engram-dev.service`, then the adapter to trigger
-  reconciliation): confirmed via `/health` (`uptimeSeconds: 1`) that the
-  backend was a fresh instance relative to the marker's dispatch time.
-  Reconciliation delivered: *"The development backend restarted while this
-  was still outstanding, so there's no way for me to confirm whether it
-  finished. This conversation is ready for another message whenever you'd
-  like."* — persisted, reload-correct, and a follow-up message in the same
-  conversation worked normally afterward.
+- **Backend restart, runner adapter left running throughout** (the acceptance
+  re-check this follow-up closes — see below): triggered a real delegation,
+  confirmed the runner-adapter process's own PID unchanged before and after,
+  restarted only `engram-dev.service` (confirmed via `/health` →
+  `uptimeSeconds: 1`, a fresh JVM). The already-running delivery thread
+  detected the confirmed restart itself and delivered *"The development
+  backend restarted while this was still outstanding, so there's no way for
+  me to confirm whether it finished. This conversation is ready for another
+  message whenever you'd like."* within about a second — not the old 240s
+  generic timeout, and with no adapter restart at all. Reload-correct; a
+  follow-up message answered normally.
 - **Regression check** (gate reverted to 0, no restarts): an ordinary
   delegation still completes and delivers correctly, and leaves no leftover
   marker.
@@ -337,12 +368,49 @@ gate as the cancellation work above (reverted to 0 immediately after):**
   own message — matching "Observed: mid-assignment restart behavior" above
   exactly.
 
-**Tests:** 145 Python tests, 0 failures (up from 111) — new coverage for the
+**Tests:** 157 Python tests, 0 failures (up from 111) — new coverage for the
 marker read/write/remove cycle, direct session-file persistence, every
 reconciliation branch (health-unreachable, confirmed-restart, already-resolved,
 resume-and-wait, malformed marker, multiple markers, non-duplication across a
-second pass), and `fetch_engram_health`. 828 Kotlin tests, 0 failures
-(unchanged — no Kotlin file was touched).
+second pass), `fetch_engram_health`, `InterruptionDirector`'s exact wording
+per reason, and `_deliver_hermes_completion`'s own live restart-detection
+(prompt confirmed-restart delivery, same-instance still times out normally,
+an unreachable health check never falsely confirms a restart, omitting
+`dispatch_time` leaves every pre-existing caller's behavior unchanged). 828
+Kotlin tests, 0 failures (unchanged — no Kotlin file was touched).
+
+### Follow-up correction — same day, before merge
+
+An acceptance re-check on the first version of this increment (commit
+`2344886`) found two real problems, both closed here, before anything was
+merged or deployed:
+
+1. **A live-reconciliation gap**: restarting *only* `engram-dev.service`,
+   with the runner adapter left running the whole time, was never actually
+   exercised. It turned out to genuinely work, but slowly and less
+   informatively than it should have — `reconcile_interrupted_assignments`
+   only ever runs at *adapter* startup, so a backend-only restart left the
+   already-running delivery thread polling a fresh, empty JVM for the full
+   240s `max_wait_seconds` ceiling before falling back to the generic "Hermes
+   hasn't reported back... something may have gone wrong" message, never the
+   more specific and accurate confirmed-restart wording. Fixed: that same
+   thread's own poll loop now also calls `fetch_engram_health`, using the
+   same dispatch-time comparison reconciliation already used, so it detects
+   and reports a confirmed restart itself within a couple of poll intervals
+   — verified live above, resolving in about a second instead of up to four
+   minutes, without needing the adapter to restart at all.
+2. **The interruption text was composed ad hoc, inline, at each call site** —
+   the same two sentences duplicated (and slightly divergent) between
+   `_deliver_hermes_completion` and `reconcile_interrupted_assignments`, with
+   no single named place answering "who decided this, and where." Fixed by
+   extracting `InterruptionDirector`/`InterruptionReason` (see "What was
+   built" above) as the one place this adapter itself authors this wording,
+   analogous to how `HermesCompletionDirector` (Kotlin) is the one place
+   every *ordinary* outcome is decided. This is a structural/traceability fix,
+   not a wording change — every message's actual text is unchanged.
+
+Tests grew from 145 to 157 covering both fixes directly. No merge, no
+deployment, still on `codex/interrupted-conversation-recovery`.
 
 ## Verification results — September 17, 2026
 
@@ -421,8 +489,9 @@ committing this directory.
   new units get modest, not maximal, sandboxing (see the units' own comments
   for why). This is an intentional trade against the box's own documented
   `ReadWritePaths` misconfiguration history, not an oversight.
-- Full-host-reboot survival is prepared but **not yet executed** — see
-  "Reboot check" below.
+- Full-host-reboot survival was verified — see "Reboot check" below. External/
+  off-host network reachability for the 8081 hardening task was not re-run as
+  part of that reboot (needs a second network vantage point).
 - This is not the OTA app-track. There is no signed manifest, no CDN
   release, no automatic rollback-on-failed-probe for this stack — rollback
   here is the manual git/rebuild/restart procedure above.
@@ -431,12 +500,10 @@ committing this directory.
   cannot be resolved (e.g. engram-engine stays unreachable well past the
   ~30s health-retry window) is still finalized — as "can't currently
   confirm," not retried on a later restart. There is no periodic re-check.
-- **One accepted crash-window race**: if the adapter process dies between
-  writing a reconciled turn to the session file and removing that turn's
-  marker, the next startup reconciles the same marker again, duplicating
-  that one turn in the transcript. Narrow (two local disk writes apart) and
-  scoped to this dev-only recovery path; not engineered around further (see
-  that section's own doc for why).
+- **One accepted crash-window race, precisely bounded**: see
+  "Interrupted-conversation recovery"'s own "Accepted crash window" for the
+  exact two-call gap and its exact consequence (one turn duplicated, not
+  lost) — not engineered around further for this dev-only feature.
 - **A mid-flight backend restart still loses the in-flight Hermes container's
   own result**, even with recovery in place — the orphaned container's
   actual output (if any) is never ingested into the graph, only the fact
@@ -452,25 +519,61 @@ committing this directory.
   concurrent activity) and accepted for this bounded feature rather than
   adding real locking.
 
-## Reboot check (prepared, awaiting an operator-chosen window)
+## Reboot check — performed and passed, 2026-09-17
 
-Coordinated with the still-open post-reboot item on the arx-box 8081
-hardening task. A single `sudo reboot`, once triggered, will exercise both
-checklists in one pass:
+Coordinated with the (now-closed) post-reboot item on the arx-box 8081
+hardening task. Performed after `codex/reproducible-local-package` was
+fast-forward merged to `master` (`7752940` → `7903a62`, no force-push, no
+production files touched) and pushed, with an explicit go-ahead including the
+DigitalOcean auto-deployment that push would trigger.
 
-1. `llama-server.service` restarts (`enabled`, `Restart=on-failure`) and both
-   its existing consumers still work (dev engine `reasonProvider: local`;
-   `hermes-halo` gets HTTP 200 from `host.docker.internal:8081/v1/models`).
-2. The 4 firewalld rich-rules blocking LAN access to :8081 are still present
-   (runtime + permanent) after the reboot.
-3. `engram-dev.service` and `hermes-runner-adapter.service` are both
-   `active (running)` without manual intervention
-   (`systemctl is-active engram-dev hermes-runner-adapter`).
-4. `hermes-webui-dev` is back up via Docker's own `unless-stopped` policy
-   (`docker inspect hermes-webui-dev --format '{{.State.Status}}'`), not a
-   manual re-run of `run-hermes-webui-dev.sh`.
-5. A fresh WebUI conversation still round-trips through to the Director
-   after the reboot (not just that the ports are open).
+**Pre-reboot baseline**: git SHA `7903a62` on `master`; graph total **829**
+records (full per-type breakdown recorded); 3 known transcript files hashed;
+`zephyr-quokka-42` and the "Cobalt Lantern demo" facts confirmed present via
+direct graph query; all services/containers active; all 4 firewalld rules
+present.
 
-**This reboot has not been performed.** It is intentionally left for the
-operator to trigger at a chosen time.
+`sudo systemctl reboot`, authorized. This session's own shell access to the
+box was interrupted as expected — the harness reconnected automatically once
+the box came back, no manual polling needed.
+
+**Post-reboot results, all passed:**
+
+1. `engram-dev.service` and `hermes-runner-adapter.service` both came up via
+   their `enabled` systemd units with **no manual intervention**
+   (the adapter correctly waited on `docker.service` per its own
+   `After=`/`Wants=` ordering before binding).
+2. All four Docker containers (dev + the three production ones) came back
+   via `--restart unless-stopped` with zero manual `docker start`;
+   `llama-server.service` came back via systemd, same as before.
+3. The 4 firewalld rich-rules blocking LAN access to :8081 were still
+   present, in both runtime and permanent config, after the reboot.
+4. **Graph**: **829/829**, identical per type, after an actual hardware
+   reboot (not just a service restart). **Transcripts**: all 3 reference
+   session files byte-identical. **Specific evidence**: both previously
+   confirmed facts re-verified present with identical uid/timestamp.
+5. A real local-model turn via `/debug/converse` returned
+   `reasonProvider: "local"` with the real GGUF path; `hermes-halo`'s own
+   connectivity check to `host.docker.internal:8081/v1/models` returned
+   HTTP 200 — both existing consumers of `llama-server.service` confirmed
+   working, not just that the port reopened.
+6. A fresh WebUI conversation round-tripped through to the Director after
+   the reboot: one blocker along the way — the operator's own desktop SSH
+   tunnel didn't survive the box's reboot (browser showed "Connection Lost");
+   the box's own local checks confirmed the WebUI container was healthy the
+   whole time, isolating the issue to the tunnel, not this stack. Once the
+   tunnel was restarted, a fresh assignment (`150762bb-…`) completed in
+   ~32s, independently confirmed via the debug endpoint and the live,
+   persisted WebUI transcript.
+
+**Not re-run**: external/off-host reachability for the 8081 LAN-blocked /
+tailnet-reachable probes — that needs a second network vantage point, same
+limitation as the original (pre-reboot) hardening pass, not something this
+session can perform alone. **DigitalOcean**: `alfrd.app/health`'s uptime
+dropped shortly after the push, consistent with the new build having rolled
+out, but this environment still has no direct DO API/deployment-history
+access to confirm the exact deployed commit with certainty — the dashboard
+remains authoritative if that's needed.
+
+Full detail: [Run a reproducible local Alfrd instance on Arx](https://app.notion.com/p/5eccc77291574d9b9cdd048a2ae97840),
+"Merged to master, box rebooted, full verification passed — September 17, 2026."
