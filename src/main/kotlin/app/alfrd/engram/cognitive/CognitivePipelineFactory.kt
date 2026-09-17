@@ -6,6 +6,7 @@ import app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator
 import app.alfrd.engram.cognitive.pipeline.Interpreter
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAcpClient
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatcher
 import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
@@ -36,14 +37,17 @@ import com.arcadedb.database.Database
 object CognitivePipelineFactory {
 
     /**
-     * @param enableHermesDelegation Wires a real [HermesDelegationDispatcher] into the returned
-     *   pipeline (only possible when [db] is non-null — it shares the same `ActorEventIngestionService`
-     *   dependencies as `/debug/actor-event`). Defaults to `false` so every existing call site
-     *   (including every test that constructs a pipeline via this factory) is unaffected. Pass
-     *   `true` only for the isolated debug/dev session pool this bounded slice targets — see
-     *   `Application.kt`'s `DEBUG_CONVERSE_ENABLED` block.
+     * @param hermesCompletionStore When non-null (and [db] is non-null), wires a real
+     *   [HermesDelegationDispatcher] into the returned pipeline, sharing this SAME store instance
+     *   — callers must pass one shared instance across every pipeline built for a session pool
+     *   (one per `SessionManager` factory invocation, i.e. one per session), not a fresh one per
+     *   call, or a completion recorded by one session's pipeline would be invisible to whatever
+     *   polls the store afterward. Null (the default) preserves today's behavior byte-for-byte —
+     *   every existing call site, including every test that constructs a pipeline via this
+     *   factory, is unaffected. Pass a real, shared store only for the isolated debug/dev session
+     *   pool this bounded slice targets — see `Application.kt`'s `DEBUG_CONVERSE_ENABLED` block.
      */
-    fun create(db: Database? = null, sessionManager: SessionManager? = null, enableHermesDelegation: Boolean = false): CognitivePipeline {
+    fun create(db: Database? = null, sessionManager: SessionManager? = null, hermesCompletionStore: HermesAssignmentCompletionStore? = null): CognitivePipeline {
         val anthropicKey = System.getenv("ANTHROPIC_API_KEY") ?: ""
         val googleKey    = System.getenv("GOOGLE_AI_API_KEY") ?: ""
 
@@ -95,7 +99,7 @@ object CognitivePipelineFactory {
         // Shares the exact dependency shape DebugActorEventRoutes.kt already builds for
         // /debug/actor-event — same ActorEventIngestionService construction, just handed to a
         // real dispatcher instead of a debug-token-gated HTTP handler.
-        val hermesDelegationDispatcher = if (enableHermesDelegation && db != null) {
+        val hermesDelegationDispatcher = if (hermesCompletionStore != null && db != null) {
             val horizonGraphStore = ArcadeHorizonGraphStore(db)
             val horizonAssembler = ArcadeHorizonAssembler(db)
             val ingestionService = ActorEventIngestionService(
@@ -103,7 +107,7 @@ object CognitivePipelineFactory {
                 horizonGraphStore = horizonGraphStore,
                 horizonPropagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler),
             )
-            HermesDelegationDispatcher(HermesAcpClient(), ingestionService)
+            HermesDelegationDispatcher(HermesAcpClient(), ingestionService, hermesCompletionStore)
         } else null
 
         return CognitivePipeline(

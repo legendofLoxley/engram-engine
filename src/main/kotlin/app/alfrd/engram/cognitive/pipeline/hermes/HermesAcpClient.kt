@@ -253,13 +253,27 @@ class HermesAcpClient(
         val sessionId = sessionResult["sessionId"]?.jsonPrimitive?.contentOrNull
             ?: return HermesAssignmentOutcome.Failed("session/new returned no sessionId")
 
+        // Sent as an ABSOLUTE path, not assignment.task verbatim (a relative filename +
+        // relying on session/new's own cwd param) — verified live that Hermes's read_file
+        // tool does not reliably resolve a bare relative filename against the ACP session's
+        // cwd: reproduced against this exact isolated dev instance resolving instead against
+        // the agent's own install directory (/opt/hermes-agent) and failing with "File not
+        // found", then confirmed fixed by sending the absolute path directly. cwd (via
+        // session/new) plus the read-only bind mount remain the actual sandboxing mechanism
+        // ("permission limited to reading that fixture") — this only fixes how the path is
+        // named in the prompt so the tool can find it at all.
+        val absoluteFixturePath = "$containerWorkspacePath/$fixtureFilename"
         val promptId = nextId.getAndIncrement()
         sendRequest("session/prompt", buildJsonObject {
             put("sessionId", JsonPrimitive(sessionId))
             put("prompt", JsonArray(listOf(
                 buildJsonObject {
                     put("type", JsonPrimitive("text"))
-                    put("text", JsonPrimitive(assignment.task))
+                    put("text", JsonPrimitive(
+                        "Please read the file at the absolute path $absoluteFixturePath using " +
+                            "your file-reading tool, then reply with exactly the Marker value it " +
+                            "contains and nothing else.",
+                    ))
                 },
             )))
         }, promptId)

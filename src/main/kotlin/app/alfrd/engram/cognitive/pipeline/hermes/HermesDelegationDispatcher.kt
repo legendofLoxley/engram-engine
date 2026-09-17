@@ -15,24 +15,29 @@ fun interface HermesDelegationDispatching {
 
 /**
  * Dispatches one [HermesAssignment] to the real (isolated dev) Hermes runtime and, once it
- * completes, ingests the attributed result via [ActorEventIngestionService.ingest] directly —
- * exactly the path [app.alfrd.engram.api.DebugActorEventRoutes]'s own class doc names as what
- * "a production Hermes adapter would be," as opposed to going through its debug-token-gated
- * HTTP surface.
+ * completes, does two independent things with the result:
+ *
+ * 1. Ingests the attributed result via [ActorEventIngestionService.ingest] directly — exactly
+ *    the path [app.alfrd.engram.api.DebugActorEventRoutes]'s own class doc names as what "a
+ *    production Hermes adapter would be." This is graph evidence: it becomes eligible for a
+ *    *later* turn through the existing `SurfacingReason.RecentActorEvidence` Horizon pool,
+ *    subject to that pool's own eligibility/budget rules — as the design contract itself notes,
+ *    "a committed result is not proof that the user received it."
+ * 2. Records the completion in [HermesAssignmentCompletionStore] — the explicit, independent
+ *    delivery channel a caller (the WebUI runner adapter) polls by `assignmentId` to learn the
+ *    outstanding assignment's outcome and push it into the *originating* conversation, without
+ *    depending on Horizon selection at all. See that store's doc for why this is deliberately
+ *    separate from graph ingestion, not derived from it.
  *
  * Deliberately fire-and-forget, same idiom as [app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService]'s
  * own `CoroutineScope(Dispatchers.IO + SupervisorJob())` — the calling Director turn issues the
  * assignment and returns its own reply immediately; this coroutine keeps running after that
- * response has already gone to the browser. This is the concrete mechanism behind the design
- * contract's "let completion ingest when no Director turn is active": there is no code path
- * here that blocks or extends the turn that triggered the assignment. The result becomes
- * visible only on a *later* turn, through the already-existing, already-proven
- * `SurfacingReason.RecentActorEvidence` Horizon pool — no new delivery channel back into an
- * in-flight response.
+ * response has already gone to the browser.
  */
 class HermesDelegationDispatcher(
     private val client: HermesAcpClient,
     private val ingestionService: ActorEventIngestionService,
+    private val completionStore: HermesAssignmentCompletionStore,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
 ) : HermesDelegationDispatching {
     private val logger = LoggerFactory.getLogger(HermesDelegationDispatcher::class.java)
@@ -63,6 +68,12 @@ class HermesDelegationDispatcher(
                 sourceName = "hermes",
                 assignmentId = assignment.assignmentId,
                 occurredAt = System.currentTimeMillis(),
+            )
+            completionStore.record(
+                assignmentId = assignment.assignmentId,
+                userEmail = assignment.userEmail,
+                outcome = outcome,
+                graphIngestOutcome = ingestResult::class.simpleName ?: "Unknown",
             )
             logger.info(
                 "hermes-delegation completed assignmentId={} userEmail={} outcome={} ingestOutcome={}",

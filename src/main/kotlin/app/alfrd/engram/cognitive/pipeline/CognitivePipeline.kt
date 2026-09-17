@@ -702,6 +702,9 @@ open class CognitivePipeline(
             dispatcher.dispatchAsync(assignment)
             assignment
         }
+        if (debug && hermesDelegation != null) {
+            trace!!.hermesDelegation = HermesDelegationTrace(hermesDelegation.assignmentId, hermesDelegation.task)
+        }
         val baseDirective = ctx.branchResult?.directive ?: "Respond naturally and briefly."
         val directive = if (hermesDelegation != null) {
             baseDirective + "\n\nYou just asked Hermes to look into \"${HermesDelegationTrigger.FIXTURE_FILENAME}\" " +

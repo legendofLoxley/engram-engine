@@ -560,4 +560,34 @@ class CognitivePipelineHermesDelegationTest {
 
         assertFalse(response.contains("asked Hermes", ignoreCase = true), "No dispatcher wired means no delegation directive")
     }
+
+    @Test
+    fun `a dispatched assignment's id and task are surfaced on the debug trace, for a caller to correlate a later completion`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+        )
+
+        val debugResult = pipeline.processForDebug(
+            "Can you check director-hermes-fixture.txt for me?", "session-hermes-4", "user-hermes@example.com",
+        )
+
+        val assignment = dispatched.single()
+        val traced = debugResult.trace.hermesDelegation
+        assertEquals(assignment.assignmentId, traced?.assignmentId)
+        assertEquals(assignment.task, traced?.task)
+    }
+
+    @Test
+    fun `a non-matching utterance leaves the debug trace's hermesDelegation null`() = runTest {
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { },
+        )
+
+        val debugResult = pipeline.processForDebug("What time does school start?", "session-hermes-5", "user-hermes@example.com")
+
+        assertNull(debugResult.trace.hermesDelegation)
+    }
 }

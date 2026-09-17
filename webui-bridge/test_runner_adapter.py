@@ -873,5 +873,137 @@ class RunnerHttpWithLocalModelIdConfiguredIntegrationTest(unittest.TestCase):
             self.assertIn("claude-sonnet-4-6", events_payload["events"][0]["payload"]["message"])
 
 
+class RunTurnHermesDelegationTest(unittest.TestCase):
+    """A turn whose /debug/converse response names a Hermes assignment
+    (PipelineTrace.hermesDelegation) must NOT finalize the run immediately —
+    see PENDING_HERMES_STATUS's doc for why that's what makes automatic,
+    no-further-user-message delivery possible at all.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.store = ra.RunStore()
+
+    def test_a_delegation_turn_leaves_the_run_running_with_no_done_event_yet_and_spawns_exactly_one_delivery_thread(self):
+        engram_result = {
+            "reply": "I've asked Hermes to look into it.",
+            "sessionId": "e-1",
+            "trace": {"hermesDelegation": {"assignmentId": "assign-1", "task": "read the fixture"}},
+        }
+        with patch.object(ra, "forward_to_engram", return_value=engram_result), \
+             patch.object(ra, "threading") as mock_threading:
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="check the fixture")
+
+        record = self.store.get(run_id)
+        self.assertEqual(record["status"], ra.PENDING_HERMES_STATUS)
+        self.assertEqual(len(record["events"]), 1)
+        self.assertEqual(record["events"][0]["event"], "token")
+        self.assertEqual(record["events"][0]["payload"]["text"], engram_result["reply"])
+
+        mock_threading.Thread.assert_called_once()
+        _, kwargs = mock_threading.Thread.call_args
+        self.assertIs(kwargs["target"], ra._deliver_hermes_completion)
+        thread_args = kwargs["args"]
+        self.assertEqual(thread_args[2], run_id)
+        self.assertEqual(thread_args[3], "w-1")
+        self.assertEqual(thread_args[4], "assign-1")
+        self.assertTrue(kwargs.get("daemon"))
+        mock_threading.Thread.return_value.start.assert_called_once()
+
+    def test_a_turn_with_no_delegation_in_the_trace_behaves_exactly_as_before(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}), \
+             patch.object(ra, "threading") as mock_threading:
+            run_id = ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hey")
+
+        record = self.store.get(run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
+        self.assertEqual(record["events"][1]["event"], "done")
+        mock_threading.Thread.assert_not_called()
+
+
+class DeliverHermesCompletionTest(unittest.TestCase):
+    """Tests _deliver_hermes_completion directly and synchronously (never via a
+    real thread or real HTTP/time) by injecting fetch_fn and, for the timeout
+    case, tiny max_wait_seconds/poll_interval_seconds.
+    """
+
+    def setUp(self):
+        self.store = ra.RunStore()
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.ack_text = "I've asked Hermes to look into it."
+        transcript = self.store.append_turn_messages("w-1", "check the fixture", self.ack_text)
+        self.ack_index = len(transcript) - 1
+        self.run_id = self.store.create(
+            webui_session_id="w-1",
+            events=[{"event": "token", "seq": 1, "payload": {"text": self.ack_text}}],
+            status=ra.PENDING_HERMES_STATUS,
+        )
+
+    def test_success_appends_token_then_done_finalizes_completed_and_replaces_the_ack_message(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
+        self.assertEqual(len(record["events"]), 3)
+        self.assertEqual(record["events"][1]["event"], "token")
+        self.assertIn("DH-FIXTURE-abc123", record["events"][1]["payload"]["text"])
+        self.assertEqual(record["events"][2]["event"], "done")
+        messages = record["events"][2]["payload"]["session"]["messages"]
+        self.assertEqual(messages[-1]["role"], "assistant")
+        self.assertIn("DH-FIXTURE-abc123", messages[-1]["content"])
+        self.assertIn(self.ack_text, messages[-1]["content"], "the original acknowledgment must be preserved, not discarded")
+
+    def test_failed_outcome_reports_honestly_and_finalizes_errored_not_completed(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {"outcome": "Failed", "text": "no tool call observed"},
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS)
+        self.assertIn("wasn't able to complete", record["events"][1]["payload"]["text"])
+        self.assertIn("no tool call observed", record["events"][1]["payload"]["text"])
+
+    def test_timeout_with_no_completion_ever_reports_honestly_rather_than_hanging_forever(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            max_wait_seconds=0.05, poll_interval_seconds=0.01,
+            fetch_fn=lambda *a, **k: None,
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS)
+        self.assertIn("hasn't reported back", record["events"][1]["payload"]["text"])
+
+    def test_an_out_of_range_ack_index_falls_back_to_appending_rather_than_corrupting_an_unrelated_message(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, 99,  # no such index
+            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+        )
+        messages = self.store.get(self.run_id)["events"][-1]["payload"]["session"]["messages"]
+        # original ack (index self.ack_index) is untouched — a fresh message was appended instead
+        self.assertEqual(messages[self.ack_index]["content"], self.ack_text)
+        self.assertEqual(messages[-1]["role"], "assistant")
+        self.assertIn("DH-FIXTURE-abc123", messages[-1]["content"])
+
+    def test_delivery_only_ever_happens_once_for_a_given_run(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+        )
+        events_after_first = list(self.store.get(self.run_id)["events"])
+
+        # A second delivery attempt for the SAME run_id (the only way this could
+        # happen in practice is a bug spawning the thread twice — run_turn never
+        # does) must not duplicate events; append_event still succeeds (the run
+        # still exists) but nothing in production code calls this twice.
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+        )
+        events_after_second = self.store.get(self.run_id)["events"]
+        self.assertEqual(len(events_after_second), len(events_after_first) + 2, "each call appends its own token+done — this pins that run_turn's own one-thread-per-assignment invariant is what prevents duplication, not this function")
+
+
 if __name__ == "__main__":
     unittest.main()

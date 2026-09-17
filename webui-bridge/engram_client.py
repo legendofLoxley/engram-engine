@@ -1,14 +1,16 @@
-"""Pure logic for calling engram-engine's /debug/converse endpoint.
+"""Pure logic for calling engram-engine's /debug/converse and
+/debug/hermes-assignment endpoints.
 
 Shared by runner_adapter.py (the live WebUI integration). No HTTP-server
 concerns live here — just config loading, payload shaping, and the upstream
-call — so it can be unit-tested without spinning up any server.
+calls — so it can be unit-tested without spinning up any server.
 """
 from __future__ import annotations
 
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -76,3 +78,43 @@ def forward_to_engram(base_url: str, token: str, payload: dict[str, Any], timeou
     except urllib.error.HTTPError as e:
         raise UpstreamError(e.code, e.read()) from e
     return json.loads(raw)
+
+
+def fetch_hermes_assignment_completion(
+    base_url: str,
+    token: str,
+    assignment_id: str,
+    synthetic_user_id: str,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """GET engram-engine's /debug/hermes-assignment/{assignment_id}.
+
+    Returns the parsed completion body on 200 ("found — Hermes has reported back"),
+    or None on a 404 ("not found yet — still outstanding, or an unknown/mismatched
+    id") or any transient failure (connection error, timeout, non-2xx/404 status).
+    None deliberately covers both "keep polling" and "give up eventually" — the
+    caller's own bounded max-wait is what distinguishes them, not this function
+    raising a different exception per case, since a poller wants exactly one
+    "not ready" signal to act on regardless of the underlying reason.
+    """
+    url = (
+        f"{base_url}/debug/hermes-assignment/{assignment_id}"
+        f"?syntheticUserId={urllib.parse.quote(synthetic_user_id)}"
+    )
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError:
+        return None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None

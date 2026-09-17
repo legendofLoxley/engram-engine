@@ -5,6 +5,8 @@ import app.alfrd.engram.api.configureAuth
 import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
+import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.api.configureOnboardingRoutes
 import app.alfrd.engram.api.configurePhrasesRoutes
 import app.alfrd.engram.api.configureRoutes
@@ -141,10 +143,15 @@ fun main() {
         if (System.getenv("DEBUG_CONVERSE_ENABLED") == "true") {
             // Isolated session pool — debug sessions never share state with production sessions.
             // No sessionManager passed to factory → FirstSessionHandler is disabled for synthetic users.
-            val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, enableHermesDelegation = true) })
+            // One shared HermesAssignmentCompletionStore instance across every session's pipeline
+            // AND the polling route below — a per-call store would make a completion invisible
+            // to whatever polls for it.
+            val hermesCompletionStore = HermesAssignmentCompletionStore()
+            val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, hermesCompletionStore = hermesCompletionStore) })
             configureDebugConverseRoutes(debugSessionManager, db)
             configureDebugEnvironmentSignalRoutes(db)
             configureDebugActorEventRoutes(db)
+            configureDebugHermesAssignmentRoutes(hermesCompletionStore)
             log.info("debug-converse endpoint enabled")
         }
         routing {

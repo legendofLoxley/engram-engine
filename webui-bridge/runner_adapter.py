@@ -29,6 +29,18 @@ kept out by network topology or a client-side identity label.
 
 engram-engine's own debug bearer token lives only in this process's
 environment — the WebUI container never sees it, and neither does the browser.
+
+A turn that makes the Director issue a real Hermes assignment (see
+PipelineTrace.hermesDelegation) is the one exception to "single synchronous
+call": that run is deliberately left open (PENDING_HERMES_STATUS, no `done`
+event yet) while a background thread (_deliver_hermes_completion) polls
+engram-engine's separate, explicit /debug/hermes-assignment completion channel
+and appends the real result once Hermes reports back. WebUI's own runner
+event-stream polling loop (api/routes.py's _stream_runner_run_events) already
+re-polls GET /v1/runs/{id}/events on its own schedule until a run's status
+becomes terminal — this is what delivers the completion automatically into the
+originating conversation, with no further user message and no new
+vendor-source patch.
 """
 from __future__ import annotations
 
@@ -41,7 +53,14 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from engram_client import ConfigError, UpstreamError, build_engram_payload, forward_to_engram, load_engram_config
+from engram_client import (
+    ConfigError,
+    UpstreamError,
+    build_engram_payload,
+    fetch_hermes_assignment_completion,
+    forward_to_engram,
+    load_engram_config,
+)
 
 
 class RunnerConfigError(RuntimeError):
@@ -189,6 +208,53 @@ class RunStore:
             events = record["events"]
             return events[cursor:], len(events)
 
+    def append_event(self, run_id: str, event: dict[str, Any]) -> bool:
+        """Appends one more event to an already-created run's event list — the
+        mechanism behind delivering a Hermes assignment's completion into a run
+        that was deliberately left open (status "running", no `done` yet) at
+        creation time. WebUI's own runner-polling loop (api/routes.py's
+        _stream_runner_run_events) re-polls GET /v1/runs/{id}/events on a fixed
+        cadence for exactly this reason: it will pick up whatever this appends,
+        without the browser needing to do anything.
+        """
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return False
+            record["events"].append(event)
+            return True
+
+    def set_status(self, run_id: str, status: str) -> bool:
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return False
+            record["status"] = status
+            return True
+
+    def replace_message_at(self, webui_session_id: str, index: int, role: str, content: str) -> list[dict[str, str]] | None:
+        """Replaces one specific, already-persisted message in a session's running
+        transcript by INDEX (stable across later appends — a later turn only ever
+        appends past this index, never shifts it) rather than "the most recent
+        message with this role", which a later, unrelated turn could make wrong.
+        Returns None (no-op) if the index is out of range or its role no longer
+        matches — e.g. the in-memory history was reset by a restart — so a caller
+        can fall back to appending instead of silently corrupting an unrelated
+        message.
+        """
+        with self._lock:
+            history = self._message_history.get(webui_session_id)
+            if not history or not (0 <= index < len(history)) or history[index].get("role") != role:
+                return None
+            history[index] = {"role": role, "content": content}
+            return list(history)
+
+    def append_assistant_message(self, webui_session_id: str, content: str) -> list[dict[str, str]]:
+        with self._lock:
+            history = self._message_history.setdefault(webui_session_id, [])
+            history.append({"role": "assistant", "content": content})
+            return list(history)
+
 
 def _parse_cursor(raw: str | None) -> int:
     try:
@@ -204,6 +270,25 @@ def _parse_cursor(raw: str | None) -> int:
 #: stream_end and the composer hangs instead of showing the error.
 TERMINAL_ERROR_STATUS = "error"
 TERMINAL_COMPLETED_STATUS = "completed"
+
+#: A genuinely non-terminal status. _stream_runner_run_events() only stops polling
+#: once GET /v1/runs/{id} reports a status in its own recognized terminal set
+#: ("completed"/"complete"/"failed"/"error"/"cancelled"/"canceled") — anything else,
+#: including this, keeps its polling loop alive (heartbeating every
+#: _SSE_HEARTBEAT_INTERVAL_SECONDS=5s server-side) until a later append_event() call
+#: adds new events and set_status() flips this to a real terminal value. This is the
+#: whole mechanism behind delivering a Hermes assignment's completion automatically,
+#: with no new user message and no new vendor-source patch: the vendor's own
+#: reconnect/polling loop already does the waiting.
+PENDING_HERMES_STATUS = "running"
+
+#: How long a background poller waits for a real Hermes assignment to complete
+#: before giving up and honestly reporting a timeout, and how often it checks.
+#: Comfortably above HermesAcpClient's own default 180s subprocess timeout
+#: (Kotlin side) plus container-startup/graph-commit overhead observed in practice
+#: (worst case seen: well under a minute).
+HERMES_COMPLETION_MAX_WAIT_SECONDS = 240.0
+HERMES_COMPLETION_POLL_INTERVAL_SECONDS = 2.0
 
 
 def unsupported_input_message(attachments: list[Any], toolsets: list[Any]) -> str:
@@ -377,6 +462,31 @@ def run_turn(
         seed = load_persisted_webui_messages(config.get("webui_sessions_dir"), webui_session_id)
         transcript = store.append_turn_messages(webui_session_id, message, reply_text, seed=seed)
         model, provider = effective_model_fields(result)
+
+        # A turn that just issued a real Hermes assignment (PipelineTrace.hermesDelegation,
+        # set by CognitivePipeline only when hermesDelegationDispatcher fired) gets this
+        # run left deliberately open — see PENDING_HERMES_STATUS's doc — instead of the
+        # normal immediate "done". The acknowledgment reply_text is still shown right away
+        # via the token event below; the real completion is delivered later, into this
+        # SAME run, by _deliver_hermes_completion running in a background thread.
+        hermes_delegation = (result.get("trace") or {}).get("hermesDelegation")
+        assignment_id = hermes_delegation.get("assignmentId") if isinstance(hermes_delegation, dict) else None
+
+        if assignment_id:
+            ack_index = len(transcript) - 1  # the assistant entry append_turn_messages just added
+            events = [{"event": "token", "seq": 1, "payload": {"text": reply_text}}]
+            run_id = store.create(
+                webui_session_id=webui_session_id, events=events, status=PENDING_HERMES_STATUS,
+                effective_model=model, effective_model_provider=provider,
+            )
+            thread = threading.Thread(
+                target=_deliver_hermes_completion,
+                args=(config, store, run_id, webui_session_id, assignment_id, reply_text, ack_index),
+                daemon=True,
+            )
+            thread.start()
+            return run_id
+
         events = [
             {"event": "token", "seq": 1, "payload": {"text": reply_text}},
             # WebUI's own done-event handler (messages.js _finishDone) unconditionally
@@ -417,6 +527,76 @@ def run_turn(
             {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
         return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
+
+
+def _deliver_hermes_completion(
+    config: dict[str, Any],
+    store: RunStore,
+    run_id: str,
+    webui_session_id: str,
+    assignment_id: str,
+    ack_text: str,
+    ack_index: int,
+    *,
+    max_wait_seconds: float = HERMES_COMPLETION_MAX_WAIT_SECONDS,
+    poll_interval_seconds: float = HERMES_COMPLETION_POLL_INTERVAL_SECONDS,
+    fetch_fn=fetch_hermes_assignment_completion,
+) -> None:
+    """Runs in a background thread, one per delegation-triggering turn. Polls
+    /debug/hermes-assignment/{assignment_id} — the explicit delivery channel,
+    independent of graph ingestion/RecentActorEvidence — until Hermes reports
+    back or max_wait_seconds elapses, then appends the real result to the SAME
+    run left open by run_turn(). WebUI's own runner-polling loop picks this up
+    on its next poll and renders/persists it automatically: no further user
+    message, no new vendor-source patch (see PENDING_HERMES_STATUS's doc).
+
+    fetch_fn is injectable purely for testing this function's own logic
+    (success/timeout/fallback branching) without real HTTP or real time.
+
+    Runs exactly once per run_id (run_turn spawns exactly one such thread per
+    delegation) and always finalizes to a real terminal status before
+    returning, so this run can never stay "running" forever from this
+    function's own perspective — the bounded max_wait_seconds is the ceiling.
+    """
+    deadline = time.time() + max_wait_seconds
+    completion: dict[str, Any] | None = None
+    while time.time() < deadline:
+        completion = fetch_fn(
+            config["engram_base_url"], config["engram_debug_token"], assignment_id, config["synthetic_user_id"],
+        )
+        if completion is not None:
+            break
+        time.sleep(poll_interval_seconds)
+
+    if completion is None:
+        delivery_text = (
+            "Hermes hasn't reported back within the expected time — something may "
+            "have gone wrong with that request."
+        )
+        final_status = TERMINAL_ERROR_STATUS
+    elif completion.get("outcome") == "Completed":
+        delivery_text = f"Hermes finished checking that — it reported: {completion.get('text', '')}"
+        final_status = TERMINAL_COMPLETED_STATUS
+    else:
+        delivery_text = f"Hermes wasn't able to complete that: {completion.get('text', '')}"
+        final_status = TERMINAL_ERROR_STATUS
+
+    combined_text = f"{ack_text}\n\n{delivery_text}"
+    # Prefer replacing the exact ack message this turn created (stable by index
+    # regardless of later, unrelated turns appended since — see
+    # RunStore.replace_message_at). Fall back to a fresh assistant message only if
+    # that index no longer holds an assistant entry (e.g. in-memory history was
+    # reset by an adapter restart) — never silently overwrite an unrelated message.
+    updated_transcript = store.replace_message_at(webui_session_id, ack_index, "assistant", combined_text)
+    if updated_transcript is None:
+        updated_transcript = store.append_assistant_message(webui_session_id, delivery_text)
+
+    store.append_event(run_id, {"event": "token", "seq": 2, "payload": {"text": f"\n\n{delivery_text}"}})
+    store.append_event(run_id, {"event": "done", "seq": 3, "payload": {
+        "status": final_status,
+        "session": {"session_id": webui_session_id, "messages": updated_transcript},
+    }})
+    store.set_status(run_id, final_status)
 
 
 def effective_model_fields(engram_result: dict[str, Any]) -> tuple[str | None, str | None]:

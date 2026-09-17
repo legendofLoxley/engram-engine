@@ -12,7 +12,12 @@ package app.alfrd.engram.cognitive.pipeline.hermes
 data class HermesAssignment(
     val assignmentId: String,
     val userEmail: String,
-    /** Sent verbatim as the ACP `session/prompt` text — the original request, not a rewritten command. */
+    /**
+     * A human-readable description of what was asked — logged and shown in the Director's own
+     * directive/trace. NOT sent verbatim as the ACP `session/prompt` text: `HermesAcpClient`
+     * builds that prompt itself around an absolute fixture path (see its own doc for why a
+     * bare relative filename proved unreliable against the real runtime).
+     */
     val task: String,
     val originalRequest: String,
     /**

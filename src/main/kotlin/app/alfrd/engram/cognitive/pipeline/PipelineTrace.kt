@@ -15,6 +15,21 @@ data class PipelineTrace(
     var graphMutations: GraphMutationsTrace = GraphMutationsTrace(),
     var retrievalCoverage: RetrievalCoverageTrace? = null,
     var horizonCycle: HorizonCycleTrace? = null,
+    var hermesDelegation: HermesDelegationTrace? = null,
+)
+
+/**
+ * Present only on a turn that just issued a real Hermes assignment (see
+ * `app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatcher`). [assignmentId] is
+ * the correlation key a caller (the WebUI runner adapter) polls
+ * `/debug/hermes-assignment/{assignmentId}` with to learn the outcome and deliver it into the
+ * originating conversation — this trace field is how that caller learns the id exists at all,
+ * since the assignment is issued fire-and-forget with no other return path out of this turn.
+ */
+@Serializable
+data class HermesDelegationTrace(
+    val assignmentId: String,
+    val task: String,
 )
 
 @Serializable
