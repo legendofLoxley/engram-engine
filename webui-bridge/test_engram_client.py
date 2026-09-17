@@ -62,11 +62,20 @@ class _FakeResponse:
 
 class FetchHermesAssignmentCompletionTest(unittest.TestCase):
     def test_200_returns_the_parsed_completion(self):
-        body = b'{"assignmentId":"a1","outcome":"Completed","text":"DH-FIXTURE-abc123","graphIngestOutcome":"Committed"}'
+        # executionOutcome (what Hermes did) and decision (what the Director chose to do about
+        # it, via HermesCompletionDirector) are the two distinct fields the real endpoint sends
+        # today — this function itself stays shape-agnostic, just parsing whatever dict comes back.
+        body = (
+            b'{"assignmentId":"a1","executionOutcome":"Completed","decision":"Accepted",'
+            b'"text":"Hermes finished checking that \xe2\x80\x94 it reported: DH-FIXTURE-abc123",'
+            b'"graphIngestOutcome":"Committed"}'
+        )
         with patch("urllib.request.urlopen", return_value=_FakeResponse(body)):
             result = ec.fetch_hermes_assignment_completion("http://x", "tok", "a1", "webui-dev")
         self.assertEqual(result, {
-            "assignmentId": "a1", "outcome": "Completed", "text": "DH-FIXTURE-abc123", "graphIngestOutcome": "Committed",
+            "assignmentId": "a1", "executionOutcome": "Completed", "decision": "Accepted",
+            "text": "Hermes finished checking that — it reported: DH-FIXTURE-abc123",
+            "graphIngestOutcome": "Committed",
         })
 
     def test_404_is_not_found_yet_returns_none_not_an_exception(self):
@@ -94,7 +103,7 @@ class FetchHermesAssignmentCompletionTest(unittest.TestCase):
         def _capture(req, timeout=None):
             captured["url"] = req.full_url
             captured["auth"] = req.get_header("Authorization")
-            return _FakeResponse(b'{"outcome":"Completed","text":"x","graphIngestOutcome":"Committed"}')
+            return _FakeResponse(b'{"executionOutcome":"Completed","decision":"Accepted","text":"x","graphIngestOutcome":"Committed"}')
 
         with patch("urllib.request.urlopen", side_effect=_capture):
             ec.fetch_hermes_assignment_completion("http://x", "secret-tok", "a1", "webui dev")

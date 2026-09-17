@@ -6,6 +6,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventKind
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
 import com.arcadedb.database.Database
@@ -62,6 +63,30 @@ data class DebugActorEventResponse(
 )
 
 /**
+ * Response for the read-only `GET /debug/actor-event/{eventId}` lookup — see
+ * [configureDebugActorEventRoutes]'s class doc for why this is a genuinely independent evidence
+ * check, never a stand-in for it. [found]/[reason] follow the same three-way distinction as
+ * [HorizonGraphStore.ActorEventLookupResult] ("never delivered" vs. "lookup itself failed" are
+ * different facts): `found=false` with no [reason] means confirmed absent; `found=false` with a
+ * [reason] means the lookup could not be completed, not that the event doesn't exist.
+ */
+@Serializable
+data class DebugActorEventLookupResponse(
+    val eventId: String,
+    val found: Boolean,
+    val phraseUid: String? = null,
+    /** The Phrase's own durably stored `text` — the actual evidence content, read directly from
+     *  the graph via [HorizonGraphStore.readPhraseText]. Null only if [found] is false, or if the
+     *  owning edge was found but its Phrase's text could not itself be read (logged, not fatal to
+     *  this response — the rest of the fields still reflect a genuine `Found` lookup). */
+    val text: String? = null,
+    val cycleSeq: Long? = null,
+    val contentHash: String? = null,
+    val propagationStatus: String? = null,
+    val reason: String? = null,
+)
+
+/**
  * The controlled, authenticated, disableable synthetic entry point for an Actor-attributed event —
  * a thin route over [ActorEventIngestionService], the reusable core. This is explicitly the
  * **synthetic injection harness**, never disguised as user speech and never routed through
@@ -80,6 +105,18 @@ data class DebugActorEventResponse(
  * `/debug/environment-signal`, which intentionally also accepts a real user's email for live
  * verification against a synthetic identity on the deployed path — that route is untouched here;
  * this one's own doc has always called it "the synthetic injection harness," so it is held to that.
+ *
+ * Also registers `GET /actor-event/{eventId}` — a plain, read-only lookup straight against the
+ * graph ([HorizonGraphStore.findActorEventByEventId] + [HorizonGraphStore.readPhraseText]), added
+ * specifically so a Hermes assignment's evidence can be verified independently of both
+ * [ActorEventIngestionService.ingest]'s own self-reported return value (already surfaced, and
+ * easy to mistake for independent confirmation, via `HermesAssignmentCompletion.graphIngestOutcome`)
+ * and of later Horizon-driven model recall (a *different* fact — "the Director later composed a
+ * reply grounded in this" is not the same claim as "this exact content is durably stored"). This
+ * GET route never writes anything; it is not, and must never become, a way to "prove" an event
+ * exists by re-POSTing it — [DebugActorEventRequest]'s existing idempotent-retry behavior would
+ * make a matching re-POST *look* like confirmation but a mismatched one (e.g. a different
+ * `occurredAt`) would misreport a real event as absent.
  */
 fun Application.configureDebugActorEventRoutes(db: Database) {
     val cycleSequencer = ArcadeCycleSequencer(db)
@@ -126,6 +163,46 @@ fun Application.configureDebugActorEventRoutes(db: Database) {
 
                     logger.info("actor-event userEmail={} eventId={} outcome={}", userEmail, req.eventId, outcome::class.simpleName)
                     call.respond(outcome.toHttpStatus(), outcome.toResponse(userEmail))
+                }
+
+                get("/actor-event/{eventId}") {
+                    val eventId = call.parameters["eventId"]?.takeIf { it.isNotBlank() }
+                        ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "eventId is required"))
+
+                    val userEmail = call.request.queryParameters["userEmail"]?.takeIf { it.isNotBlank() }
+                        ?: DebugConverseService.resolveUserId(call.request.queryParameters["syntheticUserId"])
+                    if (!userEmail.endsWith(DebugConverseService.SYNTHETIC_EMAIL_DOMAIN, ignoreCase = true)) {
+                        logger.warn("actor-event lookup: rejected non-synthetic userEmail={} for eventId={}", userEmail, eventId)
+                        return@get call.respond(
+                            HttpStatusCode.BadRequest,
+                            mapOf("error" to "userEmail must be a synthetic identity ending in '${DebugConverseService.SYNTHETIC_EMAIL_DOMAIN}'"),
+                        )
+                    }
+
+                    when (val lookup = horizonGraphStore.findActorEventByEventId(userEmail, eventId)) {
+                        is HorizonGraphStore.ActorEventLookupResult.Found -> {
+                            val text = horizonGraphStore.readPhraseText(lookup.record.phraseUid)
+                            call.respond(
+                                HttpStatusCode.OK,
+                                DebugActorEventLookupResponse(
+                                    eventId = eventId,
+                                    found = true,
+                                    phraseUid = lookup.record.phraseUid,
+                                    text = text,
+                                    cycleSeq = lookup.record.cycleSeq,
+                                    contentHash = lookup.record.contentHash,
+                                    propagationStatus = lookup.record.propagationStatus,
+                                ),
+                            )
+                        }
+                        HorizonGraphStore.ActorEventLookupResult.ConfirmedAbsent ->
+                            call.respond(HttpStatusCode.OK, DebugActorEventLookupResponse(eventId = eventId, found = false))
+                        is HorizonGraphStore.ActorEventLookupResult.LookupFailed ->
+                            call.respond(
+                                HttpStatusCode.ServiceUnavailable,
+                                DebugActorEventLookupResponse(eventId = eventId, found = false, reason = lookup.reason),
+                            )
+                    }
                 }
             }
         }

@@ -41,6 +41,12 @@ re-polls GET /v1/runs/{id}/events on its own schedule until a run's status
 becomes terminal — this is what delivers the completion automatically into the
 originating conversation, with no further user message and no new
 vendor-source patch.
+
+This adapter never decides whether Hermes's findings are trustworthy or how to
+word them — that decision (accept/withhold) is made entirely on the
+engram-engine side by HermesCompletionDirector before this adapter ever sees
+the completion. /debug/hermes-assignment's `text` field is that already-composed
+reply; _deliver_hermes_completion only transports it into the conversation.
 """
 from __future__ import annotations
 
@@ -550,8 +556,16 @@ def _deliver_hermes_completion(
     on its next poll and renders/persists it automatically: no further user
     message, no new vendor-source patch (see PENDING_HERMES_STATUS's doc).
 
+    This function is pure transport for whatever it gets back: `completion["text"]`
+    is already the Director's own composed reply (HermesCompletionDirector, Kotlin
+    side, decides accept/withhold and writes the exact wording) — this adapter
+    renders it verbatim and must never wrap, rephrase, or branch on `executionOutcome`/
+    `decision` itself. The one exception is the timeout branch below, where
+    engram-engine never got a chance to decide anything at all, because no
+    response ever arrived here.
+
     fetch_fn is injectable purely for testing this function's own logic
-    (success/timeout/fallback branching) without real HTTP or real time.
+    (timeout vs. a real completion arriving) without real HTTP or real time.
 
     Runs exactly once per run_id (run_turn spawns exactly one such thread per
     delegation) and always finalizes to a real terminal status before
@@ -569,17 +583,22 @@ def _deliver_hermes_completion(
         time.sleep(poll_interval_seconds)
 
     if completion is None:
+        # The one case this adapter itself is entitled to compose wording for: engram-engine
+        # never got a chance to decide anything, because no response ever arrived here at all.
+        # Every other case below is a real Director decision (HermesCompletionDirector, Kotlin
+        # side) — its `text` is rendered exactly as received, never rewrapped or reinterpreted.
         delivery_text = (
             "Hermes hasn't reported back within the expected time — something may "
             "have gone wrong with that request."
         )
         final_status = TERMINAL_ERROR_STATUS
-    elif completion.get("outcome") == "Completed":
-        delivery_text = f"Hermes finished checking that — it reported: {completion.get('text', '')}"
-        final_status = TERMINAL_COMPLETED_STATUS
     else:
-        delivery_text = f"Hermes wasn't able to complete that: {completion.get('text', '')}"
-        final_status = TERMINAL_ERROR_STATUS
+        delivery_text = str(completion.get("text") or "")
+        # Both "Accepted" (Hermes's findings were trusted) and "Withheld" (the Director
+        # explicitly declined to pass along unverified/failed findings) are legitimate,
+        # complete Director replies — not adapter/transport-level errors. TERMINAL_ERROR_STATUS
+        # is reserved for the timeout branch above, where nothing was ever decided.
+        final_status = TERMINAL_COMPLETED_STATUS
 
     combined_text = f"{ack_text}\n\n{delivery_text}"
     # Prefer replacing the exact ack message this turn created (stable by index

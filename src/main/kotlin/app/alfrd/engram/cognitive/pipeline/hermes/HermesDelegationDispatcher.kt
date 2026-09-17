@@ -69,15 +69,20 @@ class HermesDelegationDispatcher(
                 assignmentId = assignment.assignmentId,
                 occurredAt = System.currentTimeMillis(),
             )
+            // The one decision boundary: whether/how this executed assignment's findings are
+            // actually delivered is decided HERE, by the Director-side HermesCompletionDirector —
+            // never implicitly by whatever transport later renders it. See that object's doc.
+            val decision = HermesCompletionDirector.decide(assignment, outcome)
             completionStore.record(
                 assignmentId = assignment.assignmentId,
                 userEmail = assignment.userEmail,
                 outcome = outcome,
+                decision = decision,
                 graphIngestOutcome = ingestResult::class.simpleName ?: "Unknown",
             )
             logger.info(
-                "hermes-delegation completed assignmentId={} userEmail={} outcome={} ingestOutcome={}",
-                assignment.assignmentId, assignment.userEmail, outcome::class.simpleName, ingestResult::class.simpleName,
+                "hermes-delegation completed assignmentId={} userEmail={} outcome={} decision={} ingestOutcome={}",
+                assignment.assignmentId, assignment.userEmail, outcome::class.simpleName, decision::class.simpleName, ingestResult::class.simpleName,
             )
         }
     }

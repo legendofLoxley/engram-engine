@@ -2,6 +2,7 @@ package app.alfrd.engram.api
 
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentOutcome
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesCompletionDecision
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
@@ -15,15 +16,26 @@ private val logger = LoggerFactory.getLogger("app.alfrd.engram.api.DebugHermesAs
 @Serializable
 data class HermesAssignmentCompletionResponse(
     val assignmentId: String,
-    /** `"Completed"` | `"Failed"` — mirrors [HermesAssignmentOutcome]'s two variants. */
-    val outcome: String,
+    /** `"Completed"` | `"Failed"` — mirrors [HermesAssignmentOutcome]'s two variants: what Hermes
+     *  actually did. Never confused with [decision] below — see [HermesAssignmentCompletion]'s doc. */
+    val executionOutcome: String,
+    /** `"Accepted"` | `"Withheld"` — the Director's own delivery decision (see
+     *  [app.alfrd.engram.cognitive.pipeline.hermes.HermesCompletionDirector]). [text] is always
+     *  exactly [HermesCompletionDecision.deliveryText] — the caller (the WebUI runner adapter)
+     *  renders it verbatim and must never compose its own wrapper around it. */
+    val decision: String,
     val text: String,
+    /** Execution diagnostics only — present when [executionOutcome] is `"Completed"`, absorbed
+     *  into the accept/withhold [decision] already, never re-inspected by a caller to second-guess it. */
     val toolName: String? = null,
     val toolSucceeded: Boolean? = null,
     /** The independent graph-ingestion outcome (e.g. `"Committed"`) — surfaced so a caller can
      *  tell "delivered to the conversation" and "committed to the graph" apart, per the design
      *  contract's own point: a committed result is not proof the user received it, and the
-     *  reverse holds too — this route answering 200 is not proof the graph write succeeded. */
+     *  reverse holds too — this route answering 200 is not proof the graph write succeeded (and,
+     *  per the correction that added `GET /debug/actor-event/{eventId}`, is not itself an
+     *  independent graph read either — it is the same in-process ingest() call's own report).
+     */
     val graphIngestOutcome: String,
 )
 
@@ -64,22 +76,25 @@ fun Application.configureDebugHermesAssignmentRoutes(store: HermesAssignmentComp
                     val completion = store.get(assignmentId, userEmail)
                         ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "no completion recorded yet for this assignment"))
 
-                    val response = when (val outcome = completion.outcome) {
-                        is HermesAssignmentOutcome.Completed -> HermesAssignmentCompletionResponse(
-                            assignmentId = assignmentId,
-                            outcome = "Completed",
-                            text = outcome.findingsText,
-                            toolName = outcome.toolName,
-                            toolSucceeded = outcome.toolSucceeded,
-                            graphIngestOutcome = completion.graphIngestOutcome,
-                        )
-                        is HermesAssignmentOutcome.Failed -> HermesAssignmentCompletionResponse(
-                            assignmentId = assignmentId,
-                            outcome = "Failed",
-                            text = outcome.reason,
-                            graphIngestOutcome = completion.graphIngestOutcome,
-                        )
-                    }
+                    val outcome = completion.outcome
+                    val response = HermesAssignmentCompletionResponse(
+                        assignmentId = assignmentId,
+                        executionOutcome = when (outcome) {
+                            is HermesAssignmentOutcome.Completed -> "Completed"
+                            is HermesAssignmentOutcome.Failed -> "Failed"
+                        },
+                        decision = when (completion.decision) {
+                            is HermesCompletionDecision.Accepted -> "Accepted"
+                            is HermesCompletionDecision.Withheld -> "Withheld"
+                        },
+                        // Always the Director's own composed text — never re-derived from outcome
+                        // here. This is the entire point of the correction: the runner adapter
+                        // downstream renders exactly this, with no wrapper of its own.
+                        text = completion.decision.deliveryText,
+                        toolName = (outcome as? HermesAssignmentOutcome.Completed)?.toolName,
+                        toolSucceeded = (outcome as? HermesAssignmentOutcome.Completed)?.toolSucceeded,
+                        graphIngestOutcome = completion.graphIngestOutcome,
+                    )
                     call.respond(HttpStatusCode.OK, response)
                 }
             }

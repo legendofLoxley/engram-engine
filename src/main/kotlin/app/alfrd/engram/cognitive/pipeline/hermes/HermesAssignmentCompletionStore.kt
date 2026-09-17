@@ -2,11 +2,19 @@ package app.alfrd.engram.cognitive.pipeline.hermes
 
 import java.util.concurrent.ConcurrentHashMap
 
-/** One recorded completion — see [HermesAssignmentCompletionStore]'s doc for why [graphIngestOutcome] is carried alongside [outcome] rather than derived from it. */
+/**
+ * One recorded completion. [outcome] and [decision] are two distinct, never-conflated facts —
+ * matching this codebase's own convention ([app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestOutcome]'s
+ * class doc): [outcome] is what Hermes actually did, [decision] is what the Director chose to do
+ * about it (see [HermesCompletionDirector]). A caller that only wants to know what to *show* the
+ * user needs [decision]`.deliveryText` alone — it is never derived by re-inspecting [outcome].
+ * See this store's own doc for why [graphIngestOutcome] is carried alongside rather than derived.
+ */
 data class HermesAssignmentCompletion(
     val assignmentId: String,
     val userEmail: String,
     val outcome: HermesAssignmentOutcome,
+    val decision: HermesCompletionDecision,
     val graphIngestOutcome: String,
     val recordedAt: Long,
 )
@@ -37,12 +45,19 @@ class HermesAssignmentCompletionStore(
 ) {
     private val completions = ConcurrentHashMap<String, HermesAssignmentCompletion>()
 
-    fun record(assignmentId: String, userEmail: String, outcome: HermesAssignmentOutcome, graphIngestOutcome: String) {
+    fun record(
+        assignmentId: String,
+        userEmail: String,
+        outcome: HermesAssignmentOutcome,
+        decision: HermesCompletionDecision,
+        graphIngestOutcome: String,
+    ) {
         prune()
         completions[assignmentId] = HermesAssignmentCompletion(
             assignmentId = assignmentId,
             userEmail = userEmail,
             outcome = outcome,
+            decision = decision,
             graphIngestOutcome = graphIngestOutcome,
             recordedAt = System.currentTimeMillis(),
         )

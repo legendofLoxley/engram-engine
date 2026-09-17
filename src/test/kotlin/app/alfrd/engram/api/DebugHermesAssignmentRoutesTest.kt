@@ -2,6 +2,7 @@ package app.alfrd.engram.api
 
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentOutcome
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesCompletionDecision
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
@@ -13,6 +14,7 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.testing.*
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -29,6 +31,7 @@ class DebugHermesAssignmentRoutesTest {
     private val completed = HermesAssignmentOutcome.Completed(
         findingsText = "DH-FIXTURE-abc123", toolName = "read", toolTargetPath = "director-hermes-fixture.txt", toolSucceeded = true,
     )
+    private val accepted = HermesCompletionDecision.Accepted("Hermes finished checking that — it reported: DH-FIXTURE-abc123")
 
     private fun Application.testModule(store: HermesAssignmentCompletionStore, registerRoute: Boolean = true) {
         install(ContentNegotiation) {
@@ -83,7 +86,7 @@ class DebugHermesAssignmentRoutesTest {
     @Test
     fun `a non-synthetic userEmail is rejected with 400`() = testApplication {
         val store = HermesAssignmentCompletionStore()
-        store.record("a1", "real.person@gmail.com", completed, "Committed")
+        store.record("a1", "real.person@gmail.com", completed, accepted, "Committed")
         application { testModule(store) }
         val response = client.get("/debug/hermes-assignment/a1?userEmail=real.person@gmail.com") {
             header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
@@ -107,7 +110,7 @@ class DebugHermesAssignmentRoutesTest {
     @Test
     fun `a known assignmentId queried under a different synthetic identity also returns 404, not the other identity's completion`() = testApplication {
         val store = HermesAssignmentCompletionStore()
-        store.record("a1", "debug+owner@test.alfrd.internal", completed, "Committed")
+        store.record("a1", "debug+owner@test.alfrd.internal", completed, accepted, "Committed")
         application { testModule(store) }
         val response = client.get("/debug/hermes-assignment/a1?syntheticUserId=someone-else") {
             header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
@@ -118,33 +121,68 @@ class DebugHermesAssignmentRoutesTest {
     // ── Found: Completed and Failed outcomes ────────────────────────────────
 
     @Test
-    fun `a completed assignment is returned with its findings, tool attribution and graph outcome`() = testApplication {
+    fun `a completed, accepted assignment is returned with the Director's own delivery text, tool attribution and graph outcome`() = testApplication {
         val store = HermesAssignmentCompletionStore()
-        store.record("a1", "debug+owner@test.alfrd.internal", completed, "Committed")
+        store.record("a1", "debug+owner@test.alfrd.internal", completed, accepted, "Committed")
         application { testModule(store) }
         val response = client.get("/debug/hermes-assignment/a1?syntheticUserId=owner") {
             header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
         }
         assertEquals(HttpStatusCode.OK, response.status)
         val body = response.bodyAsText()
-        assertTrue(body.contains("\"outcome\":\"Completed\""))
+        assertTrue(body.contains("\"executionOutcome\":\"Completed\""))
+        assertTrue(body.contains("\"decision\":\"Accepted\""))
         assertTrue(body.contains("DH-FIXTURE-abc123"))
         assertTrue(body.contains("\"toolSucceeded\":true"))
         assertTrue(body.contains("\"graphIngestOutcome\":\"Committed\""))
     }
 
     @Test
-    fun `a failed assignment is returned with its reason, not silently reported as success`() = testApplication {
+    fun `a failed execution is returned Withheld, with an honest explanation, not silently reported as success`() = testApplication {
         val store = HermesAssignmentCompletionStore()
         val failed = HermesAssignmentOutcome.Failed("no tool call observed (stopReason=refusal)")
-        store.record("a2", "debug+owner@test.alfrd.internal", failed, "Committed")
+        val withheld = HermesCompletionDecision.Withheld(
+            deliveryText = "Hermes wasn't able to complete that: no tool call observed (stopReason=refusal)",
+            reason = "execution failed",
+        )
+        store.record("a2", "debug+owner@test.alfrd.internal", failed, withheld, "Committed")
         application { testModule(store) }
         val response = client.get("/debug/hermes-assignment/a2?syntheticUserId=owner") {
             header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
         }
         assertEquals(HttpStatusCode.OK, response.status)
         val body = response.bodyAsText()
-        assertTrue(body.contains("\"outcome\":\"Failed\""))
+        assertTrue(body.contains("\"executionOutcome\":\"Failed\""))
+        assertTrue(body.contains("\"decision\":\"Withheld\""))
         assertTrue(body.contains("no tool call observed"))
+    }
+
+    // ── The ownership boundary: a completed-but-unverified tool result is withheld ──
+
+    @Test
+    fun `a Completed outcome with toolSucceeded false is served as Withheld, and its raw findings never appear in the response`() = testApplication {
+        val store = HermesAssignmentCompletionStore()
+        val unverified = HermesAssignmentOutcome.Completed(
+            findingsText = "SECRET-UNRELATED-CONTENT", toolName = "read",
+            toolTargetPath = "/opt/hermes-agent/director-hermes-fixture.txt", toolSucceeded = false,
+        )
+        val withheld = HermesCompletionDecision.Withheld(
+            deliveryText = "Hermes responded, but I can't confirm the result actually came from reading the right file, so I'm not passing along its specific content. You may want to ask again.",
+            reason = "toolSucceeded=false",
+        )
+        store.record("a3", "debug+owner@test.alfrd.internal", unverified, withheld, "Committed")
+        application { testModule(store) }
+        val response = client.get("/debug/hermes-assignment/a3?syntheticUserId=owner") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"executionOutcome\":\"Completed\""))
+        assertTrue(body.contains("\"decision\":\"Withheld\""))
+        assertTrue(body.contains("\"toolSucceeded\":false"))
+        assertFalse(
+            body.contains("SECRET-UNRELATED-CONTENT"),
+            "the ownership boundary this route exists to prove: a caller (the runner adapter) must never see, and therefore can never leak, unvetted raw findings",
+        )
     }
 }

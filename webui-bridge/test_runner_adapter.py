@@ -942,7 +942,10 @@ class DeliverHermesCompletionTest(unittest.TestCase):
     def test_success_appends_token_then_done_finalizes_completed_and_replaces_the_ack_message(self):
         ra._deliver_hermes_completion(
             self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
-            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+            fetch_fn=lambda *a, **k: {
+                "executionOutcome": "Completed", "decision": "Accepted",
+                "text": "Hermes finished checking that — it reported: DH-FIXTURE-abc123",
+            },
         )
         record = self.store.get(self.run_id)
         self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
@@ -955,15 +958,51 @@ class DeliverHermesCompletionTest(unittest.TestCase):
         self.assertIn("DH-FIXTURE-abc123", messages[-1]["content"])
         self.assertIn(self.ack_text, messages[-1]["content"], "the original acknowledgment must be preserved, not discarded")
 
-    def test_failed_outcome_reports_honestly_and_finalizes_errored_not_completed(self):
+    def test_adapter_never_composes_its_own_wrapper_it_renders_the_directors_text_exactly(self):
+        """The ownership-boundary regression test: this adapter must not prepend/append any
+        phrase of its own ("Hermes finished checking that...", "Hermes wasn't able to...", etc.)
+        — whatever /debug/hermes-assignment's `text` field says IS the complete reply, decided
+        and worded entirely by HermesCompletionDirector on the engram-engine side.
+        """
+        raw_director_text = "RAW-DIRECTOR-COMPOSED-TEXT-NO-PYTHON-WRAPPER"
         ra._deliver_hermes_completion(
             self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
-            fetch_fn=lambda *a, **k: {"outcome": "Failed", "text": "no tool call observed"},
+            fetch_fn=lambda *a, **k: {"executionOutcome": "Completed", "decision": "Accepted", "text": raw_director_text},
         )
         record = self.store.get(self.run_id)
-        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS)
+        delivered = record["events"][1]["payload"]["text"]
+        self.assertEqual(delivered, f"\n\n{raw_director_text}", "the adapter must transport this text verbatim, with no wrapper phrase of its own")
+        self.assertNotIn("Hermes finished checking", delivered)
+        self.assertNotIn("Hermes wasn't able to complete", delivered)
+
+    def test_a_withheld_decision_still_finalizes_as_completed_not_errored(self):
+        """Withheld (whether from an execution failure or an unverified tool result) is a
+        legitimate, complete Director reply — the Director successfully decided not to pass
+        along findings, and said so honestly. That is not a transport/adapter-level error, so
+        TERMINAL_ERROR_STATUS must be reserved for the timeout case alone.
+        """
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {
+                "executionOutcome": "Failed", "decision": "Withheld",
+                "text": "Hermes wasn't able to complete that: no tool call observed",
+            },
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
         self.assertIn("wasn't able to complete", record["events"][1]["payload"]["text"])
         self.assertIn("no tool call observed", record["events"][1]["payload"]["text"])
+
+    def test_a_withheld_decision_from_an_unverified_completed_result_also_finalizes_as_completed(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {
+                "executionOutcome": "Completed", "decision": "Withheld",
+                "text": "Hermes responded, but I can't confirm the result actually came from reading the right file, so I'm not passing along its specific content.",
+            },
+        )
+        record = self.store.get(self.run_id)
+        self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
 
     def test_timeout_with_no_completion_ever_reports_honestly_rather_than_hanging_forever(self):
         ra._deliver_hermes_completion(
@@ -972,13 +1011,13 @@ class DeliverHermesCompletionTest(unittest.TestCase):
             fetch_fn=lambda *a, **k: None,
         )
         record = self.store.get(self.run_id)
-        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS)
+        self.assertEqual(record["status"], ra.TERMINAL_ERROR_STATUS, "only a genuine timeout — nothing ever decided — is a transport-level error")
         self.assertIn("hasn't reported back", record["events"][1]["payload"]["text"])
 
     def test_an_out_of_range_ack_index_falls_back_to_appending_rather_than_corrupting_an_unrelated_message(self):
         ra._deliver_hermes_completion(
             self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, 99,  # no such index
-            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+            fetch_fn=lambda *a, **k: {"executionOutcome": "Completed", "decision": "Accepted", "text": "Hermes finished checking that — it reported: DH-FIXTURE-abc123"},
         )
         messages = self.store.get(self.run_id)["events"][-1]["payload"]["session"]["messages"]
         # original ack (index self.ack_index) is untouched — a fresh message was appended instead
@@ -987,9 +1026,10 @@ class DeliverHermesCompletionTest(unittest.TestCase):
         self.assertIn("DH-FIXTURE-abc123", messages[-1]["content"])
 
     def test_delivery_only_ever_happens_once_for_a_given_run(self):
+        fetch_fn = lambda *a, **k: {"executionOutcome": "Completed", "decision": "Accepted", "text": "Hermes finished checking that — it reported: DH-FIXTURE-abc123"}
         ra._deliver_hermes_completion(
             self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
-            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+            fetch_fn=fetch_fn,
         )
         events_after_first = list(self.store.get(self.run_id)["events"])
 
@@ -999,7 +1039,7 @@ class DeliverHermesCompletionTest(unittest.TestCase):
         # still exists) but nothing in production code calls this twice.
         ra._deliver_hermes_completion(
             self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
-            fetch_fn=lambda *a, **k: {"outcome": "Completed", "text": "DH-FIXTURE-abc123"},
+            fetch_fn=fetch_fn,
         )
         events_after_second = self.store.get(self.run_id)["events"]
         self.assertEqual(len(events_after_second), len(events_after_first) + 2, "each call appends its own token+done — this pins that run_turn's own one-thread-per-assignment invariant is what prevents duplication, not this function")

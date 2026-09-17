@@ -2,6 +2,7 @@ package app.alfrd.engram.api
 
 import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.SchemaBootstrap
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -211,5 +212,85 @@ class DebugActorEventRoutesTest {
         val body = response.bodyAsText()
         assertTrue(body.contains("\"outcome\":\"Committed\""))
         assertTrue(body.contains(DebugConverseService.SYNTHETIC_EMAIL_DOMAIN), "the resolved identity itself must actually be synthetic")
+    }
+
+    // ── GET /actor-event/{eventId} — the read-only, independent evidence-verification lookup ──
+    //
+    // Added alongside the Director-owned-completion correction: reading the Hermes-completion
+    // debug endpoint's `graphIngestOutcome` field only re-surfaces the SAME in-process ingest()
+    // return value the dispatcher already saw — it is not an independent graph read. These tests
+    // exercise the one thing that actually is: a POST followed by a genuinely separate GET,
+    // reading the Phrase's own persisted `text` straight out of the database.
+
+    @Test
+    fun `GET requires authentication same as the POST route`() = testApplication {
+        application { testModule() }
+        val response = client.get("/debug/actor-event/some-event")
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `GET for an eventId that was never committed reports found=false with no reason, a genuine confirmed absence`() = testApplication {
+        application { testModule() }
+        val response = client.get("/debug/actor-event/never-committed?syntheticUserId=lookup-absent") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"found\":false"))
+        assertTrue(!body.contains("\"reason\":\""), "confirmed absence must not be reported as though the lookup itself failed")
+    }
+
+    @Test
+    fun `GET after a real POST independently reads back the exact persisted evidence text`() = testApplication {
+        application { testModule() }
+        val eventId = "evt-independent-verify-${UUID.randomUUID()}"
+        val postResponse = client.post("/debug/actor-event") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+            contentType(ContentType.Application.Json)
+            setBody(requestJson(
+                kind = "tool_result", text = "DH-FIXTURE-independent-check-9f31",
+                eventId = eventId, sourceName = "hermes",
+                syntheticUserId = "lookup-verify", toolName = "read", toolSucceeded = true,
+            ))
+        }
+        assertEquals(HttpStatusCode.OK, postResponse.status)
+
+        val getResponse = client.get("/debug/actor-event/$eventId?syntheticUserId=lookup-verify") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, getResponse.status)
+        val body = getResponse.bodyAsText()
+        assertTrue(body.contains("\"found\":true"))
+        assertTrue(
+            body.contains("DH-FIXTURE-independent-check-9f31"),
+            "this must be a real read of the Phrase's own stored text, not an echo of what the POST already returned",
+        )
+    }
+
+    @Test
+    fun `GET under a different synthetic identity than the one that committed the event reports found=false, not the other identity's evidence`() = testApplication {
+        application { testModule() }
+        val eventId = "evt-cross-identity-${UUID.randomUUID()}"
+        client.post("/debug/actor-event") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+            contentType(ContentType.Application.Json)
+            setBody(requestJson(eventId = eventId, syntheticUserId = "lookup-owner"))
+        }
+
+        val response = client.get("/debug/actor-event/$eventId?syntheticUserId=lookup-someone-else") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.bodyAsText().contains("\"found\":false"))
+    }
+
+    @Test
+    fun `GET with a non-synthetic userEmail is rejected with 400`() = testApplication {
+        application { testModule() }
+        val response = client.get("/debug/actor-event/some-event?userEmail=real.person@gmail.com") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
     }
 }

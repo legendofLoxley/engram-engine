@@ -147,6 +147,21 @@ interface HorizonGraphStore {
     suspend fun findActorEventByEventId(userEmail: String, eventId: String): ActorEventLookupResult
 
     /**
+     * Direct, read-only fetch of a Phrase's own stored `text` by [phraseUid] — the actual durable
+     * content, distinct from [findActorEventByEventId]'s existence/propagation-bookkeeping fields
+     * (which never include it). Used only to independently *inspect* already-confirmed-owned
+     * evidence (call [findActorEventByEventId] first to establish ownership) — e.g. a read-only
+     * debug route verifying what was actually persisted, never as part of the ingest hot path and
+     * never its own authorization boundary. Null only if the vertex is somehow missing (or the
+     * query itself failed) — callers that already hold a [phraseUid] from a `Found` lookup treat
+     * either as "could not confirm," never as proof the text was never written.
+     *
+     * A default no-op body (not abstract) so existing fakes of this interface — none of which
+     * exist to serve this read-only inspection path — need no change to keep compiling.
+     */
+    suspend fun readPhraseText(phraseUid: String): String? = null
+
+    /**
      * Creates a new Phrase + `ASSERTS` edge exactly like [ingestEnvironmentSignal], generalized to
      * an arbitrary [sourceType] and carrying the event-identity fields
      * [findActorEventByEventId] reads back — all set on the same edge, in the same transaction as
@@ -268,6 +283,17 @@ class ArcadeHorizonGraphStore(
             // established, so this must NOT be reported as ConfirmedAbsent (see that variant's doc).
             logger.warn("findActorEventByEventId failed for userEmail=$userEmail eventId=$eventId: ${e.message}")
             HorizonGraphStore.ActorEventLookupResult.LookupFailed(e.message ?: "unknown lookup failure")
+        }
+    }
+
+    override suspend fun readPhraseText(phraseUid: String): String? = withContext(Dispatchers.IO) {
+        try {
+            db.query("sql", "SELECT text FROM Phrase WHERE uid = :u", mapOf("u" to phraseUid)).use { rs ->
+                if (!rs.hasNext()) null else rs.next().toMap()["text"] as? String
+            }
+        } catch (e: Exception) {
+            logger.warn("readPhraseText failed for phraseUid=$phraseUid: ${e.message}")
+            null
         }
     }
 
