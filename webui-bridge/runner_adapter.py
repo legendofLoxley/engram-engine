@@ -66,6 +66,7 @@ from engram_client import (
     fetch_hermes_assignment_completion,
     forward_to_engram,
     load_engram_config,
+    request_hermes_cancellation,
 )
 
 
@@ -188,6 +189,7 @@ class RunStore:
         status: str,
         effective_model: str | None = None,
         effective_model_provider: str | None = None,
+        assignment_id: str | None = None,
     ) -> str:
         run_id = uuid.uuid4().hex
         with self._lock:
@@ -198,6 +200,9 @@ class RunStore:
                 "created_at": time.time(),
                 "effective_model": effective_model,
                 "effective_model_provider": effective_model_provider,
+                # Only set for a delegation-triggering run — the one thing the cancel handler
+                # needs to translate "cancel this run" into "cancel this Hermes assignment".
+                "assignment_id": assignment_id,
             }
         return run_id
 
@@ -483,7 +488,7 @@ def run_turn(
             events = [{"event": "token", "seq": 1, "payload": {"text": reply_text}}]
             run_id = store.create(
                 webui_session_id=webui_session_id, events=events, status=PENDING_HERMES_STATUS,
-                effective_model=model, effective_model_provider=provider,
+                effective_model=model, effective_model_provider=provider, assignment_id=assignment_id,
             )
             thread = threading.Thread(
                 target=_deliver_hermes_completion,
@@ -533,6 +538,69 @@ def run_turn(
             {"event": "done", "seq": 2, "payload": {"status": TERMINAL_ERROR_STATUS}},
         ]
         return store.create(webui_session_id=webui_session_id, events=events, status=TERMINAL_ERROR_STATUS)
+
+
+def handle_cancel_request(config: dict[str, Any], store: RunStore, run_id: str) -> dict[str, Any]:
+    """Backs the native WebUI Stop action (`POST /v1/runs/{run_id}/cancel`).
+
+    Never claims a run "already completed" when this adapter's own tracked status says
+    otherwise — that was the previous behavior (a single hardcoded response regardless of
+    real state) and is exactly what this replaces. Three genuinely distinct, honestly
+    reported cases:
+
+    1. Unknown run_id — this adapter never created it. Reported, not silently 200'd.
+    2. A real run_id that has already reached ANY terminal status (this adapter's own
+       tracked status, which is authoritative for "have we already delivered a final
+       reply" regardless of what engram-engine/Hermes are doing internally) — cancelling
+       is genuinely moot, and saying so is now actually true rather than a hardcoded lie.
+    3. A genuinely still-`PENDING_HERMES_STATUS` run — the one case this adapter previously
+       could not act on at all. Looks up the assignment_id this run's own delegation turn
+       recorded (see RunStore.create), and forwards the request to engram-engine's real
+       cancellation endpoint (POST /debug/hermes-assignment/{id}/cancel), which is the
+       Director-side HermesActiveAssignmentRegistry — never claims this adapter itself
+       stopped anything, since it does not run Hermes; it only ever requests.
+
+    The eventual delivered reply (via _deliver_hermes_completion, unchanged by this
+    function) is what actually carries confirmed information about what happened — this
+    handler only ever reports whether a request was made, consistent with
+    HermesCancellationResponse's own "request, not a guarantee" doc.
+    """
+    record = store.get(run_id)
+    if record is None:
+        return {"ok": False, "status": "unknown_run", "message": "No such run."}
+
+    if record["status"] != PENDING_HERMES_STATUS:
+        return {
+            "ok": False,
+            "status": "already_terminal",
+            "message": f"This run already reached a terminal status ({record['status']}) — there is nothing left to cancel.",
+        }
+
+    assignment_id = record.get("assignment_id")
+    if not assignment_id:
+        # Should not happen in practice — only a delegation-triggering run is ever left
+        # PENDING_HERMES_STATUS — but never claim a cancellation we have no way to act on.
+        return {"ok": False, "status": "no_assignment", "message": "This run has no associated Hermes assignment to cancel."}
+
+    result = request_hermes_cancellation(
+        config["engram_base_url"], config["engram_debug_token"], assignment_id, config["synthetic_user_id"],
+    )
+    if result is None:
+        return {"ok": False, "status": "unreachable", "message": "Could not reach engram-engine to request cancellation."}
+    if result.get("requested"):
+        return {
+            "ok": True,
+            "status": "cancellation_requested",
+            "message": (
+                "Cancellation requested. Hermes may still report a result if it was already "
+                "finishing — that result will not be delivered as an ordinary success."
+            ),
+        }
+    return {
+        "ok": False,
+        "status": "too_late",
+        "message": "This assignment could not be cancelled — it had very likely already finished by the time the request arrived.",
+    }
 
 
 def _deliver_hermes_completion(
@@ -765,7 +833,7 @@ def make_handler(config: dict[str, Any], store: RunStore) -> type[BaseHTTPReques
                 return
 
             if len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "cancel":
-                self._send_json(200, _unsupported("This run already completed — cancellation is not applicable to a single-request Director reply in this slice."))
+                self._send_json(200, handle_cancel_request(config, store, parts[2]))
                 return
             if len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "approval":
                 self._send_json(200, _unsupported("Approval is not supported in this development slice."))

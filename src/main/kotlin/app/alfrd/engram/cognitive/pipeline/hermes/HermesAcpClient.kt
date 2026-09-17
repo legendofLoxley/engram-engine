@@ -35,6 +35,19 @@ sealed interface HermesAssignmentOutcome {
         val toolSucceeded: Boolean,
     ) : HermesAssignmentOutcome
     data class Failed(val reason: String) : HermesAssignmentOutcome
+
+    /**
+     * Cancellation was requested for this assignment (via [HermesCancelHandle]) before it settled
+     * into an ordinary [Completed]/[Failed] result — see that handle's own doc for exactly how the
+     * installed ACP runtime's `session/cancel` support was inspected and why this outcome is
+     * chosen deliberately, regardless of what the underlying exchange itself reported. [reason]
+     * distinguishes hermes-acp confirming the cancellation itself (`stopReason="cancelled"`) from
+     * this client honoring the request anyway despite a different reported stop reason, or from a
+     * forced process kill after the grace period elapsed with no response at all. [partialText] is
+     * whatever content the exchange happened to produce regardless — informational only, and
+     * [HermesCompletionDirector] never delivers it as a confirmed finding.
+     */
+    data class Cancelled(val partialText: String?, val reason: String) : HermesAssignmentOutcome
 }
 
 /**
@@ -61,16 +74,25 @@ sealed interface HermesAssignmentOutcome {
  * sandboxed filesystem, which is the "real tool mechanism" the task requires, not a
  * client-side simulation of one.
  */
-class HermesAcpClient(
+open class HermesAcpClient(
     private val dockerImage: String = System.getenv("HERMES_DEV_IMAGE") ?: "halo-home/hermes-halo:0.0.1",
     private val homeDir: String = System.getenv("HERMES_DEV_HOME_DIR") ?: "/home/halo/development/hermes-dev/home",
     private val workspaceDir: String = System.getenv("HERMES_DEV_WORKSPACE_DIR") ?: "/home/halo/development/hermes-dev/workspace",
     private val containerWorkspacePath: String = System.getenv("HERMES_DEV_CONTAINER_WORKSPACE") ?: "/home/hermes/workspace",
     private val promptTimeoutMs: Long = System.getenv("HERMES_DEV_PROMPT_TIMEOUT_MS")?.toLongOrNull() ?: 180_000L,
+    private val cancelGraceMs: Long = System.getenv("HERMES_DEV_CANCEL_GRACE_MS")?.toLongOrNull() ?: 3_000L,
 ) {
     private val logger = LoggerFactory.getLogger(HermesAcpClient::class.java)
 
-    suspend fun inspectFixture(assignment: HermesAssignment, fixtureFilename: String): HermesAssignmentOutcome =
+    companion object {
+        private const val WATCHDOG_POLL_MS = 100L
+    }
+
+    open suspend fun inspectFixture(
+        assignment: HermesAssignment,
+        fixtureFilename: String,
+        cancelHandle: HermesCancelHandle,
+    ): HermesAssignmentOutcome =
         withContext(Dispatchers.IO) {
             val process = try {
                 ProcessBuilder(buildCommand()).redirectErrorStream(false).start()
@@ -80,11 +102,28 @@ class HermesAcpClient(
             }
 
             // The blocking readLine() loop in exchange() has no cooperative-cancellation
-            // checkpoint of its own — this watchdog is what actually bounds a hung/slow turn:
-            // destroying the process closes its stdout pipe, which unblocks readLine() with EOF.
+            // checkpoint of its own — this watchdog is what actually bounds both a hung/slow turn
+            // (the original timeout path) and a requested-but-unhonored cancellation (the new
+            // grace-then-kill path): destroying the process closes its stdout pipe, which unblocks
+            // readLine() with EOF either way. Polls instead of a single blocking waitFor() so it
+            // can also notice a cancellation request that arrives mid-wait.
             val watchdog = Thread {
                 try {
-                    if (!process.waitFor(promptTimeoutMs, TimeUnit.MILLISECONDS)) {
+                    val deadline = System.currentTimeMillis() + promptTimeoutMs
+                    while (System.currentTimeMillis() < deadline) {
+                        if (!process.isAlive) return@Thread
+                        val cancelRequestedAt = cancelHandle.cancelRequestedAtMs()
+                        if (cancelRequestedAt != null && System.currentTimeMillis() - cancelRequestedAt > cancelGraceMs) {
+                            logger.info(
+                                "hermes-acp: assignment {} did not stop within {}ms of cancellation — force-killing",
+                                assignment.assignmentId, cancelGraceMs,
+                            )
+                            process.destroyForcibly()
+                            return@Thread
+                        }
+                        Thread.sleep(WATCHDOG_POLL_MS)
+                    }
+                    if (process.isAlive) {
                         logger.warn("hermes-acp: assignment {} exceeded {}ms — killing subprocess", assignment.assignmentId, promptTimeoutMs)
                         process.destroyForcibly()
                     }
@@ -94,10 +133,18 @@ class HermesAcpClient(
             }.apply { isDaemon = true; start() }
 
             try {
-                exchange(process, assignment, fixtureFilename)
+                exchange(process, assignment, fixtureFilename, cancelHandle)
             } catch (e: Exception) {
                 logger.warn("hermes-acp: assignment {} failed: {}", assignment.assignmentId, e.message, e)
-                HermesAssignmentOutcome.Failed(e.message ?: (e::class.simpleName ?: "unknown_error"))
+                val cancelRequestedAt = cancelHandle.checkCancelledAndFinish()
+                if (cancelRequestedAt != null) {
+                    HermesAssignmentOutcome.Cancelled(
+                        partialText = null,
+                        reason = "process terminated during cancellation handling (${e.message ?: e::class.simpleName})",
+                    )
+                } else {
+                    HermesAssignmentOutcome.Failed(e.message ?: (e::class.simpleName ?: "unknown_error"))
+                }
             } finally {
                 watchdog.interrupt()
                 process.destroyForcibly()
@@ -134,7 +181,12 @@ class HermesAcpClient(
      * script against this exact image/config reproduced a genuine `read_file` tool call and a
      * reply containing the fixture's own marker token).
      */
-    private fun exchange(process: Process, assignment: HermesAssignment, fixtureFilename: String): HermesAssignmentOutcome {
+    private fun exchange(
+        process: Process,
+        assignment: HermesAssignment,
+        fixtureFilename: String,
+        cancelHandle: HermesCancelHandle,
+    ): HermesAssignmentOutcome {
         val stdin = BufferedWriter(OutputStreamWriter(process.outputStream, Charsets.UTF_8))
         val stdout = BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8))
         val nextId = AtomicInteger(0)
@@ -252,6 +304,10 @@ class HermesAcpClient(
         val sessionResult = readUntil(sessionId2)
         val sessionId = sessionResult["sessionId"]?.jsonPrimitive?.contentOrNull
             ?: return HermesAssignmentOutcome.Failed("session/new returned no sessionId")
+        // Only from this point can a cancellation actually be notified to hermes-acp — it
+        // addresses cancellation by ACP session id, which does not exist before this response.
+        // A cancellation requested before now is still honored: attach() sends it immediately.
+        cancelHandle.attach(process, sessionId)
 
         // Sent as an ABSOLUTE path, not assignment.task verbatim (a relative filename +
         // relying on session/new's own cwd param) — verified live that Hermes's read_file
@@ -282,7 +338,7 @@ class HermesAcpClient(
 
         val toolName = observedToolName
         val toolPath = observedToolPath
-        return if (toolName != null) {
+        val computedOutcome = if (toolName != null) {
             HermesAssignmentOutcome.Completed(
                 findingsText = messageText.toString().trim().ifBlank { "Hermes completed the read with no text reply." },
                 toolName = toolName,
@@ -291,6 +347,23 @@ class HermesAcpClient(
             )
         } else {
             HermesAssignmentOutcome.Failed("no tool call observed (stopReason=$stopReason)")
+        }
+
+        // The single point this client commits to a final outcome — see HermesCancelHandle's own
+        // doc for why a cancellation request must override whatever the exchange itself produced,
+        // never the reverse: the installed runtime only labels stopReason="cancelled" when its own
+        // agent turn happened to notice the interrupt before finishing, which is not guaranteed.
+        val cancelRequestedAt = cancelHandle.checkCancelledAndFinish()
+        return if (cancelRequestedAt != null) {
+            val partialText = (computedOutcome as? HermesAssignmentOutcome.Completed)?.findingsText
+            val reason = if (stopReason == "cancelled") {
+                "hermes confirmed the cancellation itself (stopReason=cancelled)"
+            } else {
+                "cancellation was requested; hermes nonetheless reported stopReason=$stopReason — honoring the cancellation regardless"
+            }
+            HermesAssignmentOutcome.Cancelled(partialText, reason)
+        } else {
+            computedOutcome
         }
     }
 }

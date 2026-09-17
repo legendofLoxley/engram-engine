@@ -65,6 +65,32 @@ class HermesCompletionDirectorTest {
     }
 
     @Test
+    fun `a cancelled outcome with no partial result is withheld, never delivered as an ordinary success`() {
+        val outcome = HermesAssignmentOutcome.Cancelled(partialText = null, reason = "hermes confirmed the cancellation itself (stopReason=cancelled)")
+
+        val decision = HermesCompletionDirector.decide(assignment, outcome)
+
+        assertTrue(decision is HermesCompletionDecision.Withheld)
+        assertTrue(decision.deliveryText.contains("cancelled"))
+    }
+
+    @Test
+    fun `a cancelled outcome that produced a real result anyway is still withheld — the result is never delivered as confirmed`() {
+        val outcome = HermesAssignmentOutcome.Cancelled(
+            partialText = "DH-FIXTURE-7f2a91c4",
+            reason = "cancellation was requested; hermes nonetheless reported stopReason=end_turn — honoring the cancellation regardless",
+        )
+
+        val decision = HermesCompletionDirector.decide(assignment, outcome)
+
+        assertTrue(decision is HermesCompletionDecision.Withheld)
+        assertFalse(
+            decision.deliveryText.contains("DH-FIXTURE-7f2a91c4"),
+            "a cancelled run must never subsequently receive what looks like an ordinary successful completion reply",
+        )
+    }
+
+    @Test
     fun `deciding twice for the same assignment and outcome is deterministic — a pure function, no hidden state`() {
         val outcome = HermesAssignmentOutcome.Completed(
             findingsText = "DH-FIXTURE-abc123", toolName = "read",

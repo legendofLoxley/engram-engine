@@ -112,5 +112,48 @@ class FetchHermesAssignmentCompletionTest(unittest.TestCase):
         self.assertEqual(captured["auth"], "Bearer secret-tok")
 
 
+class RequestHermesCancellationTest(unittest.TestCase):
+    def test_200_returns_the_parsed_response(self):
+        body = b'{"assignmentId":"a1","requested":true}'
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(body)):
+            result = ec.request_hermes_cancellation("http://x", "tok", "a1", "webui-dev")
+        self.assertEqual(result, {"assignmentId": "a1", "requested": True})
+
+    def test_404_returns_none(self):
+        error = urllib.error.HTTPError("http://x", 404, "not found", {}, io.BytesIO(b""))
+        try:
+            with patch("urllib.request.urlopen", side_effect=error):
+                result = ec.request_hermes_cancellation("http://x", "tok", "a1", "webui-dev")
+            self.assertIsNone(result)
+        finally:
+            error.close()
+
+    def test_connection_failure_returns_none_rather_than_raising(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+            result = ec.request_hermes_cancellation("http://x", "tok", "a1", "webui-dev")
+        self.assertIsNone(result)
+
+    def test_malformed_json_body_returns_none_rather_than_raising(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"not json")):
+            result = ec.request_hermes_cancellation("http://x", "tok", "a1", "webui-dev")
+        self.assertIsNone(result)
+
+    def test_sends_a_post_request_to_the_cancel_path_with_encoded_assignment_and_user_id(self):
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["auth"] = req.get_header("Authorization")
+            return _FakeResponse(b'{"assignmentId":"a1","requested":true}')
+
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            ec.request_hermes_cancellation("http://x", "secret-tok", "a1", "webui dev")
+        self.assertIn("/debug/hermes-assignment/a1/cancel", captured["url"])
+        self.assertIn("syntheticUserId=webui%20dev", captured["url"])
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["auth"], "Bearer secret-tok")
+
+
 if __name__ == "__main__":
     unittest.main()

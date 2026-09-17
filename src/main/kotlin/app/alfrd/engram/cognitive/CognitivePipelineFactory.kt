@@ -6,6 +6,7 @@ import app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator
 import app.alfrd.engram.cognitive.pipeline.Interpreter
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAcpClient
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatcher
 import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService
@@ -47,7 +48,12 @@ object CognitivePipelineFactory {
      *   factory, is unaffected. Pass a real, shared store only for the isolated debug/dev session
      *   pool this bounded slice targets — see `Application.kt`'s `DEBUG_CONVERSE_ENABLED` block.
      */
-    fun create(db: Database? = null, sessionManager: SessionManager? = null, hermesCompletionStore: HermesAssignmentCompletionStore? = null): CognitivePipeline {
+    fun create(
+        db: Database? = null,
+        sessionManager: SessionManager? = null,
+        hermesCompletionStore: HermesAssignmentCompletionStore? = null,
+        hermesActiveAssignments: HermesActiveAssignmentRegistry? = null,
+    ): CognitivePipeline {
         val anthropicKey = System.getenv("ANTHROPIC_API_KEY") ?: ""
         val googleKey    = System.getenv("GOOGLE_AI_API_KEY") ?: ""
 
@@ -99,7 +105,7 @@ object CognitivePipelineFactory {
         // Shares the exact dependency shape DebugActorEventRoutes.kt already builds for
         // /debug/actor-event — same ActorEventIngestionService construction, just handed to a
         // real dispatcher instead of a debug-token-gated HTTP handler.
-        val hermesDelegationDispatcher = if (hermesCompletionStore != null && db != null) {
+        val hermesDelegationDispatcher = if (hermesCompletionStore != null && hermesActiveAssignments != null && db != null) {
             val horizonGraphStore = ArcadeHorizonGraphStore(db)
             val horizonAssembler = ArcadeHorizonAssembler(db)
             val ingestionService = ActorEventIngestionService(
@@ -107,7 +113,7 @@ object CognitivePipelineFactory {
                 horizonGraphStore = horizonGraphStore,
                 horizonPropagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler),
             )
-            HermesDelegationDispatcher(HermesAcpClient(), ingestionService, hermesCompletionStore)
+            HermesDelegationDispatcher(HermesAcpClient(), ingestionService, hermesCompletionStore, hermesActiveAssignments)
         } else null
 
         return CognitivePipeline(

@@ -61,5 +61,14 @@ object HermesCompletionDirector {
             deliveryText = "Hermes wasn't able to complete that: ${outcome.reason}",
             reason = "execution failed: ${outcome.reason} assignmentId=${assignment.assignmentId}",
         )
+        is HermesAssignmentOutcome.Cancelled -> HermesCompletionDecision.Withheld(
+            deliveryText = if (outcome.partialText != null) {
+                "This request was cancelled. Hermes had already produced a result by then, but it " +
+                    "is not being delivered, since the cancellation was honored."
+            } else {
+                "This request was cancelled before Hermes could produce a result."
+            },
+            reason = "cancelled: ${outcome.reason} assignmentId=${assignment.assignmentId}",
+        )
     }
 }

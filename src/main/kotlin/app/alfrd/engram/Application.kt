@@ -6,6 +6,7 @@ import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.api.configureOnboardingRoutes
 import app.alfrd.engram.api.configurePhrasesRoutes
@@ -145,13 +146,18 @@ fun main() {
             // No sessionManager passed to factory → FirstSessionHandler is disabled for synthetic users.
             // One shared HermesAssignmentCompletionStore instance across every session's pipeline
             // AND the polling route below — a per-call store would make a completion invisible
-            // to whatever polls for it.
+            // to whatever polls for it. HermesActiveAssignmentRegistry needs the same sharing for
+            // the mirror-image reason: a cancellation request (by assignmentId only) must reach
+            // whichever session's pipeline actually dispatched it.
             val hermesCompletionStore = HermesAssignmentCompletionStore()
-            val debugSessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, hermesCompletionStore = hermesCompletionStore) })
+            val hermesActiveAssignments = HermesActiveAssignmentRegistry()
+            val debugSessionManager = SessionManager(factory = {
+                CognitivePipelineFactory.create(db, hermesCompletionStore = hermesCompletionStore, hermesActiveAssignments = hermesActiveAssignments)
+            })
             configureDebugConverseRoutes(debugSessionManager, db)
             configureDebugEnvironmentSignalRoutes(db)
             configureDebugActorEventRoutes(db)
-            configureDebugHermesAssignmentRoutes(hermesCompletionStore)
+            configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
             log.info("debug-converse endpoint enabled")
         }
         routing {

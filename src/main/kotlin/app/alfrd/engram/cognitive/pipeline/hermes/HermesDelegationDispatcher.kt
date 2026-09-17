@@ -33,11 +33,20 @@ fun interface HermesDelegationDispatching {
  * own `CoroutineScope(Dispatchers.IO + SupervisorJob())` — the calling Director turn issues the
  * assignment and returns its own reply immediately; this coroutine keeps running after that
  * response has already gone to the browser.
+ *
+ * Registers a [HermesCancelHandle] in [activeAssignments] for the assignment's entire in-flight
+ * lifetime, so a later cancellation request (by assignment id, from
+ * [app.alfrd.engram.api.DebugHermesAssignmentRoutes]) can reach this specific exchange. A
+ * [HermesAssignmentOutcome.Cancelled] result is handled like any other outcome here — ingested as
+ * real graph evidence and recorded in [completionStore] — never silently dropped; see
+ * [HermesCompletionDirector] for why it is always delivered as a withheld reply, never an
+ * ordinary accepted completion.
  */
 class HermesDelegationDispatcher(
     private val client: HermesAcpClient,
     private val ingestionService: ActorEventIngestionService,
     private val completionStore: HermesAssignmentCompletionStore,
+    private val activeAssignments: HermesActiveAssignmentRegistry,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
 ) : HermesDelegationDispatching {
     private val logger = LoggerFactory.getLogger(HermesDelegationDispatcher::class.java)
@@ -47,43 +56,55 @@ class HermesDelegationDispatcher(
             "hermes-delegation dispatching assignmentId={} userEmail={} task={}",
             assignment.assignmentId, assignment.userEmail, assignment.task,
         )
+        val cancelHandle = HermesCancelHandle()
+        activeAssignments.register(assignment.assignmentId, assignment.userEmail, cancelHandle)
         scope.launch {
-            val outcome = client.inspectFixture(assignment, HermesDelegationTrigger.FIXTURE_FILENAME)
-            val kind = when (outcome) {
-                is HermesAssignmentOutcome.Completed -> ActorEventKind.ToolResult(
-                    text = outcome.findingsText,
-                    toolName = outcome.toolName,
-                    toolSucceeded = outcome.toolSucceeded,
+            try {
+                val outcome = client.inspectFixture(assignment, HermesDelegationTrigger.FIXTURE_FILENAME, cancelHandle)
+                val kind = when (outcome) {
+                    is HermesAssignmentOutcome.Completed -> ActorEventKind.ToolResult(
+                        text = outcome.findingsText,
+                        toolName = outcome.toolName,
+                        toolSucceeded = outcome.toolSucceeded,
+                    )
+                    is HermesAssignmentOutcome.Failed -> ActorEventKind.ToolResult(
+                        text = "Hermes assignment could not be completed: ${outcome.reason}",
+                        toolName = "read",
+                        toolSucceeded = false,
+                    )
+                    is HermesAssignmentOutcome.Cancelled -> ActorEventKind.ToolResult(
+                        text = "Hermes assignment was cancelled (${outcome.reason})" +
+                            (outcome.partialText?.let { " — a result arrived anyway: $it" } ?: ""),
+                        toolName = "read",
+                        toolSucceeded = false,
+                    )
+                }
+                val ingestResult = ingestionService.ingest(
+                    userEmail = assignment.userEmail,
+                    eventId = "hermes-assignment-${assignment.assignmentId}",
+                    kind = kind,
+                    sourceName = "hermes",
+                    assignmentId = assignment.assignmentId,
+                    occurredAt = System.currentTimeMillis(),
                 )
-                is HermesAssignmentOutcome.Failed -> ActorEventKind.ToolResult(
-                    text = "Hermes assignment could not be completed: ${outcome.reason}",
-                    toolName = "read",
-                    toolSucceeded = false,
+                // The one decision boundary: whether/how this executed assignment's findings are
+                // actually delivered is decided HERE, by the Director-side HermesCompletionDirector —
+                // never implicitly by whatever transport later renders it. See that object's doc.
+                val decision = HermesCompletionDirector.decide(assignment, outcome)
+                completionStore.record(
+                    assignmentId = assignment.assignmentId,
+                    userEmail = assignment.userEmail,
+                    outcome = outcome,
+                    decision = decision,
+                    graphIngestOutcome = ingestResult::class.simpleName ?: "Unknown",
                 )
+                logger.info(
+                    "hermes-delegation completed assignmentId={} userEmail={} outcome={} decision={} ingestOutcome={}",
+                    assignment.assignmentId, assignment.userEmail, outcome::class.simpleName, decision::class.simpleName, ingestResult::class.simpleName,
+                )
+            } finally {
+                activeAssignments.unregister(assignment.assignmentId)
             }
-            val ingestResult = ingestionService.ingest(
-                userEmail = assignment.userEmail,
-                eventId = "hermes-assignment-${assignment.assignmentId}",
-                kind = kind,
-                sourceName = "hermes",
-                assignmentId = assignment.assignmentId,
-                occurredAt = System.currentTimeMillis(),
-            )
-            // The one decision boundary: whether/how this executed assignment's findings are
-            // actually delivered is decided HERE, by the Director-side HermesCompletionDirector —
-            // never implicitly by whatever transport later renders it. See that object's doc.
-            val decision = HermesCompletionDirector.decide(assignment, outcome)
-            completionStore.record(
-                assignmentId = assignment.assignmentId,
-                userEmail = assignment.userEmail,
-                outcome = outcome,
-                decision = decision,
-                graphIngestOutcome = ingestResult::class.simpleName ?: "Unknown",
-            )
-            logger.info(
-                "hermes-delegation completed assignmentId={} userEmail={} outcome={} decision={} ingestOutcome={}",
-                assignment.assignmentId, assignment.userEmail, outcome::class.simpleName, decision::class.simpleName, ingestResult::class.simpleName,
-            )
         }
     }
 }

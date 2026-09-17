@@ -1,10 +1,13 @@
 package app.alfrd.engram.api
 
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentOutcome
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesCompletionDecision
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.post
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
@@ -33,7 +36,11 @@ class DebugHermesAssignmentRoutesTest {
     )
     private val accepted = HermesCompletionDecision.Accepted("Hermes finished checking that — it reported: DH-FIXTURE-abc123")
 
-    private fun Application.testModule(store: HermesAssignmentCompletionStore, registerRoute: Boolean = true) {
+    private fun Application.testModule(
+        store: HermesAssignmentCompletionStore,
+        registerRoute: Boolean = true,
+        activeAssignments: HermesActiveAssignmentRegistry = HermesActiveAssignmentRegistry(),
+    ) {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
@@ -45,7 +52,7 @@ class DebugHermesAssignmentRoutesTest {
             }
         }
         if (registerRoute) {
-            configureDebugHermesAssignmentRoutes(store)
+            configureDebugHermesAssignmentRoutes(store, activeAssignments)
         }
     }
 
@@ -184,5 +191,68 @@ class DebugHermesAssignmentRoutesTest {
             body.contains("SECRET-UNRELATED-CONTENT"),
             "the ownership boundary this route exists to prove: a caller (the runner adapter) must never see, and therefore can never leak, unvetted raw findings",
         )
+    }
+
+    // ── POST /hermes-assignment/{assignmentId}/cancel — a request, never a guarantee ────────
+
+    @Test
+    fun `cancel requires authentication`() = testApplication {
+        val store = HermesAssignmentCompletionStore()
+        application { testModule(store) }
+        val response = client.post("/debug/hermes-assignment/a1/cancel?syntheticUserId=t")
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `cancel for a genuinely active assignment reports requested=true`() = testApplication {
+        val store = HermesAssignmentCompletionStore()
+        val activeAssignments = HermesActiveAssignmentRegistry()
+        activeAssignments.register("a1", "debug+owner@test.alfrd.internal", HermesCancelHandle())
+        application { testModule(store, activeAssignments = activeAssignments) }
+
+        val response = client.post("/debug/hermes-assignment/a1/cancel?syntheticUserId=owner") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"assignmentId\":\"a1\""))
+        assertTrue(body.contains("\"requested\":true"))
+    }
+
+    @Test
+    fun `cancel for an unknown assignmentId reports requested=false, never claiming success`() = testApplication {
+        val store = HermesAssignmentCompletionStore()
+        application { testModule(store) }
+
+        val response = client.post("/debug/hermes-assignment/never-dispatched/cancel?syntheticUserId=owner") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.bodyAsText().contains("\"requested\":false"))
+    }
+
+    @Test
+    fun `cancel under a different synthetic identity than the one that owns the assignment reports requested=false`() = testApplication {
+        val store = HermesAssignmentCompletionStore()
+        val activeAssignments = HermesActiveAssignmentRegistry()
+        activeAssignments.register("a1", "debug+owner@test.alfrd.internal", HermesCancelHandle())
+        application { testModule(store, activeAssignments = activeAssignments) }
+
+        val response = client.post("/debug/hermes-assignment/a1/cancel?syntheticUserId=someone-else") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.bodyAsText().contains("\"requested\":false"))
+    }
+
+    @Test
+    fun `cancel with a non-synthetic userEmail is rejected with 400`() = testApplication {
+        val store = HermesAssignmentCompletionStore()
+        application { testModule(store) }
+
+        val response = client.post("/debug/hermes-assignment/a1/cancel?userEmail=real.person@gmail.com") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
     }
 }

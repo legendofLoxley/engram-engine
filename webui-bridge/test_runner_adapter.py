@@ -710,13 +710,55 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
         self.assertNotIn("effective_model", start_payload)
         self.assertNotIn("effective_model_provider", start_payload)
 
-    def test_cancel_reports_not_active_rather_than_pretending_to_cancel(self):
+    def test_cancel_for_an_unknown_run_reports_unknown_run_not_a_generic_unsupported_message(self):
         conn = self._conn()
         conn.request("POST", "/v1/runs/whatever/cancel", body=b"{}", headers=self._auth_headers())
         resp = conn.getresponse()
         self.assertEqual(resp.status, 200)
         payload = json.loads(resp.read())
         self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "unknown_run")
+
+    def test_cancel_for_an_already_terminal_run_honestly_reports_that_rather_than_a_hardcoded_message(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-cancel-terminal"}):
+            conn = self._conn()
+            body = json.dumps({"session_id": "webui-session-cancel-terminal", "message": "hello"}).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            run_id = json.loads(resp.read())["run_id"]
+
+        conn2 = self._conn()
+        conn2.request("POST", f"/v1/runs/{run_id}/cancel", body=b"{}", headers=self._auth_headers())
+        resp2 = conn2.getresponse()
+        self.assertEqual(resp2.status, 200)
+        payload = json.loads(resp2.read())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "already_terminal")
+
+    def test_cancel_for_a_genuinely_pending_delegation_run_requests_it_never_claims_already_completed(self):
+        engram_result = {
+            "reply": "I've asked Hermes to look into it.",
+            "sessionId": "e-cancel-pending",
+            "trace": {"hermesDelegation": {"assignmentId": "assign-pending", "task": "read the fixture"}},
+        }
+        with patch.object(ra, "forward_to_engram", return_value=engram_result), \
+             patch.object(ra, "threading"):  # never actually spawn the delivery thread for this test
+            conn = self._conn()
+            body = json.dumps({"session_id": "webui-session-cancel-pending", "message": "check the fixture"}).encode()
+            conn.request("POST", "/v1/runs", body=body, headers=self._auth_headers())
+            resp = conn.getresponse()
+            run_id = json.loads(resp.read())["run_id"]
+
+        with patch.object(ra, "request_hermes_cancellation", return_value={"assignmentId": "assign-pending", "requested": True}) as mocked:
+            conn2 = self._conn()
+            conn2.request("POST", f"/v1/runs/{run_id}/cancel", body=b"{}", headers=self._auth_headers())
+            resp2 = conn2.getresponse()
+            self.assertEqual(resp2.status, 200)
+            payload = json.loads(resp2.read())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["status"], "cancellation_requested")
+            mocked.assert_called_once()
+            self.assertEqual(mocked.call_args.args[2], "assign-pending", "the cancel request must target the run's own recorded assignment id")
 
     def test_blank_message_rejected_without_calling_upstream(self):
         with patch.object(ra, "forward_to_engram") as mocked:
@@ -919,6 +961,75 @@ class RunTurnHermesDelegationTest(unittest.TestCase):
         self.assertEqual(record["status"], ra.TERMINAL_COMPLETED_STATUS)
         self.assertEqual(record["events"][1]["event"], "done")
         mock_threading.Thread.assert_not_called()
+
+
+class HandleCancelRequestTest(unittest.TestCase):
+    """Tests handle_cancel_request directly, injecting request_hermes_cancellation via
+    patch.object the same way DeliverHermesCompletionTest injects fetch_fn — no real network
+    calls, no real thread.
+    """
+
+    def setUp(self):
+        self.config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.store = ra.RunStore()
+
+    def test_unknown_run_id_is_reported_honestly_not_as_a_generic_unsupported_message(self):
+        result = ra.handle_cancel_request(self.config, self.store, "never-created")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "unknown_run")
+
+    def test_already_terminal_run_is_reported_honestly(self):
+        run_id = self.store.create(
+            webui_session_id="w-1",
+            events=[{"event": "done", "seq": 1, "payload": {"status": ra.TERMINAL_COMPLETED_STATUS}}],
+            status=ra.TERMINAL_COMPLETED_STATUS,
+        )
+        result = ra.handle_cancel_request(self.config, self.store, run_id)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "already_terminal")
+
+    def test_genuinely_pending_run_with_no_assignment_id_never_claims_a_cancellation_it_cannot_act_on(self):
+        run_id = self.store.create(webui_session_id="w-1", events=[], status=ra.PENDING_HERMES_STATUS)
+        result = ra.handle_cancel_request(self.config, self.store, run_id)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "no_assignment")
+
+    def test_genuinely_pending_run_requests_cancellation_and_never_says_already_completed(self):
+        run_id = self.store.create(webui_session_id="w-1", events=[], status=ra.PENDING_HERMES_STATUS, assignment_id="assign-1")
+        with patch.object(ra, "request_hermes_cancellation", return_value={"assignmentId": "assign-1", "requested": True}):
+            result = ra.handle_cancel_request(self.config, self.store, run_id)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "cancellation_requested")
+        self.assertNotIn("already completed", result["message"])
+
+    def test_pending_run_where_engram_reports_too_late_is_reported_honestly_not_as_a_success(self):
+        run_id = self.store.create(webui_session_id="w-1", events=[], status=ra.PENDING_HERMES_STATUS, assignment_id="assign-1")
+        with patch.object(ra, "request_hermes_cancellation", return_value={"assignmentId": "assign-1", "requested": False}):
+            result = ra.handle_cancel_request(self.config, self.store, run_id)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "too_late")
+
+    def test_pending_run_where_engram_is_unreachable_is_reported_honestly_not_as_a_success_or_as_already_completed(self):
+        run_id = self.store.create(webui_session_id="w-1", events=[], status=ra.PENDING_HERMES_STATUS, assignment_id="assign-1")
+        with patch.object(ra, "request_hermes_cancellation", return_value=None):
+            result = ra.handle_cancel_request(self.config, self.store, run_id)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "unreachable")
+
+    def test_isolation_from_other_runs_cancelling_one_pending_run_leaves_a_different_one_untouched(self):
+        run_a = self.store.create(webui_session_id="w-a", events=[], status=ra.PENDING_HERMES_STATUS, assignment_id="assign-a")
+        run_b = self.store.create(webui_session_id="w-b", events=[], status=ra.PENDING_HERMES_STATUS, assignment_id="assign-b")
+
+        with patch.object(ra, "request_hermes_cancellation", return_value={"assignmentId": "assign-a", "requested": True}) as mocked:
+            result = ra.handle_cancel_request(self.config, self.store, run_a)
+        self.assertTrue(result["ok"])
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.args[2], "assign-a")
+
+        # run_b's own record must be completely unaffected — still pending, own assignment id intact.
+        record_b = self.store.get(run_b)
+        self.assertEqual(record_b["status"], ra.PENDING_HERMES_STATUS)
+        self.assertEqual(record_b["assignment_id"], "assign-b")
 
 
 class DeliverHermesCompletionTest(unittest.TestCase):

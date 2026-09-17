@@ -1,7 +1,9 @@
 package app.alfrd.engram.api
 
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentOutcome
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesCancellationRequestOutcome
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesCompletionDecision
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -40,6 +42,20 @@ data class HermesAssignmentCompletionResponse(
 )
 
 /**
+ * Response for `POST /hermes-assignment/{assignmentId}/cancel` — a *request*, never a guarantee.
+ * [requested] is true only if a genuinely still-active assignment was found for this id and
+ * userEmail; false covers "unknown id", "not yours", and "already finished" identically, the same
+ * "never distinguishable by probing" convention as everywhere else in this route. Confirmed
+ * termination — what actually happened — is only ever knowable afterward, via
+ * `GET /hermes-assignment/{assignmentId}` reporting `executionOutcome="Cancelled"`.
+ */
+@Serializable
+data class HermesCancellationResponse(
+    val assignmentId: String,
+    val requested: Boolean,
+)
+
+/**
  * The explicit, polled delivery channel for a Hermes assignment's completion —
  * [HermesAssignmentCompletionStore]'s doc explains why this is deliberately independent of
  * [app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService]/`RecentActorEvidence`.
@@ -54,10 +70,39 @@ data class HermesAssignmentCompletionResponse(
  * and "known assignmentId, wrong userEmail" identically — a caller cannot distinguish "never
  * existed" from "not yours" by probing.
  */
-fun Application.configureDebugHermesAssignmentRoutes(store: HermesAssignmentCompletionStore) {
+fun Application.configureDebugHermesAssignmentRoutes(
+    store: HermesAssignmentCompletionStore,
+    activeAssignments: HermesActiveAssignmentRegistry,
+) {
     routing {
         authenticate("debug-token") {
             route("/debug") {
+                post("/hermes-assignment/{assignmentId}/cancel") {
+                    val assignmentId = call.parameters["assignmentId"]?.takeIf { it.isNotBlank() }
+                        ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "assignmentId is required"))
+
+                    val userEmail = call.request.queryParameters["userEmail"]?.takeIf { it.isNotBlank() }
+                        ?: DebugConverseService.resolveUserId(call.request.queryParameters["syntheticUserId"])
+
+                    if (!userEmail.endsWith(DebugConverseService.SYNTHETIC_EMAIL_DOMAIN, ignoreCase = true)) {
+                        logger.warn("hermes-assignment cancel: rejected non-synthetic userEmail={} for assignmentId={}", userEmail, assignmentId)
+                        return@post call.respond(
+                            HttpStatusCode.BadRequest,
+                            mapOf("error" to "userEmail must be a synthetic identity ending in '${DebugConverseService.SYNTHETIC_EMAIL_DOMAIN}'"),
+                        )
+                    }
+
+                    val outcome = activeAssignments.requestCancellation(assignmentId, userEmail)
+                    logger.info("hermes-assignment cancel requested assignmentId={} userEmail={} outcome={}", assignmentId, userEmail, outcome::class.simpleName)
+                    call.respond(
+                        HttpStatusCode.OK,
+                        HermesCancellationResponse(
+                            assignmentId = assignmentId,
+                            requested = outcome is HermesCancellationRequestOutcome.Requested,
+                        ),
+                    )
+                }
+
                 get("/hermes-assignment/{assignmentId}") {
                     val assignmentId = call.parameters["assignmentId"]?.takeIf { it.isNotBlank() }
                         ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "assignmentId is required"))
@@ -82,6 +127,7 @@ fun Application.configureDebugHermesAssignmentRoutes(store: HermesAssignmentComp
                         executionOutcome = when (outcome) {
                             is HermesAssignmentOutcome.Completed -> "Completed"
                             is HermesAssignmentOutcome.Failed -> "Failed"
+                            is HermesAssignmentOutcome.Cancelled -> "Cancelled"
                         },
                         decision = when (completion.decision) {
                             is HermesCompletionDecision.Accepted -> "Accepted"

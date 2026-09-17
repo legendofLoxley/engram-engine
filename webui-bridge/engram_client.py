@@ -118,3 +118,43 @@ def fetch_hermes_assignment_completion(
     except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def request_hermes_cancellation(
+    base_url: str,
+    token: str,
+    assignment_id: str,
+    synthetic_user_id: str,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """POST engram-engine's /debug/hermes-assignment/{assignment_id}/cancel.
+
+    Returns the parsed `{"assignmentId": ..., "requested": bool}` body on 200, or
+    None on any failure (connection error, timeout, malformed body) — the caller
+    must treat None as "could not confirm a request was made," never as "not
+    requested" (those are different facts; see runner_adapter.py's own handling).
+    `requested` itself is never a guarantee of termination, only that a genuinely
+    still-active assignment was found in time to matter — see the endpoint's own
+    HermesCancellationResponse doc.
+    """
+    url = (
+        f"{base_url}/debug/hermes-assignment/{assignment_id}/cancel"
+        f"?syntheticUserId={urllib.parse.quote(synthetic_user_id)}"
+    )
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError:
+        return None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
