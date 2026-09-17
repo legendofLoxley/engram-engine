@@ -182,6 +182,14 @@ not to corrupt on either direction of that change.
 
 ## Observed: mid-assignment restart behavior
 
+**Superseded by "Interrupted-conversation recovery" below.** This section's
+findings are preserved as-is because they are the actual evidence the
+recovery mechanism was built against — the stuck-conversation/silent-data-loss
+behavior described here no longer occurs, but the *reasons* it occurred
+(orphaned container, fresh JVM with zero knowledge, `done`-only persistence)
+are exactly the reasons the fix works the way it does. Read this section for
+"what was broken and why"; read the new section for "what happens now."
+
 Verified live on 2026-09-17 using the test-only delay gate (`HERMES_DEV_TEST_DELAY_MS`,
 temporarily set via a systemd drop-in, removed immediately after — never left
 enabled). A fresh WebUI conversation triggered a real delegation
@@ -229,6 +237,112 @@ respect to the *graph* (verified: identical vertex/edge counts and byte-
 identical existing transcripts across every restart performed during this
 pass) but not safe with respect to whatever single delegation and
 conversation happen to be in flight at that exact moment.
+
+## Interrupted-conversation recovery
+
+Implemented and verified live on 2026-09-17, on `codex/interrupted-conversation-recovery`
+(branched from the packaging commit above). Directly follows from "Observed:
+mid-assignment restart behavior" — a bounded fix for exactly the two failure
+modes documented there, not a general durable job queue and not automatic
+task resumption. Nothing in the Kotlin backend changed: the two facts this
+needed (`/health`'s existing `uptimeSeconds`, and the existing
+`/debug/hermes-assignment/{id}` completion channel) were already there.
+
+**Before adding any new storage**, the existing WebUI session/run persistence
+was inspected directly:
+
+- `webui-bridge/vendor-patches/routes_py_runner_session_persistence.patch`
+  already persists a run's full transcript to WebUI's own on-disk session
+  file — but only when a `done` SSE event streams past an actively-connected
+  browser. An interrupted run never reaches `done`, so nothing is ever
+  written — not even the user's own message (reproduced live below).
+- The vendor's own `pending_user_message`/`pending_started_at` session fields
+  (with an existing stale-pending recovery banner and grace-period logic)
+  turned out to be scoped entirely to WebUI's legacy in-process runtime
+  adapter (`_start_chat_stream_for_session`) — traced through `_start_run`'s
+  own adapter-selection branch and confirmed this integration's `runner-local`
+  mode never reaches that code path at all, so these fields are always null
+  here and were not safe to repurpose (a second writer racing the container's
+  own read-modify-write of the same field, for no actual benefit).
+
+**What was built** (`webui-bridge/runner_adapter.py`, `webui-bridge/engram_client.py`):
+
+- `write_pending_marker` records one small durable JSON file per outstanding
+  delegation (`webui_session_id`, `assignment_id`, the original user message,
+  the ack text, dispatch time) in a `hermes-pending/` directory sibling to
+  the existing sessions dir — written just before the delivery thread starts,
+  removed once that thread (or reconciliation) resolves it. This is the one
+  new piece of state this feature needed; everything else reuses what already
+  existed.
+- `persist_webui_session_messages` writes a resolved turn directly to WebUI's
+  own session file, rather than depending on a live browser connection to
+  trigger the existing SSE-driven patch above — necessary because
+  reconciliation runs at adapter startup, when no browser is necessarily
+  watching. `_deliver_hermes_completion` now also calls this directly on
+  every resolution (not just during reconciliation), which incidentally
+  closes a related pre-existing gap: a closed browser tab no longer causes an
+  ordinarily-successful delegation's result to go unpersisted either.
+- `reconcile_interrupted_assignments` runs once, in a background thread, at
+  adapter startup. For each leftover marker, `fetch_engram_health` distinguishes:
+  - **Health unreachable** (bounded retry, ~30s) → "can't currently confirm,"
+    never a claimed stop/failure.
+  - **Backend's reported uptime started after the marker's dispatch time**
+    → confirmed loss (the JVM that owned `HermesActiveAssignmentRegistry`/
+    `HermesAssignmentCompletionStore` for this assignment no longer exists) →
+    an honest, Director-voiced interruption notice, composed by the adapter
+    itself for the same reason the pre-existing 240s-timeout message already
+    is (engram-engine never got a chance to decide anything).
+  - **Backend is the same instance** (only the adapter restarted) → the
+    assignment was never actually lost. Either its completion is already
+    recorded (delivered verbatim, no adapter restart symptom visible at all
+    to the user) or it's still genuinely running (resumes polling via a
+    fresh `_deliver_hermes_completion` thread — never a new Hermes dispatch).
+
+**Never automatically replays an interrupted action** — every branch above
+either reports honestly or resumes *reading* an assignment the backend
+already owns; none of them re-invoke `HermesAcpClient`. Repeated
+reconciliation is idempotent by construction: each marker is removed exactly
+once, by whichever path resolves it, so a second reconciliation pass (or a
+second adapter restart before the first fully resolves) finds nothing left to
+duplicate. One accepted, narrow race: a crash between the direct session-file
+write and the marker's removal would cause the *next* startup to reconcile
+the same marker again, duplicating that one turn in the transcript — a
+dev-tool-scoped risk, not engineered around further (see "Remaining limits").
+
+**Live-demonstrated, both restart targets, using the same test-only delay
+gate as the cancellation work above (reverted to 0 immediately after):**
+
+- **Runner-adapter-only restart** (backend untouched): triggered a real
+  delegation, confirmed its marker on disk, restarted
+  `hermes-runner-adapter.service` mid-flight. Reconciliation found the same
+  backend instance, resumed polling, and — once Hermes actually finished —
+  delivered the real Director-composed result verbatim
+  ("...Hermes finished checking that — it reported: DH-FIXTURE-7f2a91c4"),
+  fully persisted. Reload showed it correctly; a follow-up message in the
+  same conversation answered normally. **Zero data loss.**
+- **Backend restart** (`engram-dev.service`, then the adapter to trigger
+  reconciliation): confirmed via `/health` (`uptimeSeconds: 1`) that the
+  backend was a fresh instance relative to the marker's dispatch time.
+  Reconciliation delivered: *"The development backend restarted while this
+  was still outstanding, so there's no way for me to confirm whether it
+  finished. This conversation is ready for another message whenever you'd
+  like."* — persisted, reload-correct, and a follow-up message in the same
+  conversation worked normally afterward.
+- **Regression check** (gate reverted to 0, no restarts): an ordinary
+  delegation still completes and delivers correctly, and leaves no leftover
+  marker.
+- For comparison, the *old* behavior was reproduced incidentally along the
+  way (old adapter code, pre-restart): a reload of that interrupted
+  conversation showed a completely empty transcript — not even the user's
+  own message — matching "Observed: mid-assignment restart behavior" above
+  exactly.
+
+**Tests:** 145 Python tests, 0 failures (up from 111) — new coverage for the
+marker read/write/remove cycle, direct session-file persistence, every
+reconciliation branch (health-unreachable, confirmed-restart, already-resolved,
+resume-and-wait, malformed marker, multiple markers, non-duplication across a
+second pass), and `fetch_engram_health`. 828 Kotlin tests, 0 failures
+(unchanged — no Kotlin file was touched).
 
 ## Verification results — September 17, 2026
 
@@ -288,7 +402,8 @@ committing this directory.
   in the persisted transcript after reload).
 - **Mid-assignment restart** — see the dedicated section below. Real data
   loss for the in-flight assignment and conversation, observed and
-  documented, not glossed over.
+  documented, not glossed over. **Since bounded-recovered — see
+  "Interrupted-conversation recovery" above.**
 
 ## Remaining limits
 
@@ -311,6 +426,31 @@ committing this directory.
 - This is not the OTA app-track. There is no signed manifest, no CDN
   release, no automatic rollback-on-failed-probe for this stack — rollback
   here is the manual git/rebuild/restart procedure above.
+- **Interrupted-conversation recovery is bounded, not a durable job queue**:
+  one reconciliation pass per adapter startup, per marker. A marker that
+  cannot be resolved (e.g. engram-engine stays unreachable well past the
+  ~30s health-retry window) is still finalized — as "can't currently
+  confirm," not retried on a later restart. There is no periodic re-check.
+- **One accepted crash-window race**: if the adapter process dies between
+  writing a reconciled turn to the session file and removing that turn's
+  marker, the next startup reconciles the same marker again, duplicating
+  that one turn in the transcript. Narrow (two local disk writes apart) and
+  scoped to this dev-only recovery path; not engineered around further (see
+  that section's own doc for why).
+- **A mid-flight backend restart still loses the in-flight Hermes container's
+  own result**, even with recovery in place — the orphaned container's
+  actual output (if any) is never ingested into the graph, only the fact
+  that something was interrupted is ever known. Recovery makes the
+  *conversation* truthful and usable again; it does not resurrect the lost
+  execution result.
+- **`persist_webui_session_messages` is a second writer of a file
+  hermes-webui's own container process also writes** (via the existing
+  session-persistence vendor patch), with no cross-process file lock between
+  them. Both do a plain read-modify-write; a write landing mid-cycle of the
+  other's could lose that other write. Narrow in practice (matters only in
+  the brief window right after a restart, for a session with no other
+  concurrent activity) and accepted for this bounded feature rather than
+  adding real locking.
 
 ## Reboot check (prepared, awaiting an operator-chosen window)
 

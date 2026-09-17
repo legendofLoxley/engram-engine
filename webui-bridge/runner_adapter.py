@@ -47,6 +47,22 @@ word them — that decision (accept/withhold) is made entirely on the
 engram-engine side by HermesCompletionDirector before this adapter ever sees
 the completion. /debug/hermes-assignment's `text` field is that already-composed
 reply; _deliver_hermes_completion only transports it into the conversation.
+
+Interrupted-assignment recovery: RunStore is in-memory (see its own class doc)
+and engram-engine's own HermesActiveAssignmentRegistry/HermesAssignmentCompletionStore
+are documented as in-memory-only too — so a delegation-triggering turn whose
+run never reaches `done` before either process restarts leaves its WebUI
+conversation permanently waiting, with no record anywhere. write_pending_marker
+gives this one thing a durable footprint: a small JSON file, one per
+outstanding assignment, written just before its delivery thread starts and
+removed once that thread (or, after a restart, reconcile_interrupted_assignments)
+resolves it. This is deliberately not a general durable job queue — it never
+causes Hermes to be re-dispatched, only lets THIS adapter process, on its next
+startup, honestly finish the conversation that a previous instance of itself
+left hanging. See reconcile_interrupted_assignments's own doc for how a backend
+restart (confirmed loss, detected via /health's uptimeSeconds) is told apart
+from a runner-adapter-only restart (the backend may still be working on it, or
+may have already finished).
 """
 from __future__ import annotations
 
@@ -63,6 +79,7 @@ from engram_client import (
     ConfigError,
     UpstreamError,
     build_engram_payload,
+    fetch_engram_health,
     fetch_hermes_assignment_completion,
     forward_to_engram,
     load_engram_config,
@@ -106,6 +123,21 @@ def load_runner_config(environ: dict[str, str] | None = None) -> dict[str, Any]:
     # — see load_persisted_webui_messages. Absent by default; a missing/unset
     # dir just means no seeding, never a startup failure.
     config["webui_sessions_dir"] = str(source.get("WEBUI_SESSIONS_DIR") or "").strip() or None
+    # Where write_pending_marker/reconcile_interrupted_assignments keep their durable
+    # markers. An explicit HERMES_PENDING_DIR always wins; otherwise, if a sessions dir
+    # is configured, default to a sibling directory next to it (reuses the same
+    # bind-mounted host path the sessions dir already lives under — no new mount
+    # needed). Absent entirely when neither is set: recovery across a runner-adapter
+    # restart is then simply inert, same optionality convention as webui_sessions_dir
+    # itself — never a startup failure.
+    pending_dir_override = str(source.get("HERMES_PENDING_DIR") or "").strip()
+    if pending_dir_override:
+        config["hermes_pending_dir"] = pending_dir_override
+    elif config["webui_sessions_dir"]:
+        sessions_dir = config["webui_sessions_dir"]
+        config["hermes_pending_dir"] = os.path.join(os.path.dirname(os.path.normpath(sessions_dir)), "hermes-pending")
+    else:
+        config["hermes_pending_dir"] = None
     return config
 
 
@@ -363,6 +395,143 @@ def load_persisted_webui_messages(sessions_dir: str | None, webui_session_id: st
     return result
 
 
+def persist_webui_session_messages(sessions_dir: str | None, webui_session_id: str, messages: list[dict[str, str]]) -> bool:
+    """Best-effort DIRECT write of WebUI's own on-disk transcript for one session —
+    the write-side counterpart to load_persisted_webui_messages, used only by
+    _deliver_hermes_completion and reconcile_interrupted_assignments.
+
+    This duplicates (rather than depends on) what the vendor's own
+    _persist_runner_done_session patch does when a `done` SSE event streams past a
+    connected browser: that patch fires only while something is actively polling
+    this run's events, which reconciliation can never assume after a restart (the
+    browser has no way to know a new run_id exists) and which even ordinary
+    operation cannot always assume (a closed browser tab never receives the `done`
+    event either). Writing directly here means an outstanding turn's resolution
+    reaches disk regardless of whether anyone is watching it live.
+
+    Preserves every other field already on the session file untouched — only
+    `messages`, `message_count`, and `updated_at` are updated, mirroring exactly
+    what the vendor patch's own `s.messages = ...; s.save()` does. Returns False
+    (never raises) on a missing directory/file/malformed JSON, or if the write
+    itself fails — same best-effort philosophy as load_persisted_webui_messages;
+    a lost recovery notice must never crash this process.
+
+    Known accepted race: this is a second, independent writer of a file the
+    hermes-webui container itself also writes (via the vendor patch above). Both
+    do a plain read-modify-write with no cross-process lock, so a write from one
+    landing in the middle of the other's read-modify-write cycle could lose that
+    other write. In practice this only matters in the narrow window right after a
+    restart, for a session with no other concurrent activity — accepted for this
+    bounded dev-only recovery feature rather than adding real file locking.
+    """
+    if not sessions_dir or not webui_session_id:
+        return False
+    path = os.path.join(sessions_dir, f"{webui_session_id}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    data["messages"] = list(messages)
+    data["message_count"] = len(messages)
+    data["updated_at"] = time.time()
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def _pending_marker_path(pending_dir: str, assignment_id: str) -> str:
+    return os.path.join(pending_dir, f"{assignment_id}.json")
+
+
+def write_pending_marker(
+    pending_dir: str | None,
+    *,
+    assignment_id: str,
+    webui_session_id: str,
+    user_message: str,
+    ack_text: str,
+    created_at: float,
+) -> None:
+    """Best-effort durable record of one outstanding Hermes delegation, written just
+    before its background delivery thread starts (see run_turn) — see this module's
+    own doc for why this exists at all. Removed by whichever of
+    _deliver_hermes_completion or reconcile_interrupted_assignments's own
+    _finalize_reconciled_marker eventually resolves this exact assignment_id.
+
+    No-op if pending_dir is None (feature inert — same optionality convention as
+    webui_sessions_dir) or if the write itself fails for any reason: a lost marker
+    only means a future restart cannot reconcile this ONE delegation — it must
+    never block, slow, or fail the delegation it is merely recording.
+    """
+    if not pending_dir:
+        return
+    try:
+        os.makedirs(pending_dir, exist_ok=True)
+        path = _pending_marker_path(pending_dir, assignment_id)
+        tmp_path = f"{path}.tmp-{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "assignment_id": assignment_id,
+                "webui_session_id": webui_session_id,
+                "user_message": user_message,
+                "ack_text": ack_text,
+                "created_at": created_at,
+            }, f)
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def _read_pending_markers(pending_dir: str) -> list[dict[str, Any]]:
+    """Best-effort listing of every leftover marker at adapter startup. A malformed
+    or unreadable entry is dropped (removed) rather than retried forever — it can
+    never be reconciled correctly anyway, and leaving it would jam every future
+    startup on the same broken file.
+    """
+    result: list[dict[str, Any]] = []
+    try:
+        names = os.listdir(pending_dir)
+    except OSError:
+        return result
+    for name in names:
+        if not name.endswith(".json") or name.endswith(".tmp"):
+            continue
+        assignment_id = name[: -len(".json")]
+        path = os.path.join(pending_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            _remove_pending_marker(pending_dir, assignment_id)
+            continue
+        if not isinstance(data, dict):
+            _remove_pending_marker(pending_dir, assignment_id)
+            continue
+        result.append(data)
+    return result
+
+
+def _remove_pending_marker(pending_dir: str | None, assignment_id: str | None) -> None:
+    if not pending_dir or not assignment_id:
+        return
+    try:
+        os.remove(_pending_marker_path(pending_dir, assignment_id))
+    except OSError:
+        pass
+
+
 def _reject_turn(
     config: dict[str, Any],
     store: RunStore,
@@ -489,6 +658,14 @@ def run_turn(
             run_id = store.create(
                 webui_session_id=webui_session_id, events=events, status=PENDING_HERMES_STATUS,
                 effective_model=model, effective_model_provider=provider, assignment_id=assignment_id,
+            )
+            write_pending_marker(
+                config.get("hermes_pending_dir"),
+                assignment_id=assignment_id,
+                webui_session_id=webui_session_id,
+                user_message=message,
+                ack_text=reply_text,
+                created_at=time.time(),
             )
             thread = threading.Thread(
                 target=_deliver_hermes_completion,
@@ -684,6 +861,187 @@ def _deliver_hermes_completion(
         "session": {"session_id": webui_session_id, "messages": updated_transcript},
     }})
     store.set_status(run_id, final_status)
+    # Persist directly rather than relying solely on a live browser polling this run's
+    # events (which is what actually triggers the vendor session-persistence patch) —
+    # see persist_webui_session_messages's own doc for why that assumption does not
+    # hold here (no browser may be watching after a restart, or the tab may simply be
+    # closed). Also removes this assignment's durable marker: whatever happened here
+    # (a real completion, a timeout) is now fully recorded, so a future adapter
+    # restart must not try to reconcile it again.
+    persist_webui_session_messages(config.get("webui_sessions_dir"), webui_session_id, updated_transcript)
+    _remove_pending_marker(config.get("hermes_pending_dir"), assignment_id)
+
+
+#: How long reconcile_interrupted_assignments waits, in total, for engram-engine's
+#: /health to become reachable before giving up on one specific leftover marker and
+#: reporting "can't currently confirm" — this pass runs exactly once per marker at
+#: adapter startup, never a retrying queue (see this module's own doc).
+RECONCILE_HEALTH_MAX_WAIT_SECONDS = 30.0
+RECONCILE_HEALTH_POLL_INTERVAL_SECONDS = 3.0
+
+
+def _await_engram_health(
+    base_url: str,
+    max_wait_seconds: float,
+    poll_interval_seconds: float,
+    *,
+    health_fn=fetch_engram_health,
+) -> float | None:
+    """Returns engram-engine's reported uptimeSeconds once /health answers, retrying
+    for up to max_wait_seconds (the backend may be mid-restart itself, e.g. both
+    services were bounced together). None only after every attempt failed.
+    """
+    deadline = time.time() + max_wait_seconds
+    while True:
+        reachable, uptime = health_fn(base_url)
+        if reachable:
+            return uptime
+        if time.time() >= deadline:
+            return None
+        time.sleep(poll_interval_seconds)
+
+
+def _finalize_reconciled_marker(
+    config: dict[str, Any],
+    pending_dir: str,
+    *,
+    assignment_id: str,
+    webui_session_id: str,
+    user_message: str,
+    combined_text: str,
+) -> None:
+    """Directly persists one reconciled turn (the original user_message, which never
+    reached disk since this run's `done` event never fired — see this module's own
+    doc — plus combined_text, whatever was ultimately decided about it) and removes
+    its marker. Shared by every reconcile_interrupted_assignments branch that
+    resolves immediately, rather than by resuming a live poll (see
+    _deliver_hermes_completion for that path's own equivalent cleanup).
+    """
+    sessions_dir = config.get("webui_sessions_dir")
+    existing = load_persisted_webui_messages(sessions_dir, webui_session_id)
+    updated = existing + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": combined_text},
+    ]
+    persist_webui_session_messages(sessions_dir, webui_session_id, updated)
+    _remove_pending_marker(pending_dir, assignment_id)
+
+
+def reconcile_interrupted_assignments(
+    config: dict[str, Any],
+    store: RunStore,
+    *,
+    health_fn=fetch_engram_health,
+    fetch_fn=fetch_hermes_assignment_completion,
+    max_wait_seconds: float = HERMES_COMPLETION_MAX_WAIT_SECONDS,
+    poll_interval_seconds: float = HERMES_COMPLETION_POLL_INTERVAL_SECONDS,
+    health_max_wait_seconds: float = RECONCILE_HEALTH_MAX_WAIT_SECONDS,
+    health_poll_interval_seconds: float = RECONCILE_HEALTH_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Runs once at adapter startup (see main()), in its own background thread so it
+    never delays the HTTP server coming up. For every marker write_pending_marker
+    left behind by a delivery thread that died with a previous process instance
+    (i.e. THIS adapter process restarted before that turn ever resolved), decides
+    — and truthfully delivers — exactly what happened, then removes the marker.
+    Never re-dispatches to Hermes; the backend, not this function, is what actually
+    executes/owns an assignment (see this module's own top-of-file doc).
+
+    The one piece of information that makes an honest decision possible at all:
+    engram-engine's /health now reports uptimeSeconds (added for unrelated
+    deployment monitoring, reused here as-is — no new backend endpoint or state).
+    Comparing "backend process start time" (now - uptimeSeconds) against this
+    marker's own created_at (this adapter's dispatch-time clock) distinguishes:
+
+    - Health unreachable even after retrying: cannot confirm anything — reported
+      as exactly that, never as a stopped/failed assignment.
+    - Backend started AFTER this assignment was dispatched: confirmed loss. The
+      backend that owned HermesActiveAssignmentRegistry/HermesAssignmentCompletionStore
+      for this assignment no longer exists; nothing will ever answer for it.
+    - Backend is the SAME instance that dispatched it (only this adapter process
+      restarted): the backend never lost anything. A completion may already be
+      sitting in HermesAssignmentCompletionStore (delivered immediately, verbatim,
+      exactly like the ordinary path) — or the assignment may still be genuinely
+      running, in which case this resumes polling it (a fresh RunStore run +
+      another _deliver_hermes_completion thread), never a fresh Hermes dispatch.
+    """
+    pending_dir = config.get("hermes_pending_dir")
+    if not pending_dir:
+        return
+    for marker in _read_pending_markers(pending_dir):
+        assignment_id = marker.get("assignment_id")
+        webui_session_id = marker.get("webui_session_id")
+        user_message = marker.get("user_message")
+        ack_text = marker.get("ack_text")
+        created_at = marker.get("created_at")
+        if not (assignment_id and webui_session_id and isinstance(created_at, (int, float))):
+            _remove_pending_marker(pending_dir, assignment_id)  # malformed beyond use — drop it
+            continue
+
+        uptime = _await_engram_health(
+            config["engram_base_url"], health_max_wait_seconds, health_poll_interval_seconds, health_fn=health_fn,
+        )
+        if uptime is None:
+            _finalize_reconciled_marker(
+                config, pending_dir,
+                assignment_id=assignment_id, webui_session_id=webui_session_id, user_message=user_message,
+                combined_text=f"{ack_text}\n\n" + (
+                    "I can't currently reach the development backend to check on this, so I "
+                    "don't know whether it finished. This conversation is ready for another "
+                    "message whenever you'd like."
+                ),
+            )
+            continue
+
+        backend_started_at = time.time() - uptime
+        if backend_started_at > created_at:
+            _finalize_reconciled_marker(
+                config, pending_dir,
+                assignment_id=assignment_id, webui_session_id=webui_session_id, user_message=user_message,
+                combined_text=f"{ack_text}\n\n" + (
+                    "The development backend restarted while this was still outstanding, so "
+                    "there's no way for me to confirm whether it finished. This conversation is "
+                    "ready for another message whenever you'd like."
+                ),
+            )
+            continue
+
+        # The backend is the same instance that dispatched this — it never lost the
+        # assignment. It may already have a recorded completion...
+        completion = fetch_fn(config["engram_base_url"], config["engram_debug_token"], assignment_id, config["synthetic_user_id"])
+        if completion is not None:
+            _finalize_reconciled_marker(
+                config, pending_dir,
+                assignment_id=assignment_id, webui_session_id=webui_session_id, user_message=user_message,
+                combined_text=f"{ack_text}\n\n{str(completion.get('text') or '')}",
+            )
+            continue
+
+        # ...or it may still be genuinely running. Resume watching it exactly like an
+        # ordinary delegation turn would — this only restores THIS adapter's own poll
+        # of the backend's already-live assignment; nothing is re-dispatched.
+        seed = load_persisted_webui_messages(config.get("webui_sessions_dir"), webui_session_id)
+        transcript = store.append_turn_messages(webui_session_id, user_message, ack_text, seed=seed)
+        ack_index = len(transcript) - 1
+        run_id = store.create(
+            webui_session_id=webui_session_id,
+            events=[{"event": "token", "seq": 1, "payload": {"text": ack_text}}],
+            status=PENDING_HERMES_STATUS,
+            assignment_id=assignment_id,
+        )
+        thread = threading.Thread(
+            target=_deliver_hermes_completion,
+            args=(config, store, run_id, webui_session_id, assignment_id, ack_text, ack_index),
+            kwargs={
+                "max_wait_seconds": max_wait_seconds,
+                "poll_interval_seconds": poll_interval_seconds,
+                "fetch_fn": fetch_fn,
+            },
+            daemon=True,
+        )
+        thread.start()
+        # NOTE: the marker for this assignment_id is deliberately left in place here —
+        # the resumed _deliver_hermes_completion thread above removes it when IT
+        # concludes, exactly like an uninterrupted delegation's own delivery thread does.
 
 
 def effective_model_fields(engram_result: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -861,6 +1219,12 @@ def main() -> None:
         raise SystemExit(1)
 
     store = RunStore()
+    if config.get("hermes_pending_dir"):
+        # Backgrounded so a slow/unreachable engram-engine at boot (see
+        # RECONCILE_HEALTH_MAX_WAIT_SECONDS) never delays this adapter from accepting
+        # ordinary requests. reconcile_interrupted_assignments is itself a no-op when
+        # there is nothing left over from a previous process instance.
+        threading.Thread(target=reconcile_interrupted_assignments, args=(config, store), daemon=True).start()
     handler = make_handler(config, store)
     httpd = ThreadingHTTPServer((config["runner_host"], config["runner_port"]), handler)
     print(

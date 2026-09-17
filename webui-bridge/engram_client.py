@@ -120,6 +120,42 @@ def fetch_hermes_assignment_completion(
     return parsed if isinstance(parsed, dict) else None
 
 
+def fetch_engram_health(base_url: str, timeout: float = 5.0) -> tuple[bool, float | None]:
+    """GET engram-engine's own unauthenticated ``/health``.
+
+    Returns ``(True, uptimeSeconds)`` on a well-formed 200, or ``(False, None)`` on
+    any failure (connection refused, timeout, non-2xx, malformed body). Unlike
+    every other call in this module, no bearer token is sent — ``/health`` is
+    deliberately public (the same endpoint DigitalOcean's own platform health
+    check and this repo's own external monitoring already rely on).
+
+    Used by runner_adapter.py's interrupted-assignment reconciliation to tell
+    "the backend is the same process that dispatched this assignment" (its
+    reported ``uptimeSeconds`` reaches back before the assignment's own
+    ``created_at``) apart from "the backend has restarted since" (uptime is
+    shorter) — the one signal that distinguishes a temporary connection hiccup
+    from a confirmed loss of the in-memory assignment state. No new backend
+    endpoint or state was needed for this: ``uptimeSeconds`` already existed on
+    ``/health`` for unrelated deployment-monitoring reasons.
+    """
+    req = urllib.request.Request(f"{base_url}/health", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+        return False, None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return False, None
+    if not isinstance(parsed, dict):
+        return False, None
+    uptime = parsed.get("uptimeSeconds")
+    if not isinstance(uptime, (int, float)):
+        return False, None
+    return True, float(uptime)
+
+
 def request_hermes_cancellation(
     base_url: str,
     token: str,

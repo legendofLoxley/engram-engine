@@ -1156,5 +1156,360 @@ class DeliverHermesCompletionTest(unittest.TestCase):
         self.assertEqual(len(events_after_second), len(events_after_first) + 2, "each call appends its own token+done — this pins that run_turn's own one-thread-per-assignment invariant is what prevents duplication, not this function")
 
 
+class LoadRunnerConfigHermesPendingDirTest(unittest.TestCase):
+    def test_absent_when_neither_pending_dir_nor_sessions_dir_configured(self):
+        cfg = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        self.assertIsNone(cfg["hermes_pending_dir"])
+
+    def test_defaults_to_a_sibling_of_the_sessions_dir(self):
+        cfg = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k",
+            "WEBUI_SESSIONS_DIR": "/home/halo/development/hermes-webui-dev/home/webui/sessions",
+        })
+        self.assertEqual(cfg["hermes_pending_dir"], "/home/halo/development/hermes-webui-dev/home/webui/hermes-pending")
+
+    def test_explicit_override_wins_over_the_sessions_dir_default(self):
+        cfg = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k",
+            "WEBUI_SESSIONS_DIR": "/x/sessions", "HERMES_PENDING_DIR": "/y/pending",
+        })
+        self.assertEqual(cfg["hermes_pending_dir"], "/y/pending")
+
+    def test_explicit_override_works_even_with_no_sessions_dir(self):
+        cfg = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "HERMES_PENDING_DIR": "/y/pending"})
+        self.assertEqual(cfg["hermes_pending_dir"], "/y/pending")
+
+
+class PendingMarkerTest(unittest.TestCase):
+    def test_write_then_read_round_trips_all_fields(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ra.write_pending_marker(
+                d, assignment_id="a1", webui_session_id="w-1",
+                user_message="check the fixture", ack_text="I've asked Hermes to look into it.",
+                created_at=1000.0,
+            )
+            markers = ra._read_pending_markers(d)
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0], {
+            "assignment_id": "a1", "webui_session_id": "w-1",
+            "user_message": "check the fixture", "ack_text": "I've asked Hermes to look into it.",
+            "created_at": 1000.0,
+        })
+
+    def test_none_pending_dir_is_a_silent_no_op(self):
+        ra.write_pending_marker(None, assignment_id="a1", webui_session_id="w-1", user_message="hi", ack_text="ack", created_at=1.0)
+        # No exception, and nothing to read back either — this must never raise for
+        # the common case where the feature is simply not configured.
+        self.assertEqual(ra._read_pending_markers(""), [])
+
+    def test_creates_the_directory_if_missing(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            nested = _os.path.join(d, "does", "not", "exist", "yet")
+            ra.write_pending_marker(nested, assignment_id="a1", webui_session_id="w-1", user_message="hi", ack_text="ack", created_at=1.0)
+            self.assertEqual(len(ra._read_pending_markers(nested)), 1)
+
+    def test_remove_deletes_the_marker(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ra.write_pending_marker(d, assignment_id="a1", webui_session_id="w-1", user_message="hi", ack_text="ack", created_at=1.0)
+            ra._remove_pending_marker(d, "a1")
+            self.assertEqual(ra._read_pending_markers(d), [])
+
+    def test_remove_of_unknown_assignment_is_a_silent_no_op(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ra._remove_pending_marker(d, "never-existed")  # must not raise
+
+    def test_missing_pending_dir_returns_empty_list_not_raises(self):
+        self.assertEqual(ra._read_pending_markers("/no/such/directory/at/all"), [])
+
+    def test_malformed_marker_file_is_dropped_and_excluded(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "bad.json"), "w") as f:
+                f.write("{not json")
+            ra.write_pending_marker(d, assignment_id="good", webui_session_id="w-1", user_message="hi", ack_text="ack", created_at=1.0)
+            markers = ra._read_pending_markers(d)
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0]["assignment_id"], "good")
+        # The malformed file must also have been removed, not merely skipped — otherwise
+        # every future adapter startup re-reads and re-skips the same broken file forever.
+        self.assertFalse(_os.path.exists(_os.path.join(d, "bad.json")))
+
+
+class PersistWebuiSessionMessagesTest(unittest.TestCase):
+    def test_writes_messages_and_preserves_other_fields(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            path = _os.path.join(d, "w-1.json")
+            with open(path, "w") as f:
+                json.dump({"session_id": "w-1", "title": "My Chat", "model": "local", "messages": [], "message_count": 0, "updated_at": 1.0}, f)
+
+            ok = ra.persist_webui_session_messages(d, "w-1", [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+            self.assertTrue(ok)
+            with open(path) as f:
+                data = json.load(f)
+        self.assertEqual(data["title"], "My Chat", "fields this function does not own must survive untouched")
+        self.assertEqual(data["model"], "local")
+        self.assertEqual(data["messages"], [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+        self.assertEqual(data["message_count"], 2)
+        self.assertGreater(data["updated_at"], 1.0)
+
+    def test_missing_session_file_returns_false_not_raises(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(ra.persist_webui_session_messages(d, "no-such-session", [{"role": "user", "content": "hi"}]))
+
+    def test_none_sessions_dir_returns_false(self):
+        self.assertFalse(ra.persist_webui_session_messages(None, "w-1", []))
+
+    def test_malformed_existing_json_returns_false_not_raises(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            with open(_os.path.join(d, "w-1.json"), "w") as f:
+                f.write("{not json")
+            self.assertFalse(ra.persist_webui_session_messages(d, "w-1", [{"role": "user", "content": "hi"}]))
+
+
+class RunTurnWritesPendingMarkerTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.config = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k", "HERMES_PENDING_DIR": self._tmpdir.name,
+        })
+        self.store = ra.RunStore()
+
+    def test_a_delegation_turn_writes_a_marker_with_the_right_fields(self):
+        engram_result = {
+            "reply": "I've asked Hermes to look into it.",
+            "sessionId": "e-1",
+            "trace": {"hermesDelegation": {"assignmentId": "assign-1", "task": "read the fixture"}},
+        }
+        with patch.object(ra, "forward_to_engram", return_value=engram_result), \
+             patch.object(ra, "threading") as mock_threading:
+            ra.run_turn(self.config, self.store, webui_session_id="w-1", message="check the fixture")
+
+        markers = ra._read_pending_markers(self._tmpdir.name)
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0]["assignment_id"], "assign-1")
+        self.assertEqual(markers[0]["webui_session_id"], "w-1")
+        self.assertEqual(markers[0]["user_message"], "check the fixture")
+        self.assertEqual(markers[0]["ack_text"], "I've asked Hermes to look into it.")
+        self.assertIsInstance(markers[0]["created_at"], (int, float))
+
+    def test_a_turn_with_no_delegation_writes_no_marker(self):
+        with patch.object(ra, "forward_to_engram", return_value={"reply": "hi", "sessionId": "e-1"}), \
+             patch.object(ra, "threading") as mock_threading:
+            ra.run_turn(self.config, self.store, webui_session_id="w-1", message="hey")
+        self.assertEqual(ra._read_pending_markers(self._tmpdir.name), [])
+
+
+class DeliverHermesCompletionMarkerAndDirectPersistTest(unittest.TestCase):
+    """_deliver_hermes_completion must clean up its own marker and persist the
+    resolved transcript directly to WebUI's own session file — not only through
+    the in-memory RunStore events a live browser poll would otherwise need to
+    consume (see persist_webui_session_messages's own doc for why that can't be
+    assumed here).
+    """
+
+    def setUp(self):
+        import tempfile
+        self._pending_dir = tempfile.TemporaryDirectory()
+        self._sessions_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._pending_dir.cleanup)
+        self.addCleanup(self._sessions_dir.cleanup)
+        self.config = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k",
+            "HERMES_PENDING_DIR": self._pending_dir.name, "WEBUI_SESSIONS_DIR": self._sessions_dir.name,
+        })
+        self.store = ra.RunStore()
+        self.ack_text = "I've asked Hermes to look into it."
+        transcript = self.store.append_turn_messages("w-1", "check the fixture", self.ack_text)
+        self.ack_index = len(transcript) - 1
+        self.run_id = self.store.create(
+            webui_session_id="w-1", events=[{"event": "token", "seq": 1, "payload": {"text": self.ack_text}}],
+            status=ra.PENDING_HERMES_STATUS,
+        )
+        import json as _json, os as _os
+        with open(_os.path.join(self._sessions_dir.name, "w-1.json"), "w") as f:
+            _json.dump({"session_id": "w-1", "messages": [], "message_count": 0, "updated_at": 1.0}, f)
+        ra.write_pending_marker(self._pending_dir.name, assignment_id="assign-1", webui_session_id="w-1", user_message="check the fixture", ack_text=self.ack_text, created_at=1.0)
+
+    def test_success_removes_the_marker_and_persists_directly_to_the_session_file(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            fetch_fn=lambda *a, **k: {"executionOutcome": "Completed", "decision": "Accepted", "text": "DH-FIXTURE-abc123"},
+        )
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+        persisted = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertEqual(persisted[-1]["role"], "assistant")
+        self.assertIn("DH-FIXTURE-abc123", persisted[-1]["content"])
+        self.assertIn(self.ack_text, persisted[-1]["content"])
+
+    def test_timeout_also_removes_the_marker_and_persists_directly(self):
+        ra._deliver_hermes_completion(
+            self.config, self.store, self.run_id, "w-1", "assign-1", self.ack_text, self.ack_index,
+            max_wait_seconds=0.02, poll_interval_seconds=0.01, fetch_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+        persisted = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertIn("hasn't reported back", persisted[-1]["content"])
+
+
+class ReconcileInterruptedAssignmentsTest(unittest.TestCase):
+    """Tests reconcile_interrupted_assignments — the recovery pass that runs once
+    at adapter startup for whatever write_pending_marker left behind from a
+    previous process instance. Every branch is exercised directly (never a real
+    thread, real HTTP, or real clock) via injected health_fn/fetch_fn and, for the
+    "resume waiting" branch, a mocked threading module (same pattern as
+    RunTurnHermesDelegationTest).
+    """
+
+    def setUp(self):
+        import tempfile
+        self._pending_dir = tempfile.TemporaryDirectory()
+        self._sessions_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._pending_dir.cleanup)
+        self.addCleanup(self._sessions_dir.cleanup)
+        self.config = ra.load_runner_config({
+            "ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k",
+            "HERMES_PENDING_DIR": self._pending_dir.name, "WEBUI_SESSIONS_DIR": self._sessions_dir.name,
+        })
+        self.store = ra.RunStore()
+        import json as _json, os as _os
+        with open(_os.path.join(self._sessions_dir.name, "w-1.json"), "w") as f:
+            _json.dump({"session_id": "w-1", "messages": [], "message_count": 0, "updated_at": 1.0}, f)
+
+    def _write_marker(self, created_at: float):
+        ra.write_pending_marker(
+            self._pending_dir.name, assignment_id="assign-1", webui_session_id="w-1",
+            user_message="check the fixture", ack_text="I've asked Hermes to look into it.", created_at=created_at,
+        )
+
+    def test_no_markers_is_a_complete_no_op(self):
+        called = {"health": False, "fetch": False}
+
+        def _health(base_url):
+            called["health"] = True
+            return True, 100.0
+
+        def _fetch(*a, **k):
+            called["fetch"] = True
+            return None
+
+        ra.reconcile_interrupted_assignments(self.config, self.store, health_fn=_health, fetch_fn=_fetch)
+        self.assertFalse(called["health"])
+        self.assertFalse(called["fetch"])
+
+    def test_no_op_entirely_when_pending_dir_not_configured(self):
+        config = ra.load_runner_config({"ENGRAM_DEBUG_TOKEN": "t", "RUNNER_API_KEY": "k"})
+        # Must return immediately without touching health_fn/fetch_fn at all — there is
+        # nothing to reconcile and nowhere durable to have recorded it anyway.
+        ra.reconcile_interrupted_assignments(config, self.store, health_fn=lambda *a: self.fail("must not be called"))
+
+    def test_malformed_marker_is_dropped_without_ever_checking_health(self):
+        import os as _os
+        with open(_os.path.join(self._pending_dir.name, "assign-bad.json"), "w") as f:
+            f.write('{"assignment_id": "assign-bad"}')  # missing required fields
+        ra.reconcile_interrupted_assignments(
+            self.config, self.store, health_fn=lambda *a: self.fail("must not be called for a malformed marker"),
+        )
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+
+    def test_health_unreachable_delivers_an_honest_cannot_confirm_message_and_clears_the_marker(self):
+        self._write_marker(created_at=1000.0)
+        ra.reconcile_interrupted_assignments(
+            self.config, self.store,
+            health_fn=lambda base_url: (False, None),
+            health_max_wait_seconds=0.02, health_poll_interval_seconds=0.01,
+        )
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+        persisted = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertEqual(persisted[0]["role"], "user")
+        self.assertEqual(persisted[0]["content"], "check the fixture", "the original user message never reached disk before — reconciliation must persist it now")
+        self.assertIn("can't currently reach the development backend", persisted[-1]["content"])
+        self.assertNotIn("restarted", persisted[-1]["content"], "must not claim a confirmed restart when the truth is merely 'unreachable'")
+
+    def test_backend_restarted_since_dispatch_delivers_a_confirmed_interruption_and_clears_the_marker(self):
+        self._write_marker(created_at=1000.0)
+        with patch.object(ra, "time") as mock_time:
+            # now=2000, uptimeSeconds=5 -> backend started at 1995, AFTER created_at=1000.
+            mock_time.time.return_value = 2000.0
+            ra.reconcile_interrupted_assignments(self.config, self.store, health_fn=lambda base_url: (True, 5.0))
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+        persisted = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertIn("backend restarted", persisted[-1]["content"])
+        self.assertIn("I've asked Hermes to look into it.", persisted[-1]["content"], "the original ack must be preserved, not discarded")
+        self.assertNotIn("Hermes finished", persisted[-1]["content"], "must never read as an ordinary success")
+
+    def test_backend_same_instance_with_a_completion_already_recorded_delivers_it_verbatim(self):
+        self._write_marker(created_at=1000.0)
+        with patch.object(ra, "time") as mock_time:
+            # now=1050, uptimeSeconds=100 -> backend started at 950, BEFORE created_at=1000: same instance.
+            mock_time.time.return_value = 1050.0
+            ra.reconcile_interrupted_assignments(
+                self.config, self.store,
+                health_fn=lambda base_url: (True, 100.0),
+                fetch_fn=lambda *a, **k: {"executionOutcome": "Completed", "decision": "Accepted", "text": "DH-FIXTURE-abc123"},
+            )
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+        persisted = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertIn("DH-FIXTURE-abc123", persisted[-1]["content"], "the backend never actually lost this — its real, already-recorded completion must be delivered, not a generic interruption notice")
+
+    def test_backend_same_instance_but_no_completion_yet_resumes_watching_without_redispatching(self):
+        self._write_marker(created_at=1000.0)
+        with patch.object(ra, "time") as mock_time, patch.object(ra, "threading") as mock_threading:
+            mock_time.time.return_value = 1050.0
+            ra.reconcile_interrupted_assignments(
+                self.config, self.store,
+                health_fn=lambda base_url: (True, 100.0),
+                fetch_fn=lambda *a, **k: None,
+            )
+        # Resumed by spawning exactly one more _deliver_hermes_completion thread — never a
+        # fresh Hermes dispatch (there is no such function in this adapter at all).
+        mock_threading.Thread.assert_called_once()
+        _, kwargs = mock_threading.Thread.call_args
+        self.assertIs(kwargs["target"], ra._deliver_hermes_completion)
+        self.assertEqual(kwargs["args"][3], "w-1")
+        self.assertEqual(kwargs["args"][4], "assign-1")
+        self.assertTrue(kwargs.get("daemon"))
+        mock_threading.Thread.return_value.start.assert_called_once()
+        # The marker is deliberately left in place — the resumed thread (mocked away here,
+        # so it never actually runs) is what would remove it once it concludes.
+        self.assertEqual(len(ra._read_pending_markers(self._pending_dir.name)), 1)
+
+    def test_multiple_markers_are_each_reconciled_independently(self):
+        self._write_marker(created_at=1000.0)
+        ra.write_pending_marker(
+            self._pending_dir.name, assignment_id="assign-2", webui_session_id="w-1",
+            user_message="check another fixture", ack_text="Looking into that too.", created_at=1000.0,
+        )
+        with patch.object(ra, "time") as mock_time:
+            mock_time.time.return_value = 2000.0
+            ra.reconcile_interrupted_assignments(self.config, self.store, health_fn=lambda base_url: (True, 5.0))
+        self.assertEqual(ra._read_pending_markers(self._pending_dir.name), [])
+        persisted = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertEqual(len(persisted), 4, "both interrupted turns must land in the transcript, in order, none dropped")
+
+    def test_running_reconciliation_again_after_it_already_resolved_a_marker_does_not_duplicate(self):
+        self._write_marker(created_at=1000.0)
+        with patch.object(ra, "time") as mock_time:
+            mock_time.time.return_value = 2000.0
+            ra.reconcile_interrupted_assignments(self.config, self.store, health_fn=lambda base_url: (True, 5.0))
+            first_pass = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+            # A second pass (e.g. a second, redundant startup call) finds no marker left —
+            # nothing left to reconcile, so nothing more is appended.
+            ra.reconcile_interrupted_assignments(
+                self.config, self.store,
+                health_fn=lambda base_url: self.fail("must not be called — no marker should remain"),
+            )
+        second_pass = ra.load_persisted_webui_messages(self._sessions_dir.name, "w-1")
+        self.assertEqual(first_pass, second_pass)
+
+
 if __name__ == "__main__":
     unittest.main()

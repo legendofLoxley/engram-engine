@@ -7,6 +7,12 @@
 #
 # Manual stop (bare runs only, no systemd): kill $(cat /home/halo/development/hermes-webui-dev/runner-adapter.pid)
 # Under systemd: sudo systemctl stop hermes-runner-adapter.service
+#
+# WEBUI_SESSIONS_DIR being set also gives interrupted-assignment recovery
+# (runner_adapter.py's write_pending_marker/reconcile_interrupted_assignments) a
+# default durable marker directory for free: a "hermes-pending" sibling next to
+# "sessions" below, under this same already-bind-mounted host path. No extra
+# HERMES_PENDING_DIR is set here deliberately — see runner_adapter.py's own doc.
 set -euo pipefail
 
 DEV_DIR="/home/halo/development/hermes-webui-dev"

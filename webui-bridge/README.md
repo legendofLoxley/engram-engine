@@ -175,6 +175,15 @@ lifetime, before appending the new turn. `WEBUI_SESSIONS_DIR` is optional;
 unset, this behaves exactly as before (seeding is a best-effort
 reconciliation, never a hard dependency — any read failure returns `[]`).
 
+**A restart mid-delegation (this adapter's own, or engram-engine's) is a
+separate, further concern from ordinary seeding above**: a run left at
+`PENDING_HERMES_STATUS` has no `done` event yet, so none of the above saves
+anything for it at all — not even the user's own message. `write_pending_marker`/
+`reconcile_interrupted_assignments` close this gap; see `deploy/README.md`'s
+"Interrupted-conversation recovery" section for the full design, the
+backend-restart-vs-adapter-restart distinction (`fetch_engram_health`), and
+live verification evidence.
+
 ## Why some fixes are vendor-source patches, not config
 
 The pinned WebUI image ships **without PyYAML** (`import yaml` fails; `pip

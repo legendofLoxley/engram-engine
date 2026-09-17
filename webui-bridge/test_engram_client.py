@@ -155,5 +155,55 @@ class RequestHermesCancellationTest(unittest.TestCase):
         self.assertEqual(captured["auth"], "Bearer secret-tok")
 
 
+class FetchEngramHealthTest(unittest.TestCase):
+    def test_200_returns_reachable_and_uptime(self):
+        body = b'{"status":"ok","version":"0.1.0","uptimeSeconds":201,"database":"open","service":"engram-engine","anthropicKeySet":true,"googleKeySet":false}'
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(body)):
+            reachable, uptime = ec.fetch_engram_health("http://x")
+        self.assertTrue(reachable)
+        self.assertEqual(uptime, 201.0)
+
+    def test_connection_failure_returns_not_reachable_rather_than_raising(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+            reachable, uptime = ec.fetch_engram_health("http://x")
+        self.assertFalse(reachable)
+        self.assertIsNone(uptime)
+
+    def test_non_2xx_returns_not_reachable(self):
+        error = urllib.error.HTTPError("http://x", 503, "unavailable", {}, io.BytesIO(b""))
+        try:
+            with patch("urllib.request.urlopen", side_effect=error):
+                reachable, uptime = ec.fetch_engram_health("http://x")
+            self.assertFalse(reachable)
+            self.assertIsNone(uptime)
+        finally:
+            error.close()
+
+    def test_malformed_json_returns_not_reachable(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"not json")):
+            reachable, uptime = ec.fetch_engram_health("http://x")
+        self.assertFalse(reachable)
+        self.assertIsNone(uptime)
+
+    def test_missing_uptime_field_returns_not_reachable(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b'{"status":"ok"}')):
+            reachable, uptime = ec.fetch_engram_health("http://x")
+        self.assertFalse(reachable)
+        self.assertIsNone(uptime)
+
+    def test_sends_no_authorization_header_health_is_public(self):
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["auth"] = req.get_header("Authorization")
+            return _FakeResponse(b'{"uptimeSeconds":5}')
+
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            ec.fetch_engram_health("http://x")
+        self.assertTrue(captured["url"].endswith("/health"))
+        self.assertIsNone(captured["auth"])
+
+
 if __name__ == "__main__":
     unittest.main()
