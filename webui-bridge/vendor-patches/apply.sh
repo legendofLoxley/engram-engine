@@ -43,6 +43,7 @@ docker cp "$SRC_CONTAINER:/app/static/messages.js" "$OUT_DIR/messages.js"
 # patch's a/<file> b/<file> headers (-p1-stripped) resolve to plain
 # ./<file> here.
 (cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/routes_py_runner_session_persistence.patch")
+(cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/routes_py_runner_cancel_routing.patch")
 (cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/messages_js_model_chip_fallback.patch")
 
 echo "Patched vendor files written to $OUT_DIR"

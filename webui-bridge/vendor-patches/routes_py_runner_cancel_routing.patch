@@ -1,0 +1,42 @@
+--- a/routes.py	2026-09-17 16:07:43.819925057 -0400
++++ b/routes.py	2026-09-17 16:07:53.371929830 -0400
+@@ -13284,11 +13284,35 @@
+             return bad(handler, "stream_id required")
+         if not _stream_id_visible_to_request_profile(handler, stream_id):
+             return True
+-        from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
++        # engram-engine dev-bridge patch: this check was missing
++        # `runtime_adapter_runner_enabled()` (it only tested legacy-journal
++        # mode), so in runner-local mode every cancel fell through to the
++        # legacy `cancel_stream()` path below — which never knows about a
++        # runner-local run at all (it only tracks the old in-process STREAMS
++        # dict) — and unconditionally reported `cancelled: false`. The
++        # browser-side Stop button (boot.js cancelStream()) treats that as
++        # "stream already gone" and only shows a toast, never surfacing an
++        # error: a real cancel request was silently swallowed before ever
++        # reaching RunnerRuntimeAdapter / the configured runner endpoint.
++        # This mirrors the existing adapter-selection idiom already used by
++        # _start_run() and _stream_runner_run_events() elsewhere in this
++        # file, rather than inventing a new one.
++        from api.runtime_adapter import (
++            LegacyJournalRuntimeAdapter,
++            build_runtime_adapter,
++            runtime_adapter_enabled,
++            runtime_adapter_runner_enabled,
++        )
+ 
+-        if runtime_adapter_enabled():
+-            adapter = LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
+-            cancelled = adapter.cancel_run(stream_id).accepted
++        if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
++            def _cancel_legacy_adapter_factory():
++                return LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
++
++            adapter = build_runtime_adapter(
++                legacy_adapter_factory=_cancel_legacy_adapter_factory,
++                runner_client_factory=_runtime_runner_client_factory,
++            )
++            cancelled = adapter.cancel_run(stream_id).accepted if adapter is not None else cancel_stream(stream_id)
+         else:
+             cancelled = cancel_stream(stream_id)
+         return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})

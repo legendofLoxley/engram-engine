@@ -81,6 +81,16 @@ open class HermesAcpClient(
     private val containerWorkspacePath: String = System.getenv("HERMES_DEV_CONTAINER_WORKSPACE") ?: "/home/hermes/workspace",
     private val promptTimeoutMs: Long = System.getenv("HERMES_DEV_PROMPT_TIMEOUT_MS")?.toLongOrNull() ?: 180_000L,
     private val cancelGraceMs: Long = System.getenv("HERMES_DEV_CANCEL_GRACE_MS")?.toLongOrNull() ?: 3_000L,
+    /**
+     * TEST-ONLY. Zero (off) unless a developer deliberately exports `HERMES_DEV_TEST_DELAY_MS`
+     * before starting this service for the specific purpose of exercising cancellation UI/wiring
+     * (the real fixture exchange normally completes in only a few seconds — too narrow a window
+     * to reliably drive browser automation against). Never set in production, never touched by
+     * any normal chat turn or by any HTTP request parameter — it is read once from the process
+     * environment at construction, exactly like [promptTimeoutMs] and [cancelGraceMs] above. See
+     * its use in [exchange] for exactly what it does and does not change about the real exchange.
+     */
+    private val testDelayMs: Long = System.getenv("HERMES_DEV_TEST_DELAY_MS")?.toLongOrNull() ?: 0L,
 ) {
     private val logger = LoggerFactory.getLogger(HermesAcpClient::class.java)
 
@@ -309,32 +319,52 @@ open class HermesAcpClient(
         // A cancellation requested before now is still honored: attach() sends it immediately.
         cancelHandle.attach(process, sessionId)
 
-        // Sent as an ABSOLUTE path, not assignment.task verbatim (a relative filename +
-        // relying on session/new's own cwd param) — verified live that Hermes's read_file
-        // tool does not reliably resolve a bare relative filename against the ACP session's
-        // cwd: reproduced against this exact isolated dev instance resolving instead against
-        // the agent's own install directory (/opt/hermes-agent) and failing with "File not
-        // found", then confirmed fixed by sending the absolute path directly. cwd (via
-        // session/new) plus the read-only bind mount remain the actual sandboxing mechanism
-        // ("permission limited to reading that fixture") — this only fixes how the path is
-        // named in the prompt so the tool can find it at all.
-        val absoluteFixturePath = "$containerWorkspacePath/$fixtureFilename"
-        val promptId = nextId.getAndIncrement()
-        sendRequest("session/prompt", buildJsonObject {
-            put("sessionId", JsonPrimitive(sessionId))
-            put("prompt", JsonArray(listOf(
-                buildJsonObject {
-                    put("type", JsonPrimitive("text"))
-                    put("text", JsonPrimitive(
-                        "Please read the file at the absolute path $absoluteFixturePath using " +
-                            "your file-reading tool, then reply with exactly the Marker value it " +
-                            "contains and nothing else.",
-                    ))
-                },
-            )))
-        }, promptId)
-        val promptResult = readUntil(promptId)
-        val stopReason = promptResult["stopReason"]?.jsonPrimitive?.contentOrNull
+        // TEST-ONLY (see [testDelayMs] doc on the constructor). Pauses here — after the real ACP
+        // session exists and is genuinely cancellable, but before the prompt that would otherwise
+        // let the ~4-8s real exchange run to completion — to produce a long, reliably-observable
+        // "assignment running" window for exercising the native WebUI Stop button. A cancellation
+        // requested during this pause goes through the exact same requestCancel()/attach() path
+        // as one requested during the real prompt wait below (this loop only polls the same
+        // cancelHandle the watchdog and the debug cancel route already share) — nothing about the
+        // real ACP notification or the eventual outcome computation is faked or shortcut.
+        if (testDelayMs > 0) {
+            val delayDeadline = System.currentTimeMillis() + testDelayMs
+            while (System.currentTimeMillis() < delayDeadline && !cancelHandle.isCancelRequested()) {
+                Thread.sleep(WATCHDOG_POLL_MS)
+            }
+        }
+
+        var stopReason: String? = null
+        var promptSent = false
+        if (!cancelHandle.isCancelRequested()) {
+            promptSent = true
+            // Sent as an ABSOLUTE path, not assignment.task verbatim (a relative filename +
+            // relying on session/new's own cwd param) — verified live that Hermes's read_file
+            // tool does not reliably resolve a bare relative filename against the ACP session's
+            // cwd: reproduced against this exact isolated dev instance resolving instead against
+            // the agent's own install directory (/opt/hermes-agent) and failing with "File not
+            // found", then confirmed fixed by sending the absolute path directly. cwd (via
+            // session/new) plus the read-only bind mount remain the actual sandboxing mechanism
+            // ("permission limited to reading that fixture") — this only fixes how the path is
+            // named in the prompt so the tool can find it at all.
+            val absoluteFixturePath = "$containerWorkspacePath/$fixtureFilename"
+            val promptId = nextId.getAndIncrement()
+            sendRequest("session/prompt", buildJsonObject {
+                put("sessionId", JsonPrimitive(sessionId))
+                put("prompt", JsonArray(listOf(
+                    buildJsonObject {
+                        put("type", JsonPrimitive("text"))
+                        put("text", JsonPrimitive(
+                            "Please read the file at the absolute path $absoluteFixturePath using " +
+                                "your file-reading tool, then reply with exactly the Marker value it " +
+                                "contains and nothing else.",
+                        ))
+                    },
+                )))
+            }, promptId)
+            val promptResult = readUntil(promptId)
+            stopReason = promptResult["stopReason"]?.jsonPrimitive?.contentOrNull
+        }
 
         val toolName = observedToolName
         val toolPath = observedToolPath
@@ -345,6 +375,8 @@ open class HermesAcpClient(
                 toolTargetPath = toolPath,
                 toolSucceeded = stopReason == "end_turn" && toolPath?.contains(fixtureFilename) == true,
             )
+        } else if (!promptSent) {
+            HermesAssignmentOutcome.Failed("cancelled during the test-only delay window, before session/prompt was ever sent")
         } else {
             HermesAssignmentOutcome.Failed("no tool call observed (stopReason=$stopReason)")
         }
@@ -356,10 +388,10 @@ open class HermesAcpClient(
         val cancelRequestedAt = cancelHandle.checkCancelledAndFinish()
         return if (cancelRequestedAt != null) {
             val partialText = (computedOutcome as? HermesAssignmentOutcome.Completed)?.findingsText
-            val reason = if (stopReason == "cancelled") {
-                "hermes confirmed the cancellation itself (stopReason=cancelled)"
-            } else {
-                "cancellation was requested; hermes nonetheless reported stopReason=$stopReason — honoring the cancellation regardless"
+            val reason = when {
+                !promptSent -> "cancellation was requested before session/prompt was ever sent (during the test-only delay window) — no real exchange occurred"
+                stopReason == "cancelled" -> "hermes confirmed the cancellation itself (stopReason=cancelled)"
+                else -> "cancellation was requested; hermes nonetheless reported stopReason=$stopReason — honoring the cancellation regardless"
             }
             HermesAssignmentOutcome.Cancelled(partialText, reason)
         } else {
