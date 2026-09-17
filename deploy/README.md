@@ -242,7 +242,7 @@ conversation happen to be in flight at that exact moment.
 
 Implemented and verified live on 2026-09-17, on `codex/interrupted-conversation-recovery`
 (branched from the packaging commit above; two increments, commits `2344886`
-then `<follow-up>` after an acceptance re-check found and closed a real gap —
+then `d3742d2` after an acceptance re-check found and closed a real gap —
 see "Follow-up correction" below). Directly follows from "Observed:
 mid-assignment restart behavior" — a bounded fix for exactly the two failure
 modes documented there, not a general durable job queue and not automatic
