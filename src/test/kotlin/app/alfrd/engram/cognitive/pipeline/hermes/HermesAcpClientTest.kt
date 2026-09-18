@@ -81,3 +81,42 @@ class HermesAcpClientTest {
         }
     }
 }
+
+/**
+ * Pins the exact grounding requirements in [HermesAcpClient.SUMMARIZE_DOCUMENT_INSTRUCTION] — the
+ * instruction actually sent to Hermes for every [HermesAcpClient.summarizeDocument] assignment.
+ * This is *deterministic* coverage of the instruction's own wording, nothing more: it proves what
+ * Hermes is told to do, not that Hermes's own model actually does it on any given run. Whether a
+ * real summary correctly honors this is *observed model behavior* — see this increment's own
+ * demonstration record (a controlled document with a standalone milestone date, a deadline-free
+ * action, and a positive-control action with an explicit date/owner/dependency, verified live
+ * through the native WebUI) — never something a unit test can establish on its own, and one
+ * successful live run there is evidence, not a guarantee, that grounding holds in general.
+ */
+class HermesAcpClientSummarizeInstructionTest {
+    private val instruction = HermesAcpClient.SUMMARIZE_DOCUMENT_INSTRUCTION
+
+    @Test
+    fun `requires attaching dates owners and dependencies only to what the source explicitly connects them to`() {
+        assertTrue(instruction.contains("date, owner, or dependency"), instruction)
+        assertTrue(instruction.contains("explicitly connects"), instruction)
+        assertTrue(instruction.contains("never to a different item"), instruction)
+    }
+
+    @Test
+    fun `allows a useful inferred connection only if clearly labeled as an inference`() {
+        assertTrue(instruction.contains("label it as your own inference", ignoreCase = true), instruction)
+        assertTrue(instruction.contains("never present an inferred connection as if the source stated it directly", ignoreCase = true), instruction)
+    }
+
+    @Test
+    fun `allows leaving an unconnected item's date owner or dependency unspecified`() {
+        assertTrue(instruction.contains("leave it unspecified"), instruction)
+    }
+
+    @Test
+    fun `still requires the four labeled parts and forbids inventing an uncovered part`() {
+        assertTrue(instruction.contains("Goal") && instruction.contains("Deadlines") && instruction.contains("Risks") && instruction.contains("Next"))
+        assertTrue(instruction.contains("guessing or inventing detail"))
+    }
+}

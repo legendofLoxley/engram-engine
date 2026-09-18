@@ -47,4 +47,14 @@ class HermesDelegationTriggerApprovedDocumentsTest {
         assertTrue(filenames.size >= 2, "need at least two approved documents to exercise ambiguity/clarification")
         assertEquals(filenames.size, filenames.distinct().size, "approved document filenames must be unique")
     }
+
+    @Test
+    fun `exactly two approved documents are committed — a scratch grounding-check document used for live verification must never be left registered`() {
+        // The grounding-instruction increment temporarily registered a third, throwaway document
+        // here to demonstrate the fix live through the native WebUI, then deliberately reverted
+        // this list before committing — this pins that revert, not a permanent catalog size limit.
+        // Raising this to 3 on purpose (a genuine new approved document) means updating this test
+        // deliberately, not silently leaving a scratch entry behind.
+        assertEquals(2, HermesDelegationTrigger.APPROVED_DOCUMENTS.size, HermesDelegationTrigger.APPROVED_DOCUMENTS.map { it.filename }.toString())
+    }
 }

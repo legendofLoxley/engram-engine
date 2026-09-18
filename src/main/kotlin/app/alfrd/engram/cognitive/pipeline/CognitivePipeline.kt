@@ -777,9 +777,13 @@ open class CognitivePipeline(
                         val assignment = HermesAssignment(
                             assignmentId = java.util.UUID.randomUUID().toString(),
                             userEmail = ctx.userEmail,
+                            // Reuses the exact same instruction text HermesAcpClient.summarizeDocument
+                            // actually sends (rather than a separately-maintained paraphrase of it) so
+                            // this logged/traced description can never silently drift from what Hermes
+                            // was really told.
                             task = "Please read the file ${kind.targetFilename} in your current working directory " +
-                                "using your file-reading tool, then summarize it for the user in four short labeled " +
-                                "parts — Goal, Deadlines, Risks, Next actions — based only on what the file actually says.",
+                                "using your file-reading tool. " +
+                                app.alfrd.engram.cognitive.pipeline.hermes.HermesAcpClient.SUMMARIZE_DOCUMENT_INSTRUCTION,
                             originalRequest = ctx.utterance,
                             issuedAtCycleSeq = horizonCycleResult?.cycleSeq,
                             kind = kind,

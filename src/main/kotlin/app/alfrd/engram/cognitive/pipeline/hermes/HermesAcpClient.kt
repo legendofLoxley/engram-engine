@@ -96,6 +96,29 @@ open class HermesAcpClient(
 
     companion object {
         private const val WATCHDOG_POLL_MS = 100L
+
+        /**
+         * The grounding half of [summarizeDocument]'s instruction to Hermes — extracted as its own
+         * named, `internal` constant (rather than inlined in the prompt-building lambda) so
+         * [HermesAcpClientTest] can assert on its exact wording deterministically, without Docker.
+         * That assertion only proves the *instruction sent* requires this; it cannot prove Hermes's
+         * own model actually honors it on any given run — see this increment's own demonstration
+         * record for why a real, live-observed unlabeled cross-section association (not a
+         * hypothetical) is what this exists to close, and for why one successful live run afterward
+         * is evidence, not a guarantee, that grounding holds in general.
+         */
+        internal const val SUMMARIZE_DOCUMENT_INSTRUCTION =
+            "Summarize it for the user in four short labeled parts — Goal, Deadlines, Risks, Next " +
+                "actions — based only on what the file actually says. For every date, owner, or " +
+                "dependency you mention, attach it only to the specific item the source text itself " +
+                "explicitly connects it to — never to a different item just because it appears nearby " +
+                "or elsewhere in the document. If connecting a date, owner, or dependency to an item " +
+                "would be useful but the source does not explicitly state that connection, either " +
+                "leave it unspecified for that item, or state it and clearly label it as your own " +
+                "inference (for example: \"(inferred — not stated directly in the source)\") — never " +
+                "present an inferred connection as if the source stated it directly. If a part " +
+                "genuinely isn't covered by the file, say so plainly instead of guessing or inventing " +
+                "detail."
     }
 
     /** The bounded fixture-marker slice — see this class's own doc. Shares [runAssignment]'s ACP
@@ -123,10 +146,8 @@ open class HermesAcpClient(
         targetFilename: String,
         cancelHandle: HermesCancelHandle,
     ): HermesAssignmentOutcome = runAssignment(assignment, targetFilename, cancelHandle) { absolutePath ->
-        "Please read the file at the absolute path $absolutePath using your file-reading tool, then " +
-            "summarize it for the user in four short labeled parts — Goal, Deadlines, Risks, Next actions " +
-            "— based only on what the file actually says. If a part genuinely isn't covered by the file, " +
-            "say so plainly instead of guessing or inventing detail."
+        "Please read the file at the absolute path $absolutePath using your file-reading tool. " +
+            SUMMARIZE_DOCUMENT_INSTRUCTION
     }
 
     private suspend fun runAssignment(
