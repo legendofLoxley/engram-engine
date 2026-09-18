@@ -66,8 +66,14 @@ object HorizonItemsRenderer {
         val surfacing = item.surfacing
         val essential = surfacing is SurfacingReason.ActiveReactivation || surfacing is SurfacingReason.JustAsserted
         val framing = when (surfacing) {
+            // Deliberately does NOT say "new evidence just made this relevant again": a live check
+            // showed that phrasing let a reactivation triggered by a Hermes tool-result phrase read
+            // as if the tool result and the reactivated item shared authorship or confirmed one
+            // another — e.g. the user's own open intention framed as "made relevant again" by an
+            // unrelated document summary. The relevance link itself is a real, computed fact; only
+            // the wording that could imply shared authorship changed here.
             is SurfacingReason.ActiveReactivation ->
-                "new evidence just made this relevant again: \"${surfacing.info.triggeringPhraseText.text}\""
+                "an automatic relevance link surfaced this again, separate from: \"${surfacing.info.triggeringPhraseText.text}\" — the link alone does not mean they share a source or confirm each other"
             is SurfacingReason.JustAsserted -> "just noted"
             is SurfacingReason.RecentActorEvidence -> "reported recently, independent of this conversation"
             is SurfacingReason.DormantOpen -> "noted earlier, still open"
@@ -259,6 +265,17 @@ class Actor(private val llmClient: LlmClient?) {
          * per-cycle "mention only what's genuinely relevant" line that used to live inside the
          * conditional Horizon-items block below — stated once, here, so it still applies even when
          * there are no Horizon items to render at all.
+         *
+         * The explicit "phrase it as" example sentence closes a real gap the first version of this
+         * policy left open: a live check showed a Horizon item already correctly tagged
+         * `[tool result, ... self-reported, not independently verified]` — the *supplied* evidence
+         * was framed correctly — and the model still composed "you've been working toward X,"
+         * attributing a Hermes-reported document's own content to the user as if it were their own
+         * project. Stating the general principle ("preserve status," "only explicit adoption
+         * counts") was not concrete enough on its own to change that synthesis; naming the actual
+         * two-clause surface form the model should produce is the smallest instruction-only change
+         * that targets the failure directly, without touching how evidence is retrieved, selected,
+         * or tagged (that part was already correct).
          */
         private const val STANDING_CONTEXT_POLICY =
             "You are alfrd, the user's conversational Director; Hermes is a separate Actor that " +
@@ -266,10 +283,13 @@ class Actor(private val llmClient: LlmClient?) {
             "The Context Horizon, when rendered below, supplies selected graph evidence — never an " +
             "exhaustive memory inventory. Missing evidence does not establish that something never " +
             "happened. When drawing on any of it, preserve each item's own source, uncertainty, and " +
-            "status rather than restating it as settled fact: document content or an Actor's own " +
+            "status rather than restating it as settled fact. Document content or an Actor's own " +
             "observation, on its own, does not establish the user's commitment — only the user's " +
-            "explicit adoption of it does. Use relevant context naturally in your reply, without " +
-            "reciting everything available."
+            "explicit adoption of it does: keep the two claims separate in your own wording, for " +
+            "example \"The document describes X; you told me you intend Y\" — never phrase " +
+            "something Hermes or a document merely reported as if the user themselves said or " +
+            "intended it, unless they actually did. Use relevant context naturally in your reply, " +
+            "without reciting everything available."
     }
 
     suspend fun compose(utterance: String, script: RetrievedScript?, conditioners: Conditioners): ActorResult {

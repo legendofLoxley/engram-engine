@@ -176,6 +176,31 @@ class ActorTest {
     }
 
     @Test
+    fun `ActiveReactivation framing never implies shared authorship between the reactivated item and its trigger`() {
+        val horizon = ContextHorizon(
+            userEmail = "u@test.alfrd.internal",
+            asOf = 0L,
+            schemaVersion = 1,
+            items = listOf(activeReactivationItem("I need to submit the Q3 budget review", "Hermes reported an unrelated document's own goal")),
+            budget = HorizonBudget(maxItems = 12, itemCount = 1, truncated = false),
+            omittedSample = emptyList(),
+            omittedAtLeast = 0,
+            moreCandidatesAvailable = false,
+        )
+
+        val line = HorizonItemsRenderer.render(horizon).single().renderedLine
+
+        assertTrue(
+            !line.contains("made this relevant again"),
+            "must not use causal-sounding wording a model could read as the two items sharing a source, got: $line",
+        )
+        assertTrue(
+            line.contains("does not mean they share a source or confirm each other"),
+            "must state plainly that the computed link is not itself a claim of shared authorship, got: $line",
+        )
+    }
+
+    @Test
     fun `render distinguishes observation, interpretation with basis, and tool result success-failure, regardless of surfacing reason`() {
         val horizon = ContextHorizon(
             userEmail = "u@test.alfrd.internal",
@@ -373,6 +398,10 @@ class ActorTest {
         assertTrue(systemPrompt.contains("never an exhaustive memory inventory"), "must state the Horizon is a selected excerpt even with no Horizon items")
         assertTrue(systemPrompt.contains("Missing evidence does not establish that something never happened"))
         assertTrue(systemPrompt.contains("only the user's explicit adoption of it does"))
+        assertTrue(
+            systemPrompt.contains("\"The document describes X; you told me you intend Y\""),
+            "must name the concrete two-clause surface form, not just the abstract principle, even with no Horizon items",
+        )
         // No Horizon items were supplied, so the conditional "Contextual awareness" header must not appear at all.
         assertTrue(!systemPrompt.contains("Contextual awareness"))
     }
