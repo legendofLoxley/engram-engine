@@ -594,13 +594,21 @@ class CognitivePipelineHermesDelegationTest {
     @Test
     fun `utterance naming the approved document with a summarize verb dispatches a DocumentSummary assignment`() = runTest {
         val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val approvedFilename = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS.first().filename
+        val fakeDirector = FakeHermesDocumentIntentDirector { _, _, _ ->
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(approvedFilename),
+                latencyMs = 5, modelCalled = true,
+            )
+        }
         val pipeline = CognitivePipeline(
             llmClient = echoLlm,
             hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+            documentIntentDirector = fakeDirector,
         )
 
         val response = pipeline.process(
-            "Can you have Hermes summarize director-hermes-project-brief.md for me — goal, deadlines, risks, and next actions?",
+            "Can you give me the rundown on that project brief — goal, deadlines, risks, and next actions?",
             "session-hermes-6", "user-hermes@example.com",
         )
 
@@ -611,10 +619,7 @@ class CognitivePipelineHermesDelegationTest {
             kind is app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind.DocumentSummary,
             "Expected a DocumentSummary assignment kind, got: $kind",
         )
-        assertEquals(
-            app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.DOCUMENT_SUMMARY_FILENAME,
-            kind.targetFilename,
-        )
+        assertEquals(approvedFilename, kind.targetFilename)
         assertTrue(assignment.task.contains("summarize", ignoreCase = true), "Assignment task must ask for a summary, got: ${assignment.task}")
         assertTrue(assignment.task.contains("Goal") && assignment.task.contains("Deadlines") && assignment.task.contains("Risks"), "got: ${assignment.task}")
         assertTrue(
@@ -624,29 +629,106 @@ class CognitivePipelineHermesDelegationTest {
     }
 
     @Test
-    fun `an utterance naming the fixture still dispatches MarkerCheck, not DocumentSummary, even with a summarize-shaped verb absent`() = runTest {
+    fun `an utterance naming the fixture still dispatches MarkerCheck without ever consulting the document-intent director`() = runTest {
         val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val fakeDirector = FakeHermesDocumentIntentDirector { _, _, _ -> fail("must not be consulted when the marker-check regex already matched") }
         val pipeline = CognitivePipeline(
             llmClient = echoLlm,
             hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+            documentIntentDirector = fakeDirector,
         )
 
         pipeline.process("Can you check director-hermes-fixture.txt for me?", "session-hermes-7", "user-hermes@example.com")
 
         val kind = dispatched.single().kind
         assertTrue(kind is app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind.MarkerCheck, "got: $kind")
+        assertEquals(0, fakeDirector.callCount)
     }
 
     @Test
-    fun `naming the approved document without a summarize verb never dispatches`() = runTest {
+    fun `a NoDelegation decision never dispatches`() = runTest {
         val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val fakeDirector = FakeHermesDocumentIntentDirector { _, _, _ ->
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.NoDelegation,
+                latencyMs = 5, modelCalled = true,
+            )
+        }
         val pipeline = CognitivePipeline(
             llmClient = echoLlm,
             hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+            documentIntentDirector = fakeDirector,
         )
 
-        pipeline.process("director-hermes-project-brief.md is a funny filename", "session-hermes-8", "user-hermes@example.com")
+        pipeline.process("Can you summarize that project brief for me?", "session-hermes-8", "user-hermes@example.com")
 
-        assertTrue(dispatched.isEmpty(), "Must not dispatch without a summarize-shaped verb")
+        assertTrue(dispatched.isEmpty())
+    }
+
+    @Test
+    fun `a Clarify decision never dispatches, and the follow-up turn passes the candidates back to the director`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val seenPendingCandidates = mutableListOf<List<String>?>()
+        val candidates = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS.map { it.filename }
+        var callCount = 0
+        val fakeDirector = FakeHermesDocumentIntentDirector { _, _, pending ->
+            callCount++
+            seenPendingCandidates.add(pending)
+            if (callCount == 1) {
+                app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Clarify(candidates),
+                    latencyMs = 5, modelCalled = true,
+                )
+            } else {
+                app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(candidates[0]),
+                    latencyMs = 5, modelCalled = true,
+                )
+            }
+        }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+            documentIntentDirector = fakeDirector,
+        )
+
+        val firstResponse = pipeline.process("Can you summarize that document for me?", "session-hermes-9", "user-hermes@example.com")
+        assertTrue(dispatched.isEmpty(), "Clarify must never dispatch")
+        assertTrue(firstResponse.contains("choose", ignoreCase = true) || firstResponse.contains("which", ignoreCase = true) || firstResponse.contains("clarify", ignoreCase = true) || candidates.any { firstResponse.contains(it) }, "got: $firstResponse")
+        assertEquals(null, seenPendingCandidates[0], "no clarification was pending before the first turn")
+
+        pipeline.process("The release checklist one", "session-hermes-9", "user-hermes@example.com")
+        assertEquals(candidates, seenPendingCandidates[1], "the second call must receive the first turn's own candidates back")
+        assertEquals(1, dispatched.size, "the follow-up turn's Delegate decision must dispatch")
+    }
+
+    @Test
+    fun `SOCIAL turns never consult the document-intent director — the intent gate is a real cost guard`() = runTest {
+        val fakeDirector = FakeHermesDocumentIntentDirector { _, _, _ -> fail("must not be consulted for an ordinary social turn") }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { },
+            documentIntentDirector = fakeDirector,
+        )
+
+        pipeline.process("hey there", "session-hermes-10", "user-hermes@example.com")
+
+        assertEquals(0, fakeDirector.callCount)
+    }
+}
+
+private class FakeHermesDocumentIntentDirector(
+    private val behavior: (utterance: String, recentTurns: List<String>, pending: List<String>?) -> app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult,
+) : app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDirector(llmClient = null) {
+    var callCount = 0
+        private set
+
+    override suspend fun decide(
+        utterance: String,
+        recentTurns: List<String>,
+        pendingClarificationCandidates: List<String>?,
+    ): app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult {
+        callCount++
+        return behavior(utterance, recentTurns, pendingClarificationCandidates)
     }
 }

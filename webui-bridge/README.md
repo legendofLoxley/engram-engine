@@ -306,13 +306,12 @@ itself, not merely kept out by network placement.
 ## Director → Hermes delegation (first real increment)
 
 One narrow, bounded slice, on top of everything above: a conversational
-utterance naming one of exactly two approved files (see
-`HermesDelegationTrigger` in `app.alfrd.engram.cognitive.pipeline.hermes`)
-makes the Director issue one correlated assignment to the *real* installed
-Hermes runtime — not the production `hermes-halo` container, an isolated
-**dev** instance of the exact same vendor image, run one-shot per assignment
-(`docker run --rm`) against its own empty `HERMES_HOME` and a read-only
-bind-mounted workspace directory. Hermes performs a real internal
+utterance naming or referring to one of a small closed set of approved
+files makes the Director issue one correlated assignment to the *real*
+installed Hermes runtime — not the production `hermes-halo` container, an
+isolated **dev** instance of the exact same vendor image, run one-shot per
+assignment (`docker run --rm`) against its own empty `HERMES_HOME` and a
+read-only bind-mounted workspace directory. Hermes performs a real internal
 `read_file` tool call (confirmed live, not assumed) via its actual
 invocation interface — Agent Client Protocol (ACP), JSON-RPC over stdio,
 already built into the vendor image (`venv/bin/hermes-acp`) — and the
@@ -339,16 +338,35 @@ Director (not Hermes) composes the reply the user sees.
   enableHermesDelegation = true)` in `Application.kt`'s
   `DEBUG_CONVERSE_ENABLED` block) — the production `/cognitive/chat` path
   is untouched.
-- **Two assignment kinds, two triggers, two approved files** — still a
-  small closed set, not a general delegation/orchestration framework or a
-  filesystem tool: `HermesAssignmentKind.MarkerCheck` (the original fixture,
-  reports one marker token verbatim) and `HermesAssignmentKind.DocumentSummary`
-  (`director-hermes-project-brief.md`, summarized into Goal/Deadlines/Risks/Next
-  actions). Adding a third means adding a third named constant/trigger/kind,
-  deliberately never accepting an arbitrary user-supplied path. See the
-  increment's own demonstration record for exact evidence and observed
-  limitations (in particular: evidence can be committed, eligible, and
-  selected into `Conditioners.horizonItems` and still not survive the
+- **Two assignment kinds, two detection mechanisms, two approved documents**
+  — still a small closed set, not a general delegation/orchestration
+  framework or a filesystem tool: `HermesAssignmentKind.MarkerCheck` (the
+  original fixture, reports one marker token verbatim — still an exact
+  filename-and-verb regex, `HermesDelegationTrigger.detect`, unchanged) and
+  `HermesAssignmentKind.DocumentSummary` (either of
+  `HermesDelegationTrigger.APPROVED_DOCUMENTS`, summarized into
+  Goal/Deadlines/Risks/Next actions). **Document-summary detection is no
+  longer regex-based** — see `HermesDocumentIntentDirector`, a bounded
+  Director decision (one structured tool-call turn against the same local
+  model, modeled directly on `Interpreter`) that understands paraphrases
+  ("give me the rundown"), resolves a bare contextual reference ("that
+  project brief") using the session's own recent-turns window, and asks a
+  clarifying question when genuinely ambiguous between the two approved
+  documents — then reuses that answer on the very next turn. Every
+  proposed decision is still independently re-validated in code before
+  anything dispatches: the target/candidate filenames against
+  `APPROVED_DOCUMENTS`, and — regardless of what the model itself
+  self-reports — a deterministic proximity guard against the literal "do
+  not summarize" case. Adding a third document/kind means adding a third
+  named constant, deliberately never accepting an arbitrary user-supplied
+  path. See the increment's own demonstration record for exact evidence and
+  observed limitations (in particular: evidence can be committed, eligible,
+  and selected into `Conditioners.horizonItems` and still not survive the
   Actor's own prompt-budget ladder for a conversation with enough competing
   history — an existing, documented characteristic of the Horizon/Actor
-  budget system, not something this increment introduces or fixes).
+  budget system, not something this increment introduces or fixes; and a
+  live-observed model tendency to connect two same-document facts across
+  sections — e.g. attaching an earlier deadline to a later, textually
+  separate action item — without labeling that connection as an inference,
+  though never observed inventing a fact absent from the source or
+  cross-contaminating between the two documents).

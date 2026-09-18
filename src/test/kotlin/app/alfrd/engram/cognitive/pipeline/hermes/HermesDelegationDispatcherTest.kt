@@ -116,7 +116,7 @@ class HermesDelegationDispatcherTest {
     @Test
     fun `a DocumentSummary assignment calls summarizeDocument, not inspectFixture`() {
         val a = assignment("doc-summary").copy(
-            kind = HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.DOCUMENT_SUMMARY_FILENAME),
+            kind = HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.APPROVED_DOCUMENTS.first().filename),
         )
         val client = FakeHermesAcpClient { _, _ ->
             HermesAssignmentOutcome.Completed("Goal: ship the demo.", "read", "path", toolSucceeded = true)

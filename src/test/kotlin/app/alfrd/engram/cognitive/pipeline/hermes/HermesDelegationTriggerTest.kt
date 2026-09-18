@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline.hermes
 
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -31,38 +32,19 @@ class HermesDelegationTriggerTest {
     }
 }
 
-class HermesDelegationTriggerDocumentSummaryTest {
+class HermesDelegationTriggerApprovedDocumentsTest {
 
     @Test
-    fun `matches when the approved document name and a summarize verb are both present`() {
-        assertTrue(HermesDelegationTrigger.detectDocumentSummary("Can you summarize director-hermes-project-brief.md for me?"))
-        assertTrue(HermesDelegationTrigger.detectDocumentSummary("please summarise DIRECTOR-HERMES-PROJECT-BRIEF.MD"))
-        assertTrue(HermesDelegationTrigger.detectDocumentSummary("could you sum up director-hermes-project-brief.md"))
-        assertTrue(HermesDelegationTrigger.detectDocumentSummary("recap director-hermes-project-brief.md for me"))
+    fun `the fixture-marker trigger does not fire for an approved document's filename`() {
+        HermesDelegationTrigger.APPROVED_DOCUMENTS.forEach { doc ->
+            assertFalse(HermesDelegationTrigger.detect("please check ${doc.filename}"), "matched on ${doc.filename}")
+        }
     }
 
     @Test
-    fun `does not match the document name alone without a summarize verb`() {
-        assertFalse(HermesDelegationTrigger.detectDocumentSummary("director-hermes-project-brief.md is a funny filename"))
-    }
-
-    @Test
-    fun `does not match a summarize verb without the document name`() {
-        assertFalse(HermesDelegationTrigger.detectDocumentSummary("can you summarize the weather for me?"))
-    }
-
-    @Test
-    fun `does not match an inspection verb alone — that is the other trigger's job, not this one`() {
-        assertFalse(HermesDelegationTrigger.detectDocumentSummary("please check director-hermes-project-brief.md"))
-    }
-
-    @Test
-    fun `does not match unrelated conversation`() {
-        assertFalse(HermesDelegationTrigger.detectDocumentSummary("What time does school start?"))
-    }
-
-    @Test
-    fun `the fixture-marker trigger does not fire for the document summary filename`() {
-        assertFalse(HermesDelegationTrigger.detect("please check director-hermes-project-brief.md"))
+    fun `at least two approved documents exist, with distinct filenames — required for a real clarify case`() {
+        val filenames = HermesDelegationTrigger.APPROVED_DOCUMENTS.map { it.filename }
+        assertTrue(filenames.size >= 2, "need at least two approved documents to exercise ambiguity/clarification")
+        assertEquals(filenames.size, filenames.distinct().size, "approved document filenames must be unique")
     }
 }

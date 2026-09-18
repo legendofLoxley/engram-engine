@@ -21,6 +21,8 @@ import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDirector
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
@@ -94,6 +96,16 @@ open class CognitivePipeline(
      * general delegation framework.
      */
     private val hermesDelegationDispatcher: HermesDelegationDispatching? = null,
+    /**
+     * Decides whether a turn that didn't match the marker-check regex above wants one of
+     * [HermesDelegationTrigger.APPROVED_DOCUMENTS] summarized — see that class's own doc. A
+     * constructor parameter (not just an internal field) so tests can inject a fake subclass
+     * (same `open`-for-faking convention as [app.alfrd.engram.cognitive.pipeline.hermes.HermesAcpClient]/
+     * [app.alfrd.engram.cognitive.pipeline.Interpreter]) without needing a real tool-calling LLM.
+     * Defaults to a real one built from [llmClient], so every existing caller that never names
+     * this parameter gets real behavior automatically.
+     */
+    private val documentIntentDirector: HermesDocumentIntentDirector = HermesDocumentIntentDirector(llmClient),
 ) {
 
     private val logger = LoggerFactory.getLogger(CognitivePipeline::class.java)
@@ -146,6 +158,18 @@ open class CognitivePipeline(
     @Volatile private var recentTurns: List<RecentTurn> = emptyList()
 
     /**
+     * Non-null exactly between the turn where [HermesDocumentIntentDirector] decided `Clarify`
+     * (the user wants some approved document summarized but which one is ambiguous) and whichever
+     * later turn resolves it — one document-summary request in flight at a time, same
+     * one-instance-per-session pattern as [pendingOutcome]/[moodState]/[recentTurns]. Read as
+     * context for the *next* call to [HermesDocumentIntentDirector.decide] (so a short follow-up
+     * like "the release checklist one" is correctly read as answering the question just asked,
+     * not classified cold) and always cleared after that next call, resolved or not — this is a
+     * one-shot follow-up slot, never a queue of outstanding questions.
+     */
+    @Volatile private var pendingDocumentClarification: List<String>? = null
+
+    /**
      * First-session state recorded when an invited user is greeted with the warm provenance
      * intro. Set during [initSession]; null when first-session handling is disabled or not triggered.
      */
@@ -171,6 +195,18 @@ open class CognitivePipeline(
 
         /** Per-entry text cap in [recentTurns] — see [recordTurn]. */
         private const val MAX_TURN_TEXT_LENGTH = 280
+
+        /**
+         * Reuses Comprehension's own already-computed intent — not a new keyword gate — to decide
+         * whether a turn is even worth spending [HermesDocumentIntentDirector]'s bounded model call
+         * on. TASK covers imperative phrasings ("summarize that," "give me the rundown"); QUESTION
+         * covers interrogative ones ("what's in that project brief"). SOCIAL/CORRECTION/META/
+         * AMBIGUOUS turns never plausibly want a document summarized, so skipping them keeps the
+         * extra model call off ordinary conversation instead of taxing every single turn.
+         * [pendingDocumentClarification] bypasses this gate entirely (see its own doc) since a short
+         * clarification-answer turn may not classify as either.
+         */
+        private val DOCUMENT_INTENT_ELIGIBLE_INTENTS = setOf(IntentType.TASK, IntentType.QUESTION)
 
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
             if (llmClient == null) return null
@@ -685,48 +721,102 @@ open class CognitivePipeline(
             try { engramClient.getTopicConfidence(ctx.userEmail, it).phase } catch (_: Exception) { null }
         }
 
-        // ── Hermes delegation (bounded, single-assignment-kind slice) ──────────
+        // ── Hermes delegation (bounded, two-assignment-kind slice) ──────────────
         // Fires the real assignment now, but never waits on it — see HermesDelegationDispatcher's
         // doc for why that's what "let completion ingest when no Director turn is active" means
         // concretely. This turn's own reply is composed immediately below, unaffected by how long
         // Hermes actually takes.
+        //
+        // Marker-check keeps its exact-string regex (HermesDelegationTrigger.detect, unchanged).
+        // Document-summary no longer does: HermesDocumentIntentDirector is a bounded Director
+        // decision (paraphrase understanding, contextual reference resolution via recentTurns,
+        // clarification via pendingDocumentClarification) — see that class's own doc for why its
+        // output is still only ever a *proposal*, independently re-validated in code before
+        // anything is dispatched.
+        var documentClarifyCandidates: List<String>? = null
         val hermesDelegation = hermesDelegationDispatcher?.let { dispatcher ->
-            val kind = when {
-                HermesDelegationTrigger.detect(ctx.utterance) ->
-                    HermesAssignmentKind.MarkerCheck(HermesDelegationTrigger.FIXTURE_FILENAME)
-                HermesDelegationTrigger.detectDocumentSummary(ctx.utterance) ->
-                    HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.DOCUMENT_SUMMARY_FILENAME)
-                else -> null
-            } ?: return@let null
-            val task = when (kind) {
-                is HermesAssignmentKind.MarkerCheck ->
-                    "Please read the file ${kind.targetFilename} in your current working directory using " +
-                        "your file-reading tool, then report exactly the Marker value it contains and nothing else."
-                is HermesAssignmentKind.DocumentSummary ->
-                    "Please read the file ${kind.targetFilename} in your current working directory using your " +
-                        "file-reading tool, then summarize it for the user in four short labeled parts — Goal, " +
-                        "Deadlines, Risks, Next actions — based only on what the file actually says."
+            if (HermesDelegationTrigger.detect(ctx.utterance)) {
+                val kind = HermesAssignmentKind.MarkerCheck(HermesDelegationTrigger.FIXTURE_FILENAME)
+                val assignment = HermesAssignment(
+                    assignmentId = java.util.UUID.randomUUID().toString(),
+                    userEmail = ctx.userEmail,
+                    task = "Please read the file ${kind.targetFilename} in your current working directory using " +
+                        "your file-reading tool, then report exactly the Marker value it contains and nothing else.",
+                    originalRequest = ctx.utterance,
+                    issuedAtCycleSeq = horizonCycleResult?.cycleSeq,
+                    kind = kind,
+                )
+                dispatcher.dispatchAsync(assignment)
+                assignment
+            } else if (pendingDocumentClarification != null || ctx.intent in DOCUMENT_INTENT_ELIGIBLE_INTENTS) {
+                val pendingBefore = pendingDocumentClarification
+                val intentResult = documentIntentDirector.decide(
+                    utterance = ctx.utterance,
+                    recentTurns = recentTurns.map { "${it.role}: ${it.text}" },
+                    pendingClarificationCandidates = pendingBefore,
+                )
+                if (debug) {
+                    trace!!.documentIntent = HermesDocumentIntentTrace(
+                        action = when (intentResult.decision) {
+                            is HermesDocumentIntentDecision.Delegate -> "delegate"
+                            is HermesDocumentIntentDecision.Clarify -> "clarify"
+                            HermesDocumentIntentDecision.NoDelegation -> "none"
+                        },
+                        targetDocument = (intentResult.decision as? HermesDocumentIntentDecision.Delegate)?.targetFilename,
+                        candidateDocuments = (intentResult.decision as? HermesDocumentIntentDecision.Clarify)?.candidateFilenames ?: emptyList(),
+                        modelCalled = intentResult.modelCalled,
+                        latencyMs = intentResult.latencyMs,
+                        rejectedReason = intentResult.rejectedReason,
+                        usedPendingClarification = pendingBefore != null,
+                    )
+                }
+                when (val decision = intentResult.decision) {
+                    is HermesDocumentIntentDecision.Delegate -> {
+                        pendingDocumentClarification = null
+                        val kind = HermesAssignmentKind.DocumentSummary(decision.targetFilename)
+                        val assignment = HermesAssignment(
+                            assignmentId = java.util.UUID.randomUUID().toString(),
+                            userEmail = ctx.userEmail,
+                            task = "Please read the file ${kind.targetFilename} in your current working directory " +
+                                "using your file-reading tool, then summarize it for the user in four short labeled " +
+                                "parts — Goal, Deadlines, Risks, Next actions — based only on what the file actually says.",
+                            originalRequest = ctx.utterance,
+                            issuedAtCycleSeq = horizonCycleResult?.cycleSeq,
+                            kind = kind,
+                        )
+                        dispatcher.dispatchAsync(assignment)
+                        assignment
+                    }
+                    is HermesDocumentIntentDecision.Clarify -> {
+                        pendingDocumentClarification = decision.candidateFilenames
+                        documentClarifyCandidates = decision.candidateFilenames
+                        null
+                    }
+                    HermesDocumentIntentDecision.NoDelegation -> {
+                        pendingDocumentClarification = null
+                        null
+                    }
+                }
+            } else {
+                null
             }
-            val assignment = HermesAssignment(
-                assignmentId = java.util.UUID.randomUUID().toString(),
-                userEmail = ctx.userEmail,
-                task = task,
-                originalRequest = ctx.utterance,
-                issuedAtCycleSeq = horizonCycleResult?.cycleSeq,
-                kind = kind,
-            )
-            dispatcher.dispatchAsync(assignment)
-            assignment
         }
         if (debug && hermesDelegation != null) {
             trace!!.hermesDelegation = HermesDelegationTrace(hermesDelegation.assignmentId, hermesDelegation.task)
         }
         val baseDirective = ctx.branchResult?.directive ?: "Respond naturally and briefly."
-        val directive = if (hermesDelegation != null) {
-            baseDirective + "\n\nYou just asked Hermes to look into \"${hermesDelegation.kind.targetFilename}\" " +
-                "on the user's behalf. Tell them plainly that you've kicked that off and will let them know " +
-                "what Hermes finds — do not guess at the file's contents yourself."
-        } else baseDirective
+        val directive = when {
+            hermesDelegation != null ->
+                baseDirective + "\n\nYou just asked Hermes to look into \"${hermesDelegation.kind.targetFilename}\" " +
+                    "on the user's behalf. Tell them plainly that you've kicked that off and will let them know " +
+                    "what Hermes finds — do not guess at the file's contents yourself."
+            documentClarifyCandidates != null ->
+                baseDirective + "\n\nThe user wants an approved document summarized, but it's not clear which " +
+                    "one they mean. Ask them, briefly and naturally, to choose between: " +
+                    describeApprovedDocuments(documentClarifyCandidates!!) + ". Do not guess which one, and do " +
+                    "not claim to have started anything yet."
+            else -> baseDirective
+        }
 
         val conditioners = Conditioners(
             modality         = ctx.modality,
@@ -1089,6 +1179,16 @@ open class CognitivePipeline(
     /** Renders [recentTurns] for [Conditioners.recentTurns]; null when empty (fresh session). */
     private fun recentTurnsConditioner(): String? =
         recentTurns.takeIf { it.isNotEmpty() }?.joinToString("\n") { "${it.role}: ${it.text}" }
+
+    /** Renders a [HermesDocumentIntentDecision.Clarify]'s candidate filenames as a natural-language
+     *  list the actor can read aloud to the user, using each document's own approved description
+     *  rather than a bare filename — falls back to the filename if it's somehow not in the approved
+     *  list (should not happen, since the caller already filtered against it). */
+    private fun describeApprovedDocuments(filenames: List<String>): String =
+        filenames.joinToString(", or ") { filename ->
+            val doc = HermesDelegationTrigger.APPROVED_DOCUMENTS.find { it.filename == filename }
+            if (doc != null) "\"${doc.filename}\" (${doc.description})" else "\"$filename\""
+        }
 
     /**
      * Every greeting [initSession] can send goes through here so [recordTurn] never misses one —

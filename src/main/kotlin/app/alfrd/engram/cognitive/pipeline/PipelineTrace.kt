@@ -16,6 +16,26 @@ data class PipelineTrace(
     var retrievalCoverage: RetrievalCoverageTrace? = null,
     var horizonCycle: HorizonCycleTrace? = null,
     var hermesDelegation: HermesDelegationTrace? = null,
+    var documentIntent: HermesDocumentIntentTrace? = null,
+)
+
+/**
+ * Present only on a turn where the Director's document-intent classifier
+ * (`HermesDocumentIntentDirector`) actually ran — i.e. the marker-check regex didn't already
+ * match and a dispatcher was wired. Records the decision, whether the (local) model was actually
+ * called, its latency, and — when the decision was rejected or downgraded — why, so a caller can
+ * distinguish "the model proposed nothing," "the model proposed something code-side validation
+ * rejected," and "a real delegation/clarification resulted" without re-deriving it from logs.
+ */
+@Serializable
+data class HermesDocumentIntentTrace(
+    val action: String,
+    val targetDocument: String? = null,
+    val candidateDocuments: List<String> = emptyList(),
+    val modelCalled: Boolean = false,
+    val latencyMs: Long = 0,
+    val rejectedReason: String? = null,
+    val usedPendingClarification: Boolean = false,
 )
 
 /**
