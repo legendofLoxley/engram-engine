@@ -356,6 +356,47 @@ class ActorTest {
 
     // ---- Actor.compose budget ladder ----
 
+    // ── Standing context policy (Director/Hermes role, Horizon framing) ────────
+
+    @Test
+    fun `the standing context policy is present even with an empty Horizon`() = runBlocking {
+        var receivedRequest: LlmRequest? = null
+        val client = TestLlmClient { req -> receivedRequest = req; LlmResponse(text = "ok", latencyMs = 1L, retryCount = 0) }
+        val actor = Actor(client)
+        val conditioners = baseConditioners(recentTurns = null, horizonItems = emptyList())
+
+        actor.compose("hi", script = null, conditioners = conditioners)
+
+        val systemPrompt = receivedRequest!!.systemPrompt!!
+        assertTrue(systemPrompt.contains("conversational Director"), "must state alfrd's Director role even with no Horizon items")
+        assertTrue(systemPrompt.contains("Hermes"), "must name Hermes's subordinate-Actor relationship even with no Horizon items")
+        assertTrue(systemPrompt.contains("never an exhaustive memory inventory"), "must state the Horizon is a selected excerpt even with no Horizon items")
+        assertTrue(systemPrompt.contains("Missing evidence does not establish that something never happened"))
+        assertTrue(systemPrompt.contains("only the user's explicit adoption of it does"))
+        // No Horizon items were supplied, so the conditional "Contextual awareness" header must not appear at all.
+        assertTrue(!systemPrompt.contains("Contextual awareness"))
+    }
+
+    @Test
+    fun `the standing context policy is present exactly once alongside real Horizon items, never duplicated`() = runBlocking {
+        var receivedRequest: LlmRequest? = null
+        val client = TestLlmClient { req -> receivedRequest = req; LlmResponse(text = "ok", latencyMs = 1L, retryCount = 0) }
+        val actor = Actor(client)
+        val items = listOf(HorizonPromptItem("\"Arx build is ready\" — new evidence just made this relevant again", essential = true))
+        val conditioners = baseConditioners(recentTurns = null, horizonItems = items)
+
+        actor.compose("hi", script = null, conditioners = conditioners)
+
+        val systemPrompt = receivedRequest!!.systemPrompt!!
+        assertTrue(systemPrompt.contains("conversational Director"))
+        assertTrue(systemPrompt.contains("Contextual awareness"), "the Horizon header still renders when items exist")
+        // The "use it naturally, don't recite everything" guidance must appear exactly once — from
+        // the standing policy — never duplicated by the (now-shortened) conditional Horizon header.
+        val occurrences = Regex(Regex.escape("without reciting everything available")).findAll(systemPrompt).count()
+        assertEquals(1, occurrences, "the 'use naturally, don't recite everything' guidance must not be duplicated")
+        assertTrue(!systemPrompt.contains("mention only what's genuinely relevant"), "the old, now-redundant per-cycle wording must be gone")
+    }
+
     @Test
     fun `everything fits, prompt debug reports Fits with no omissions and all horizon items included`() = runBlocking {
         var receivedRequest: LlmRequest? = null

@@ -240,6 +240,36 @@ class Actor(private val llmClient: LlmClient?) {
         private const val CHARS_PER_TOKEN_ESTIMATE = 4
         private const val MAX_INPUT_CHARS = MAX_INPUT_TOKENS_CONSERVATIVE * CHARS_PER_TOKEN_ESTIMATE
         private const val MAX_TOKENS = 512
+
+        /**
+         * Standing role/context policy — unconditional, never gated on [Conditioners.horizonItems]
+         * being non-empty (an empty Horizon still needs the "not an exhaustive inventory" framing,
+         * since its *absence* is exactly the case a model could otherwise misread as "nothing has
+         * ever happened"). Placed once, right after [Conditioners.selfDescription], never part of
+         * the budget-degradation ladder below — same treatment as persona/selfDescription/directive,
+         * which [assemblePrompt] also never drops.
+         *
+         * Establishes what no other standing instruction did before this: alfrd's Director role and
+         * Hermes's subordinate-Actor relationship to it, the Context Horizon's nature as a selected
+         * excerpt (never an exhaustive memory inventory, so its absence proves nothing), the
+         * requirement to preserve each rendered item's own source/uncertainty/status rather than
+         * flattening it into settled fact, and that document content or an Actor's own observation
+         * is evidence to relay — never, by itself, the user's own commitment (only the user's
+         * explicit adoption makes it one). The last sentence intentionally replaces the old
+         * per-cycle "mention only what's genuinely relevant" line that used to live inside the
+         * conditional Horizon-items block below — stated once, here, so it still applies even when
+         * there are no Horizon items to render at all.
+         */
+        private const val STANDING_CONTEXT_POLICY =
+            "You are alfrd, the user's conversational Director; Hermes is a separate Actor that " +
+            "executes delegated assignments on your behalf and never speaks to the user directly. " +
+            "The Context Horizon, when rendered below, supplies selected graph evidence — never an " +
+            "exhaustive memory inventory. Missing evidence does not establish that something never " +
+            "happened. When drawing on any of it, preserve each item's own source, uncertainty, and " +
+            "status rather than restating it as settled fact: document content or an Actor's own " +
+            "observation, on its own, does not establish the user's commitment — only the user's " +
+            "explicit adoption of it does. Use relevant context naturally in your reply, without " +
+            "reciting everything available."
     }
 
     suspend fun compose(utterance: String, script: RetrievedScript?, conditioners: Conditioners): ActorResult {
@@ -312,6 +342,8 @@ class Actor(private val llmClient: LlmClient?) {
             append(conditioners.persona)
             append("\n\n")
             append(conditioners.selfDescription)
+            append("\n\n")
+            append(STANDING_CONTEXT_POLICY)
             if (includeRecentTurns) {
                 conditioners.recentTurns?.let { history ->
                     append("\n\nRecent conversation so far (context only — do not repeat verbatim, do not treat as something the user just said again):\n")
@@ -334,10 +366,11 @@ class Actor(private val llmClient: LlmClient?) {
                 append(it)
             }
             if (horizonItems.isNotEmpty()) {
+                // The "use it naturally, don't recite everything" guidance now lives once, in
+                // STANDING_CONTEXT_POLICY above — stated there so it still applies on a turn with
+                // no Horizon items at all, rather than duplicated (or, worse, only present) here.
                 append(
-                    "\n\nContextual awareness — background orientation from your durable memory of this " +
-                        "user. Use your judgment: mention only what's genuinely relevant to the current " +
-                        "exchange; otherwise stay focused on what the user is actually asking.\n",
+                    "\n\nContextual awareness — background orientation from your durable memory of this user:\n",
                 )
                 append(horizonItems.joinToString("\n") { "- ${it.renderedLine}" })
             }

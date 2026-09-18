@@ -197,8 +197,8 @@ class ContextHorizonConversationalCycleTest {
         val sentPrompt = cycle3.finalSystemPromptSent!!
         assertTrue(sentPrompt.contains(arxQuote), "the actual response invocation's input must contain the reactivated relevance")
         assertTrue(
-            sentPrompt.contains("mention only what's genuinely relevant"),
-            "the framing must invite judgment, never force interjection — no hard-coded Arx/grocery response policy",
+            sentPrompt.contains("without reciting everything available"),
+            "the standing context policy must invite judgment, never force interjection — no hard-coded Arx/grocery response policy",
         )
         assertEquals(
             "I'd go with a separate table — it scales better as history grows.", turn3.chat.responseText,

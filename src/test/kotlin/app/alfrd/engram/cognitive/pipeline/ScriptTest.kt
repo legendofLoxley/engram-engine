@@ -129,6 +129,55 @@ class ScriptTest {
         assertTrue(coverage.gaps.any { it.contains("resolved 2/5") })
     }
 
+    // ── MemoryQuery: Actor-attributed phrases get framed, not a bare source tag ──
+
+    @Test
+    fun `an actor tool-result phrase is framed as self-reported, not independently verified`() = runTest {
+        engramClient.ingest(
+            listOf(PhraseCandidate("Goal: cut a known-good v0.2 release", "actor_tool_result", PhraseCategory.CONTEXT)),
+            "u@test.internal",
+        )
+
+        val c = ctx()
+        val result = script.run(c, RetrievalIntent.MemoryQuery(hint = "release", limit = 5))
+
+        assertEquals(1, result.lines.size)
+        val line = result.lines.single()
+        assertTrue(line.contains("Actor tool result"), "expected a qualitative framing tag, got: $line")
+        assertTrue(line.contains("self-reported, not independently verified"), "expected the same caveat HorizonItemsRenderer uses, got: $line")
+        assertTrue(!line.contains("confidence:"), "an Actor-attributed phrase must not carry a misleadingly precise confidence percentage")
+    }
+
+    @Test
+    fun `an actor observation phrase is framed distinctly from a tool result`() = runTest {
+        engramClient.ingest(
+            listOf(PhraseCandidate("Arx build completed", "actor_observation", PhraseCategory.CONTEXT)),
+            "u@test.internal",
+        )
+
+        val c = ctx()
+        val result = script.run(c, RetrievalIntent.MemoryQuery(hint = "Arx", limit = 5))
+
+        val line = result.lines.single()
+        assertTrue(line.contains("Actor observation"), "expected the observation-specific tag, got: $line")
+        assertTrue(!line.contains("tool result"))
+    }
+
+    @Test
+    fun `an ordinary user-sourced phrase keeps its confidence rendering, unchanged`() = runTest {
+        engramClient.ingest(
+            listOf(PhraseCandidate("I love hiking on weekends", "user", PhraseCategory.PREFERENCE)),
+            "u@test.internal",
+        )
+
+        val c = ctx()
+        val result = script.run(c, RetrievalIntent.MemoryQuery(hint = "hiking", limit = 5))
+
+        val line = result.lines.single()
+        assertTrue(line.contains("source: user"), "an ordinary conversational phrase's rendering must be unchanged, got: $line")
+        assertTrue(line.contains("confidence:"))
+    }
+
     // ── MemoryQuery: no matches ──────────────────────────────────────────────
 
     @Test

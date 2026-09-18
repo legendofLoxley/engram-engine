@@ -2,7 +2,11 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicResolver
+import app.alfrd.engram.cognitive.pipeline.horizon.ACTOR_INTERPRETATION_SOURCE_TYPE
+import app.alfrd.engram.cognitive.pipeline.horizon.ACTOR_OBSERVATION_SOURCE_TYPE
+import app.alfrd.engram.cognitive.pipeline.horizon.ACTOR_TOOL_RESULT_SOURCE_TYPE
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.ScoredPhrase
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
@@ -168,10 +172,7 @@ class Script(
             return RetrievedScript(label = "memory")
         }
 
-        val lines = phrases.take(5).map { phrase ->
-            val confidence = "%.0f".format((phrase.scores["trust"] ?: 0.5) * 100)
-            "${phrase.text} [source: ${phrase.sourceTypes.firstOrNull() ?: "unknown"}, confidence: $confidence%]"
-        }
+        val lines = phrases.take(5).map { phrase -> renderMemoryQueryLine(phrase) }
         val activationMass = phrases.map { it.scores["trust"] ?: 0.5 }.average()
         val resolutionRatio = phrases.size.toDouble() / intent.limit
         val gaps = if (resolutionRatio < 1.0) {
@@ -184,6 +185,32 @@ class Script(
             conceptResolutionRatio = resolutionRatio, gaps = gaps,
         )
         return RetrievedScript(lines = lines, label = "memory")
+    }
+
+    /**
+     * A plain user-conversation phrase renders with its confidence percentage, unchanged from
+     * before this correction. An Actor-attributed phrase (a source reused by
+     * [app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService] — a tool result, an
+     * observation, or an interpretation) gets the SAME qualitative framing
+     * [app.alfrd.engram.cognitive.pipeline.Actor]'s own [HorizonItemsRenderer] already gives these
+     * exact provenance kinds, never a bare `[source: actor_tool_result, confidence: 50%]` tag —
+     * that generic form is exactly the "unframed duplicate material" a memory-recall query could
+     * otherwise hand the actor with no hint that it is Hermes's own self-report, not the user's own
+     * words. [queryPhrases] itself is untouched: every trusted source is still queried and returned
+     * exactly as before — this only changes how one already-returned phrase is worded.
+     */
+    private fun renderMemoryQueryLine(phrase: ScoredPhrase): String {
+        val sourceType = phrase.sourceTypes.firstOrNull() ?: "unknown"
+        val tag = when (sourceType) {
+            ACTOR_TOOL_RESULT_SOURCE_TYPE -> "Actor tool result — self-reported, not independently verified"
+            ACTOR_OBSERVATION_SOURCE_TYPE -> "Actor observation"
+            ACTOR_INTERPRETATION_SOURCE_TYPE -> "Actor interpretation"
+            else -> {
+                val confidence = "%.0f".format((phrase.scores["trust"] ?: 0.5) * 100)
+                "source: $sourceType, confidence: $confidence%"
+            }
+        }
+        return "${phrase.text} [$tag]"
     }
 
     // ── Correction ───────────────────────────────────────────────────────────
