@@ -155,6 +155,68 @@ class RequestHermesCancellationTest(unittest.TestCase):
         self.assertEqual(captured["auth"], "Bearer secret-tok")
 
 
+class FetchHermesActivityTest(unittest.TestCase):
+    def test_200_returns_the_parsed_items_list(self):
+        body = (
+            b'{"items":[{"eventId":"hermes-assignment-a1","cycleSeq":5,'
+            b'"targetFilename":"director-hermes-project-brief.md","state":"completed",'
+            b'"summary":"Summarized director-hermes-project-brief.md","occurredAt":1234}]}'
+        )
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(body)):
+            result = ec.fetch_hermes_activity("http://x", "tok", "webui-dev")
+        self.assertEqual(result, [{
+            "eventId": "hermes-assignment-a1", "cycleSeq": 5,
+            "targetFilename": "director-hermes-project-brief.md", "state": "completed",
+            "summary": "Summarized director-hermes-project-brief.md", "occurredAt": 1234,
+        }])
+
+    def test_confirmed_empty_items_returns_an_empty_list_not_none(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b'{"items":[]}')):
+            result = ec.fetch_hermes_activity("http://x", "tok", "webui-dev")
+        self.assertEqual(result, [])
+
+    def test_503_service_unavailable_returns_none_a_failed_refresh_not_a_confirmed_empty_one(self):
+        error = urllib.error.HTTPError("http://x", 503, "graph read failed", {}, io.BytesIO(b""))
+        try:
+            with patch("urllib.request.urlopen", side_effect=error):
+                result = ec.fetch_hermes_activity("http://x", "tok", "webui-dev")
+            self.assertIsNone(result)
+        finally:
+            error.close()
+
+    def test_connection_failure_returns_none_rather_than_raising(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+            result = ec.fetch_hermes_activity("http://x", "tok", "webui-dev")
+        self.assertIsNone(result)
+
+    def test_malformed_json_body_returns_none_rather_than_raising(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"not json")):
+            result = ec.fetch_hermes_activity("http://x", "tok", "webui-dev")
+        self.assertIsNone(result)
+
+    def test_a_missing_or_non_list_items_field_returns_none_rather_than_a_malformed_list(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b'{"items":"not-a-list"}')):
+            result = ec.fetch_hermes_activity("http://x", "tok", "webui-dev")
+        self.assertIsNone(result)
+
+    def test_synthetic_user_id_is_url_encoded_and_no_userEmail_param_is_ever_sent(self):
+        captured = {}
+
+        def _capture(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["auth"] = req.get_header("Authorization")
+            return _FakeResponse(b'{"items":[]}')
+
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            ec.fetch_hermes_activity("http://x", "secret-tok", "webui dev")
+        self.assertIn("/debug/hermes-activity", captured["url"])
+        self.assertIn("syntheticUserId=webui%20dev", captured["url"])
+        self.assertNotIn("userEmail=", captured["url"])
+        self.assertEqual(captured["method"], "GET")
+        self.assertEqual(captured["auth"], "Bearer secret-tok")
+
+
 class FetchEngramHealthTest(unittest.TestCase):
     def test_200_returns_reachable_and_uptime(self):
         body = b'{"status":"ok","version":"0.1.0","uptimeSeconds":201,"database":"open","service":"engram-engine","anthropicKeySet":true,"googleKeySet":false}'

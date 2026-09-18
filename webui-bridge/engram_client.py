@@ -120,6 +120,50 @@ def fetch_hermes_assignment_completion(
     return parsed if isinstance(parsed, dict) else None
 
 
+def fetch_hermes_activity(
+    base_url: str,
+    token: str,
+    synthetic_user_id: str,
+    timeout: float = 10.0,
+) -> list[dict[str, Any]] | None:
+    """GET engram-engine's `/debug/hermes-activity` — the durable, graph-backed "selected activity
+    independent of conversation" list (see `HermesActivityFeed`'s own doc). A bounded snapshot, not
+    a cursor: this always returns "what's eligible right now," already capped server-side.
+
+    Returns the parsed `items` list on 200, or ``None`` on ANY failure (connection error, timeout,
+    non-2xx status including the server's own honest 503 for "the graph read itself failed",
+    malformed body). ``None`` deliberately covers every one of those cases identically — the
+    caller's job is "retain whatever was last successfully shown and mark it stale," never to
+    distinguish *why* this particular poll came back empty-handed. A confirmed, genuine "no eligible
+    activity yet" is `[]`, not ``None`` — the caller must keep that distinction (see
+    runner_adapter.py's `do_GET` handling of this function's return value).
+    """
+    url = (
+        f"{base_url}/debug/hermes-activity"
+        f"?syntheticUserId={urllib.parse.quote(synthetic_user_id)}"
+    )
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError:
+        return None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    items = parsed.get("items")
+    return items if isinstance(items, list) else None
+
+
 def fetch_engram_health(base_url: str, timeout: float = 5.0) -> tuple[bool, float | None]:
     """GET engram-engine's own unauthenticated ``/health``.
 

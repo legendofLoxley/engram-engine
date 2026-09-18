@@ -193,6 +193,47 @@ interface HorizonGraphStore {
         status: String,
         incompletePropagationTargets: List<RelevanceEdgeSummary>,
     ): Boolean
+
+    /**
+     * Enough of one committed Actor-attributed event to identify and honestly label it in a
+     * durable, restart-surviving listing — deliberately not the full [ActorEventRecord] shape
+     * ([contentHash]/[propagationStatus]/[incompletePropagationTargets] are ingest-hot-path/dedup
+     * concerns this read has no need of). [kindMetadata] is the same raw JSON [ingestActorEvent]
+     * wrote — decode with [ActorEventMetadata] to recover [ActorEventMetadata.assignmentKind] /
+     * [ActorEventMetadata.targetFilename] / [ActorEventMetadata.executionOutcome].
+     */
+    data class ActorEventSummary(
+        val eventId: String,
+        val phraseUid: String,
+        val cycleSeq: Long,
+        val assignmentId: String?,
+        val occurredAt: Long,
+        val kindMetadata: String,
+    )
+
+    /** Outcome of [listRecentActorEvents] — [Failed] (a caught query exception) is a distinct fact from [Ok] with an empty list, the same "absence vs. lookup failure" distinction [ActorEventLookupResult] already makes: a caller must not render "no items" when the read itself never completed. */
+    sealed interface ActorEventListResult {
+        data class Ok(val events: List<ActorEventSummary>) : ActorEventListResult
+        data class Failed(val reason: String) : ActorEventListResult
+    }
+
+    /**
+     * The most recent (by `cycleSeq` descending) committed Actor-attributed events for [userEmail]
+     * from the Source named [sourceName], capped at [limit] — a bounded snapshot, not a cursor: a
+     * caller wanting "what's currently eligible for display" re-reads this in full every time and
+     * reconciles by [ActorEventSummary.eventId], rather than trusting a saved cursor that could hide
+     * an event whose earlier lookup transiently failed. Durable: reconstructable at any time
+     * straight from the graph, independent of any in-process store's lifetime — this is the entire
+     * reason it exists (see [app.alfrd.engram.cognitive.pipeline.hermes.HermesActivityFeed]'s doc).
+     * `Ok(emptyList())` for an unknown user or one with no such Source yet — a genuine, confirmed
+     * "nothing here," never [ActorEventListResult.Failed].
+     *
+     * A default body (not abstract) returning `Ok(emptyList())`, matching [readPhraseText]'s own
+     * "existing fakes need no change" convention — this is a newly added method with no existing
+     * fake relying on different behavior.
+     */
+    suspend fun listRecentActorEvents(userEmail: String, sourceName: String, limit: Int): ActorEventListResult =
+        ActorEventListResult.Ok(emptyList())
 }
 
 class ArcadeHorizonGraphStore(
@@ -283,6 +324,53 @@ class ArcadeHorizonGraphStore(
             // established, so this must NOT be reported as ConfirmedAbsent (see that variant's doc).
             logger.warn("findActorEventByEventId failed for userEmail=$userEmail eventId=$eventId: ${e.message}")
             HorizonGraphStore.ActorEventLookupResult.LookupFailed(e.message ?: "unknown lookup failure")
+        }
+    }
+
+    override suspend fun listRecentActorEvents(
+        userEmail: String,
+        sourceName: String,
+        limit: Int,
+    ): HorizonGraphStore.ActorEventListResult = withContext(Dispatchers.IO) {
+        try {
+            val userVertex = HorizonOwnership.findUserVertex(db, userEmail)
+                ?: return@withContext HorizonGraphStore.ActorEventListResult.Ok(emptyList())
+            // Filtered by Source NAME specifically (unlike findActorEventByEventId's
+            // all-trusted-sources lookup, safe there only because it also filters by exact
+            // eventId) — this listing has no such second filter, so it must not mix in
+            // ASSERTS edges from unrelated Sources (environment signals, ordinary memory
+            // ingest, etc.) that happen to also be trusted by this user.
+            val sourceUids = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
+                .filter { it.get("name") == sourceName }
+                .mapNotNull { it.get("uid") as? String }
+            if (sourceUids.isEmpty()) return@withContext HorizonGraphStore.ActorEventListResult.Ok(emptyList())
+            val sql = """
+                SELECT eventId, @in.uid as phraseUid, cycleSeq, assignmentId, occurredAt, kindMetadata
+                FROM ASSERTS
+                WHERE @out.uid IN :sourceUids
+                ORDER BY cycleSeq DESC
+                LIMIT :limit
+            """.trimIndent()
+            db.query("sql", sql, mapOf("sourceUids" to sourceUids, "limit" to limit)).use { rs ->
+                val out = mutableListOf<HorizonGraphStore.ActorEventSummary>()
+                while (rs.hasNext()) {
+                    val row = rs.next().toMap()
+                    val eventId = row["eventId"] as? String ?: continue
+                    val phraseUid = row["phraseUid"] as? String ?: continue
+                    out += HorizonGraphStore.ActorEventSummary(
+                        eventId = eventId,
+                        phraseUid = phraseUid,
+                        cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L,
+                        assignmentId = row["assignmentId"] as? String,
+                        occurredAt = (row["occurredAt"] as? Number)?.toLong() ?: 0L,
+                        kindMetadata = row["kindMetadata"] as? String ?: "{}",
+                    )
+                }
+                HorizonGraphStore.ActorEventListResult.Ok(out)
+            }
+        } catch (e: Exception) {
+            logger.warn("listRecentActorEvents failed for userEmail=$userEmail sourceName=$sourceName: ${e.message}")
+            HorizonGraphStore.ActorEventListResult.Failed(e.message ?: "unknown list failure")
         }
     }
 

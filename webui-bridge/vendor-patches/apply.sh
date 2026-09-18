@@ -37,6 +37,9 @@ fi
 mkdir -p "$OUT_DIR"
 docker cp "$SRC_CONTAINER:/app/api/routes.py" "$OUT_DIR/routes.py"
 docker cp "$SRC_CONTAINER:/app/static/messages.js" "$OUT_DIR/messages.js"
+docker cp "$SRC_CONTAINER:/app/api/runner_client.py" "$OUT_DIR/runner_client.py"
+docker cp "$SRC_CONTAINER:/app/static/index.html" "$OUT_DIR/index.html"
+docker cp "$SRC_CONTAINER:/app/static/workspace.js" "$OUT_DIR/workspace.js"
 
 # git apply (not the `patch` utility, which isn't guaranteed present) — does
 # not require OUT_DIR to be a git repo, just run from inside it so the
@@ -44,7 +47,11 @@ docker cp "$SRC_CONTAINER:/app/static/messages.js" "$OUT_DIR/messages.js"
 # ./<file> here.
 (cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/routes_py_runner_session_persistence.patch")
 (cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/routes_py_runner_cancel_routing.patch")
+(cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/routes_py_hermes_activity_route.patch")
 (cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/messages_js_model_chip_fallback.patch")
+(cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/runner_client_py_activity_fetch.patch")
+(cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/index_html_activity_tab.patch")
+(cd "$OUT_DIR" && git apply -p1 "$SCRIPT_DIR/workspace_js_activity_tab.patch")
 
 echo "Patched vendor files written to $OUT_DIR"
 echo "Bind-mount them over the pinned (untouched) image's /apptoo — NOT"
@@ -52,3 +59,6 @@ echo "/app, whose ownership the entrypoint rsyncs from /apptoo on every"
 echo "start and cannot chown across a direct /app/... bind mount:"
 echo "  -v $OUT_DIR/routes.py:/apptoo/api/routes.py:ro"
 echo "  -v $OUT_DIR/messages.js:/apptoo/static/messages.js:ro"
+echo "  -v $OUT_DIR/runner_client.py:/apptoo/api/runner_client.py:ro"
+echo "  -v $OUT_DIR/index.html:/apptoo/static/index.html:ro"
+echo "  -v $OUT_DIR/workspace.js:/apptoo/static/workspace.js:ro"

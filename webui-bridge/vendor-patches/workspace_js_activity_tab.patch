@@ -1,0 +1,114 @@
+--- a/workspace.js
++++ b/workspace.js
+@@ -370,11 +370,12 @@
+ }
+ 
+ function switchWorkspacePanelTab(tab){
+-  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : 'files';
++  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : tab === 'activity' ? 'activity' : 'files';
+   _setWorkspacePanelTabDataset();
+   const filesTab = $('workspaceFilesTab');
+   const artifactsTab = $('workspaceArtifactsTab');
+   const todosTab = $('workspaceTodosTab');
++  const activityTab = $('workspaceActivityTab');
+   if(filesTab){
+     filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
+     filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
+@@ -387,12 +388,97 @@
+     todosTab.classList.toggle('active', _workspacePanelActiveTab === 'todos');
+     todosTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'todos' ? 'true' : 'false');
+   }
++  if(activityTab){
++    activityTab.classList.toggle('active', _workspacePanelActiveTab === 'activity');
++    activityTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'activity' ? 'true' : 'false');
++  }
+   const artifacts = $('workspaceArtifacts');
+   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
+   const todosPanel = $('workspaceTodosPanel');
+   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
++  const activityPanel = $('workspaceActivityPanel');
++  if(activityPanel) activityPanel.hidden = _workspacePanelActiveTab !== 'activity';
+   if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
++  if(_workspacePanelActiveTab === 'activity'){ _loadWorkspacePanelActivity(); _startActivityPolling(); }
++  else if(typeof _stopActivityPolling === 'function'){ _stopActivityPolling(); }
++}
++
++// engram-engine dev-bridge addition: the durable, graph-backed "selected activity independent of
++// conversation" list — see engram-engine's webui-bridge/README.md. Polling-based (matches this
++// bridge's existing known scope boundary of no live token-by-token streaming — see that doc's
++// "Known scope boundaries"), only while this tab is actually the visible one, same idiom as the
++// existing kanban panel's own _kanbanPollTimer.
++let _activityPollTimer = null;
++let _lastRenderedActivityItems = null;
++
++function _workspaceActivityTabIsActive(){
++  if(typeof document==='undefined') return false;
++  const rightPanel=document.querySelector('.rightpanel');
++  if(!rightPanel||!rightPanel.dataset||rightPanel.dataset.activeTab!=='activity') return false;
++  const panel=document.getElementById('workspaceActivityPanel');
++  return !!(panel&&!panel.hidden);
++}
++
++function _activityStateLabel(state){
++  if(state==='completed') return 'Completed';
++  if(state==='failed') return 'Failed';
++  if(state==='cancelled') return 'Cancelled';
++  return state||'';
++}
++
++function _renderActivityItems(items){
++  const panel=$('workspaceActivityPanel');
++  if(!panel) return;
++  if(!items.length){
++    panel.innerHTML='<div style="padding:12px;color:var(--muted);font-size:12px">No activity yet.</div>';
++    return;
++  }
++  panel.innerHTML=items.map(function(item){
++    const when=item.occurredAt?new Date(item.occurredAt).toLocaleString():'';
++    return '<div class="activity-item activity-state-'+_escHtml(item.state||'')+'" style="padding:8px 0;border-bottom:1px solid var(--border2)">'
++      +'<div style="font-size:12px">'+_escHtml(item.summary||'')+'</div>'
++      +'<div style="font-size:11px;color:var(--muted);margin-top:2px">'+_escHtml(_activityStateLabel(item.state))+(when?' · '+_escHtml(when):'')+'</div>'
++      +'</div>';
++  }).join('');
++}
++
++async function _loadWorkspacePanelActivity(){
++  const panel=$('workspaceActivityPanel');
++  if(!panel) return;
++  if(_lastRenderedActivityItems===null){
++    panel.innerHTML='<div style="padding:12px;color:var(--muted);font-size:12px">Loading…</div>';
++  }
++  try{
++    const data=await api('/api/hermes-activity',{timeoutToast:false,retries:0});
++    const items=Array.isArray(data&&data.items)?data.items:[];
++    _lastRenderedActivityItems=items;
++    _renderActivityItems(items);
++  }catch(e){
++    // A failed refresh is a DIFFERENT fact from a confirmed-empty result: retain whatever was
++    // last successfully shown rather than clearing a working list because one poll failed.
++    if(_lastRenderedActivityItems===null){
++      panel.innerHTML='<div style="padding:12px;color:var(--muted);font-size:12px">Activity updates unavailable.</div>';
++    }else{
++      _renderActivityItems(_lastRenderedActivityItems);
++      const notice=document.createElement('div');
++      notice.style.cssText='padding:6px 0;color:var(--muted);font-size:11px';
++      notice.textContent='Updates unavailable — showing last known activity.';
++      panel.insertBefore(notice,panel.firstChild);
++    }
++  }
++}
++
++function _stopActivityPolling(){
++  if(_activityPollTimer){ clearInterval(_activityPollTimer); _activityPollTimer=null; }
++}
++
++function _startActivityPolling(){
++  _stopActivityPolling();
++  _activityPollTimer=setInterval(function(){
++    if(!_workspaceActivityTabIsActive()){ _stopActivityPolling(); return; }
++    _loadWorkspacePanelActivity();
++  },15000);
+ }
+ 
+ function _loadWorkspacePanelTodos(){

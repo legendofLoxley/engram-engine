@@ -32,7 +32,9 @@ set -euo pipefail
 DEV_DIR="/home/halo/development/hermes-webui-dev"
 VENDOR_PATCH_DIR="$DEV_DIR/vendor-patch"
 
-if [ ! -f "$VENDOR_PATCH_DIR/routes.py" ] || [ ! -f "$VENDOR_PATCH_DIR/messages.js" ]; then
+if [ ! -f "$VENDOR_PATCH_DIR/routes.py" ] || [ ! -f "$VENDOR_PATCH_DIR/messages.js" ] \
+  || [ ! -f "$VENDOR_PATCH_DIR/runner_client.py" ] || [ ! -f "$VENDOR_PATCH_DIR/index.html" ] \
+  || [ ! -f "$VENDOR_PATCH_DIR/workspace.js" ]; then
   echo "missing patched vendor files — run engram-engine/webui-bridge/vendor-patches/apply.sh first" >&2
   exit 1
 fi
@@ -50,6 +52,9 @@ exec docker run -d \
   -v "$DEV_DIR/home:/home/hermeswebui/.hermes:Z" \
   -v "$VENDOR_PATCH_DIR/routes.py:/apptoo/api/routes.py:ro" \
   -v "$VENDOR_PATCH_DIR/messages.js:/apptoo/static/messages.js:ro" \
+  -v "$VENDOR_PATCH_DIR/runner_client.py:/apptoo/api/runner_client.py:ro" \
+  -v "$VENDOR_PATCH_DIR/index.html:/apptoo/static/index.html:ro" \
+  -v "$VENDOR_PATCH_DIR/workspace.js:/apptoo/static/workspace.js:ro" \
   -e HERMES_WEBUI_PORT=8787 \
   -e HERMES_WEBUI_HOST=0.0.0.0 \
   -e HERMES_HOME=/home/hermeswebui/.hermes \

@@ -711,6 +711,37 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
         self.assertNotIn("effective_model", start_payload)
         self.assertNotIn("effective_model_provider", start_payload)
 
+    def test_unauthenticated_activity_is_rejected(self):
+        conn = self._conn()
+        conn.request("GET", "/v1/activity", headers=self._auth_headers(key=None))
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 401)
+
+    def test_activity_returns_the_items_engram_client_reports(self):
+        items = [{"eventId": "hermes-assignment-a1", "cycleSeq": 1, "targetFilename": "x.md", "state": "completed", "summary": "Summarized x.md", "occurredAt": 1}]
+        with patch.object(ra, "fetch_hermes_activity", return_value=items) as mocked:
+            conn = self._conn()
+            conn.request("GET", "/v1/activity", headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read()), {"items": items})
+        mocked.assert_called_once_with(self.config["engram_base_url"], self.config["engram_debug_token"], self.config["synthetic_user_id"])
+
+    def test_activity_confirmed_empty_is_a_200_with_an_empty_list_not_a_failure(self):
+        with patch.object(ra, "fetch_hermes_activity", return_value=[]):
+            conn = self._conn()
+            conn.request("GET", "/v1/activity", headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read()), {"items": []})
+
+    def test_activity_upstream_failure_is_a_502_never_a_200_with_an_empty_list(self):
+        with patch.object(ra, "fetch_hermes_activity", return_value=None):
+            conn = self._conn()
+            conn.request("GET", "/v1/activity", headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 502)
+
     def test_cancel_for_an_unknown_run_reports_unknown_run_not_a_generic_unsupported_message(self):
         conn = self._conn()
         conn.request("POST", "/v1/runs/whatever/cancel", body=b"{}", headers=self._auth_headers())

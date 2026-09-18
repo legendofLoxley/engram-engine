@@ -370,3 +370,57 @@ Director (not Hermes) composes the reply the user sees.
   separate action item — without labeling that connection as an inference,
   though never observed inventing a fact absent from the source or
   cross-contaminating between the two documents).
+
+## Selected activity independent of conversation (first bounded increment)
+
+A real Hermes document-summary assignment now produces **two** independently-arriving outputs: the
+Director's conversational reply (unchanged, above), and a small "Activity" tab inside the WebUI's
+existing collapsible workspace panel — alongside its own Files/Artifacts/Todos tabs, never a new
+window, a copy of the reply, or another assistant message. It updates on its own poll cycle; no
+further user message or extra Director model call is involved.
+
+- **Durable-graph-backed, not completion-store-backed.** `HermesActivityFeed`
+  (`cognitive/pipeline/hermes/HermesActivityFeed.kt`) reads directly from
+  `HorizonGraphStore.listRecentActorEvents` — a new, restart-surviving query over the same `hermes`
+  Source every assignment outcome is already ingested under — and **never** consults
+  `HermesAssignmentCompletionStore` (in-memory, one process's lifetime only). Verified live: a real
+  `sudo systemctl restart engram-dev.service` (which wipes that in-memory store completely) left the
+  exact same activity items, with identical `eventId`s, available immediately afterward.
+- **Honest labeling from durable metadata, not inference.** `HermesDelegationDispatcher` now writes
+  `assignmentKind`/`targetFilename`/`executionOutcome` directly onto `ActorEventMetadata` (durable,
+  `ASSERTS.kindMetadata`) for every outcome — Completed, Failed, *and* Cancelled alike — so
+  `"failed"` and `"cancelled"` are distinguishable from durable state alone; `toolSucceeded=false`
+  alone cannot tell them apart (both outcomes reported it false before this increment).
+- **One event family, one bounded snapshot.** Scoped to `HermesAssignmentKind.DocumentSummary`
+  outcomes only (a `MarkerCheck` event is silently excluded — different family). `GET
+  /debug/hermes-activity` always returns the latest `HermesActivityFeed.MAX_ITEMS` (50) eligible
+  items, newest first — a bounded snapshot, not a cursor, reconciled by `eventId` on the client side.
+  An item aging out of that window is a display boundary only; its underlying graph evidence is
+  never touched (verified: `findActorEventByEventId` still reports `Found` for an event dropped from
+  a 55-item test's view).
+- **Identity stays server-side.** `/api/hermes-activity` (browser-facing, vendor-patched) takes no
+  identity parameter at all; the runner adapter answers using its own configured
+  `ENGRAM_SYNTHETIC_USER_ID`, same as every other call through it. Cross-identity isolation itself is
+  a Kotlin-unit-test claim (two distinct `userEmail`s) — this dev deployment only ever runs one fixed
+  identity, so the browser never actually exercises a second one.
+- **A failed refresh is not a confirmed-empty one.** `HorizonGraphStore.listRecentActorEvents`
+  returns `ActorEventListResult.Failed` (never a bare empty list) on a genuine read failure; the
+  route reports that as `503`; `fetch_hermes_activity`/the WebUI's own `_loadWorkspacePanelActivity()`
+  treat any non-200 as "retain whatever was last successfully shown," never as "nothing here."
+- **Independent of the reply path, by construction, not by convention.** The activity fetch is a
+  separate HTTP call (`GET /v1/activity` → `GET /debug/hermes-activity`) with no code path shared
+  with `/v1/runs*`; a failure there cannot block or affect a chat reply, and graph commitment (via
+  `HermesDelegationDispatcher`, unchanged) happens independently of whether the WebUI ever
+  successfully delivers that reply into the transcript at all.
+- **Vendor extension mechanism**: three new small, isolated patches alongside the existing two —
+  `runner_client_py_activity_fetch.patch` (one new `HttpRunnerClient.get_activity()` method),
+  `routes_py_hermes_activity_route.patch` (one new `/api/hermes-activity` browser-facing route, at
+  the same `/api/*` auth gate every other API route already sits behind), `index_html_activity_tab.patch`
+  + `workspace_js_activity_tab.patch` (one new tab in the existing workspace panel, polling every 15s
+  while that tab is actually visible — this bridge's existing "no live token streaming" scope
+  boundary applies here too).
+- **Known limits**: polling-based (15s), not push; the vendor's own pre-existing reconnect-banner
+  cosmetic (documented above) is unrelated and untouched; a live cancellation demo landed the request
+  after the (fast) assignment had already completed — cancelled-vs-failed-vs-completed labeling is
+  verified through `HermesDelegationDispatcherTest`'s new real-dispatcher tests instead, per this
+  increment's own "controlled tests where browser timing is impractical" allowance.

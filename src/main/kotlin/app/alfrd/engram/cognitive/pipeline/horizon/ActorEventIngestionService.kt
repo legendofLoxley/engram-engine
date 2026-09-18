@@ -19,7 +19,24 @@ sealed interface ActorEventKind {
     val text: String
     data class Observation(override val text: String) : ActorEventKind
     data class Interpretation(override val text: String, val basis: String) : ActorEventKind
-    data class ToolResult(override val text: String, val toolName: String, val toolSucceeded: Boolean) : ActorEventKind
+
+    /**
+     * [assignmentKind]/[targetFilename]/[executionOutcome] are optional, Hermes-assignment-specific
+     * fields — null for any other [ToolResult] producer. Carried all the way into
+     * [ActorEventMetadata] (durable, `ASSERTS.kindMetadata`) so a later reader (e.g.
+     * [app.alfrd.engram.cognitive.pipeline.hermes.HermesActivityFeed]) can identify and honestly
+     * label this event straight from the graph, without depending on any in-memory store — see that
+     * class's own doc for why that matters (a store scoped to one process's lifetime cannot survive
+     * a restart; the graph write already does).
+     */
+    data class ToolResult(
+        override val text: String,
+        val toolName: String,
+        val toolSucceeded: Boolean,
+        val assignmentKind: String? = null,
+        val targetFilename: String? = null,
+        val executionOutcome: String? = null,
+    ) : ActorEventKind
 }
 
 /**
@@ -354,6 +371,14 @@ open class ActorEventIngestionService(
     private fun kindMetadataFor(kind: ActorEventKind): String = when (kind) {
         is ActorEventKind.Observation -> metadataJson.encodeToString(ActorEventMetadata())
         is ActorEventKind.Interpretation -> metadataJson.encodeToString(ActorEventMetadata(basis = kind.basis))
-        is ActorEventKind.ToolResult -> metadataJson.encodeToString(ActorEventMetadata(toolName = kind.toolName, toolSucceeded = kind.toolSucceeded))
+        is ActorEventKind.ToolResult -> metadataJson.encodeToString(
+            ActorEventMetadata(
+                toolName = kind.toolName,
+                toolSucceeded = kind.toolSucceeded,
+                assignmentKind = kind.assignmentKind,
+                targetFilename = kind.targetFilename,
+                executionOutcome = kind.executionOutcome,
+            ),
+        )
     }
 }

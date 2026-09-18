@@ -1,0 +1,18 @@
+--- a/runner_client.py
++++ b/runner_client.py
+@@ -103,6 +103,15 @@
+             {"action": action, "text": text},
+         )
+ 
++    def get_activity(self) -> dict[str, Any]:
++        """engram-engine dev-bridge addition: the durable, graph-backed "selected activity
++        independent of conversation" list — see engram-engine's webui-bridge/README.md. Deliberately
++        NOT part of the run/session contract above (no run_id, no session_id): this list is
++        independent of any particular chat run by design, so it gets its own read-only method
++        rather than being folded into observe_run/get_run.
++        """
++        return self._get("/v1/activity")
++
+     def _headers(self) -> dict[str, str]:
+         headers = {
+             "Accept": "application/json",

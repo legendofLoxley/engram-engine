@@ -5,6 +5,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
 import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.SchemaBootstrap
@@ -38,6 +39,7 @@ class HermesDelegationDispatcherTest {
     private lateinit var completionStore: HermesAssignmentCompletionStore
     private lateinit var activeAssignments: HermesActiveAssignmentRegistry
     private lateinit var ingestionService: ActorEventIngestionService
+    private lateinit var horizonGraphStore: HorizonGraphStore
 
     @BeforeEach
     fun setUp() {
@@ -46,7 +48,7 @@ class HermesDelegationDispatcherTest {
         SchemaBootstrap.bootstrap(dbManager.getDatabase())
         val db = dbManager.getDatabase()
         DebugConverseService.ensureSyntheticUser(db, TEST_USER)
-        val horizonGraphStore = ArcadeHorizonGraphStore(db)
+        horizonGraphStore = ArcadeHorizonGraphStore(db)
         val horizonAssembler = ArcadeHorizonAssembler(db)
         ingestionService = ActorEventIngestionService(
             ArcadeCycleSequencer(db), horizonGraphStore, SalientTokenPropagator(horizonGraphStore, horizonAssembler),
@@ -230,5 +232,65 @@ class HermesDelegationDispatcherTest {
             (untouchedCompletion?.outcome as HermesAssignmentOutcome.Completed).toolSucceeded,
             "the untouched assignment's own completion must be entirely unaffected by cancelling a different one",
         )
+    }
+
+    // ── HermesActivityFeed's durable metadata — written here, read back with no completion store ──
+
+    @Test
+    fun `a completed DocumentSummary assignment durably records document_summary kind, target filename, and completed outcome`() {
+        val a = assignment("activity-completed").copy(
+            kind = HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.APPROVED_DOCUMENTS.first().filename),
+        )
+        val client = FakeHermesAcpClient { _, _ -> HermesAssignmentOutcome.Completed("Goal: ship it.", "read", "path", toolSucceeded = true) }
+        runBlocking {
+            HermesDelegationDispatcher(client, ingestionService, completionStore, activeAssignments, scope = this).dispatchAsync(a)
+        }
+        val items = runBlocking { HermesActivityFeed.list(TEST_USER, horizonGraphStore) as HermesActivityFeedResult.Ok }.items
+        assertEquals(1, items.size)
+        assertEquals("completed", items.single().state)
+        assertEquals(HermesDelegationTrigger.APPROVED_DOCUMENTS.first().filename, items.single().targetFilename)
+    }
+
+    @Test
+    fun `a Failed DocumentSummary assignment durably records a failed outcome, distinct from cancelled`() {
+        val a = assignment("activity-failed").copy(
+            kind = HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.APPROVED_DOCUMENTS.first().filename),
+        )
+        val client = FakeHermesAcpClient { _, _ -> HermesAssignmentOutcome.Failed("no tool call observed") }
+        runBlocking {
+            HermesDelegationDispatcher(client, ingestionService, completionStore, activeAssignments, scope = this).dispatchAsync(a)
+        }
+        val items = runBlocking { HermesActivityFeed.list(TEST_USER, horizonGraphStore) as HermesActivityFeedResult.Ok }.items
+        assertEquals("failed", items.single().state)
+    }
+
+    @Test
+    fun `a Cancelled DocumentSummary assignment durably records a cancelled outcome, never shown as failed or completed`() {
+        val a = assignment("activity-cancelled").copy(
+            kind = HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.APPROVED_DOCUMENTS.first().filename),
+        )
+        val client = FakeHermesAcpClient { _, cancelHandle ->
+            delay(100)
+            HermesAssignmentOutcome.Cancelled(partialText = null, reason = "test")
+        }
+        runBlocking {
+            val dispatcher = HermesDelegationDispatcher(client, ingestionService, completionStore, activeAssignments, scope = this)
+            dispatcher.dispatchAsync(a)
+            delay(20)
+            activeAssignments.requestCancellation(a.assignmentId, TEST_USER)
+        }
+        val items = runBlocking { HermesActivityFeed.list(TEST_USER, horizonGraphStore) as HermesActivityFeedResult.Ok }.items
+        assertEquals("cancelled", items.single().state)
+    }
+
+    @Test
+    fun `a MarkerCheck assignment (a different event family) never appears in HermesActivityFeed, regardless of outcome`() {
+        val a = assignment("activity-marker-check")
+        val client = FakeHermesAcpClient { _, _ -> HermesAssignmentOutcome.Completed("DH-FIXTURE-x", "read", "path", toolSucceeded = true) }
+        runBlocking {
+            HermesDelegationDispatcher(client, ingestionService, completionStore, activeAssignments, scope = this).dispatchAsync(a)
+        }
+        val items = runBlocking { HermesActivityFeed.list(TEST_USER, horizonGraphStore) as HermesActivityFeedResult.Ok }.items
+        assertTrue(items.isEmpty(), "MarkerCheck is a different event family — this increment's activity feed is scoped to document_summary only")
     }
 }

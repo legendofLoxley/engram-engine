@@ -5,6 +5,7 @@ import app.alfrd.engram.api.configureAuth
 import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
+import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
@@ -158,6 +159,7 @@ fun main() {
             configureDebugEnvironmentSignalRoutes(db)
             configureDebugActorEventRoutes(db)
             configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
+            configureDebugHermesActivityRoutes(db)
             log.info("debug-converse endpoint enabled")
         }
         routing {

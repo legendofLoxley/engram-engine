@@ -1,0 +1,42 @@
+--- a/routes.py
++++ b/routes.py
+@@ -10692,6 +10692,26 @@
+     return True
+ 
+ 
++def _handle_hermes_activity(handler, parsed) -> bool:
++    """engram-engine dev-bridge addition. Proxies, server-side, to this container's configured
++    runner adapter's ``GET /v1/activity`` (see ``api/runner_client.py``'s ``HttpRunnerClient.get_activity``)
++    — a small, isolated read with no run_id/session_id, deliberately independent of the
++    run/session/runtime-adapter machinery `_start_run` uses, so it can never destabilize an
++    in-flight chat turn. An unconfigured runner (no ``HERMES_WEBUI_RUNNER_BASE_URL``) or any
++    upstream failure is reported honestly (empty list / 502) rather than fabricating data.
++    """
++    from api.runner_client import HttpRunnerClient, RunnerClientError, runner_client_configured
++
++    if not runner_client_configured():
++        return j(handler, {"items": []})
++    try:
++        result = HttpRunnerClient.from_env().get_activity()
++    except (RunnerClientError, ValueError, NotImplementedError) as exc:
++        return j(handler, {"error": str(exc)}, status=502)
++    items = result.get("items") if isinstance(result, dict) else None
++    return j(handler, {"items": items if isinstance(items, list) else []})
++
++
+ def _handle_insights(handler, parsed) -> bool:
+     """Return usage analytics from local WebUI session data."""
+     import collections
+@@ -12137,6 +12157,12 @@
+     # ── Insights / knowledge status ──
+     if parsed.path == "/api/insights":
+         return _handle_insights(handler, parsed)
++    # engram-engine dev-bridge addition: the durable, graph-backed "selected activity independent
++    # of conversation" list — see engram-engine's webui-bridge/README.md. No identity parameter is
++    # ever accepted from the browser here; the runner adapter answers using its own server-side
++    # configured identity, same as every other call through it.
++    if parsed.path == "/api/hermes-activity":
++        return _handle_hermes_activity(handler, parsed)
+     if parsed.path == "/api/project-os/dashboard":
+         return _handle_project_os_dashboard(handler, parsed)
+ 

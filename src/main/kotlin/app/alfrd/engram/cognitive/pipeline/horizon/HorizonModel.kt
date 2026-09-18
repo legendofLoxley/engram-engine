@@ -51,7 +51,31 @@ val ACTOR_ATTRIBUTED_SOURCE_TYPES: Set<String> = setOf(
  * ever non-null on a [HorizonItem] whose `Source.type` is in [ACTOR_ATTRIBUTED_SOURCE_TYPES].
  */
 @Serializable
-data class ActorEventMetadata(val basis: String? = null, val toolName: String? = null, val toolSucceeded: Boolean? = null)
+data class ActorEventMetadata(
+    val basis: String? = null,
+    val toolName: String? = null,
+    val toolSucceeded: Boolean? = null,
+    /**
+     * Which closed [app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind] produced this
+     * event — e.g. `"document_summary"` — set by [app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatcher]
+     * regardless of [executionOutcome], so a *failed* or *cancelled* assignment is still identifiable
+     * by kind from durable graph state alone, without any in-memory store. Null for any
+     * [ActorEventKind] this isn't relevant to (Observation/Interpretation, or a ToolResult from
+     * something other than a Hermes assignment).
+     */
+    val assignmentKind: String? = null,
+    /** The assignment's target filename — carried the same way as [assignmentKind], for the same reason: honest, durable display labeling without depending on [app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore]. */
+    val targetFilename: String? = null,
+    /**
+     * `"completed"` | `"failed"` | `"cancelled"` — the Hermes assignment's actual
+     * [app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentOutcome], set alongside
+     * [toolSucceeded] rather than derived from it: [toolSucceeded]`=false` alone cannot tell a
+     * genuine tool failure apart from a cancellation (both outcomes report it false today), and a
+     * durable activity surface reading this back later needs that distinction to never show a
+     * cancelled request as failed "real" work, or either as completed.
+     */
+    val executionOutcome: String? = null,
+)
 
 /** Tunable bounds shared by [HorizonGraphStore] and [HorizonAssembler]. Foundation defaults, not policy. */
 object HorizonLimits {

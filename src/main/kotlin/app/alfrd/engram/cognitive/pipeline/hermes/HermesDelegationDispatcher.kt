@@ -64,22 +64,39 @@ class HermesDelegationDispatcher(
                     is HermesAssignmentKind.MarkerCheck -> client.inspectFixture(assignment, assignmentKind.targetFilename, cancelHandle)
                     is HermesAssignmentKind.DocumentSummary -> client.summarizeDocument(assignment, assignmentKind.targetFilename, cancelHandle)
                 }
+                // Known regardless of what actually happened — carried into every branch below so a
+                // durable reader (HermesActivityFeed) can identify and label this event from the
+                // graph alone, even for a Failed/Cancelled outcome that never touched a real tool.
+                val assignmentKindLabel = when (assignment.kind) {
+                    is HermesAssignmentKind.DocumentSummary -> "document_summary"
+                    is HermesAssignmentKind.MarkerCheck -> "marker_check"
+                }
+                val targetFilename = assignment.kind.targetFilename
                 val kind = when (outcome) {
                     is HermesAssignmentOutcome.Completed -> ActorEventKind.ToolResult(
                         text = outcome.findingsText,
                         toolName = outcome.toolName,
                         toolSucceeded = outcome.toolSucceeded,
+                        assignmentKind = assignmentKindLabel,
+                        targetFilename = targetFilename,
+                        executionOutcome = if (outcome.toolSucceeded) "completed" else "failed",
                     )
                     is HermesAssignmentOutcome.Failed -> ActorEventKind.ToolResult(
                         text = "Hermes assignment could not be completed: ${outcome.reason}",
                         toolName = "read",
                         toolSucceeded = false,
+                        assignmentKind = assignmentKindLabel,
+                        targetFilename = targetFilename,
+                        executionOutcome = "failed",
                     )
                     is HermesAssignmentOutcome.Cancelled -> ActorEventKind.ToolResult(
                         text = "Hermes assignment was cancelled (${outcome.reason})" +
                             (outcome.partialText?.let { " — a result arrived anyway: $it" } ?: ""),
                         toolName = "read",
                         toolSucceeded = false,
+                        assignmentKind = assignmentKindLabel,
+                        targetFilename = targetFilename,
+                        executionOutcome = "cancelled",
                     )
                 }
                 val ingestResult = ingestionService.ingest(

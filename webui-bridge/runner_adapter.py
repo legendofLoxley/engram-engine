@@ -80,6 +80,7 @@ from engram_client import (
     UpstreamError,
     build_engram_payload,
     fetch_engram_health,
+    fetch_hermes_activity,
     fetch_hermes_assignment_completion,
     forward_to_engram,
     load_engram_config,
@@ -1255,6 +1256,23 @@ def make_handler(config: dict[str, Any], store: RunStore) -> type[BaseHTTPReques
                     "terminal_state": record["status"],
                     "active_controls": [],
                 })
+                return
+            # GET /v1/activity — the durable, graph-backed "selected activity independent of
+            # conversation" list (see engram_client.fetch_hermes_activity's own doc). Deliberately
+            # NOT under /v1/runs — this is not part of the run/session contract at all, has no
+            # run_id, and must keep working (or fail) entirely independently of whatever chat runs
+            # are in flight.
+            if parts == ["v1", "activity"]:
+                items = fetch_hermes_activity(
+                    config["engram_base_url"], config["engram_debug_token"], config["synthetic_user_id"],
+                )
+                if items is None:
+                    # A failed refresh, never a confirmed-empty one — see fetch_hermes_activity's
+                    # own doc. A non-2xx status is how the browser side (routes.py/panels.js) tells
+                    # the two apart, exactly like every other failure path in this adapter.
+                    self._send_json(502, {"error": "hermes-activity fetch failed"})
+                    return
+                self._send_json(200, {"items": items})
                 return
             self._send_json(404, {"error": "not found"})
 
