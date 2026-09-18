@@ -60,7 +60,10 @@ class HermesDelegationDispatcher(
         activeAssignments.register(assignment.assignmentId, assignment.userEmail, cancelHandle)
         scope.launch {
             try {
-                val outcome = client.inspectFixture(assignment, HermesDelegationTrigger.FIXTURE_FILENAME, cancelHandle)
+                val outcome = when (val assignmentKind = assignment.kind) {
+                    is HermesAssignmentKind.MarkerCheck -> client.inspectFixture(assignment, assignmentKind.targetFilename, cancelHandle)
+                    is HermesAssignmentKind.DocumentSummary -> client.summarizeDocument(assignment, assignmentKind.targetFilename, cancelHandle)
+                }
                 val kind = when (outcome) {
                     is HermesAssignmentOutcome.Completed -> ActorEventKind.ToolResult(
                         text = outcome.findingsText,

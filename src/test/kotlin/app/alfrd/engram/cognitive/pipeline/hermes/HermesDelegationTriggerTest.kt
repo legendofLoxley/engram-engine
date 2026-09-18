@@ -30,3 +30,39 @@ class HermesDelegationTriggerTest {
         assertFalse(HermesDelegationTrigger.detect("What time does school start?"))
     }
 }
+
+class HermesDelegationTriggerDocumentSummaryTest {
+
+    @Test
+    fun `matches when the approved document name and a summarize verb are both present`() {
+        assertTrue(HermesDelegationTrigger.detectDocumentSummary("Can you summarize director-hermes-project-brief.md for me?"))
+        assertTrue(HermesDelegationTrigger.detectDocumentSummary("please summarise DIRECTOR-HERMES-PROJECT-BRIEF.MD"))
+        assertTrue(HermesDelegationTrigger.detectDocumentSummary("could you sum up director-hermes-project-brief.md"))
+        assertTrue(HermesDelegationTrigger.detectDocumentSummary("recap director-hermes-project-brief.md for me"))
+    }
+
+    @Test
+    fun `does not match the document name alone without a summarize verb`() {
+        assertFalse(HermesDelegationTrigger.detectDocumentSummary("director-hermes-project-brief.md is a funny filename"))
+    }
+
+    @Test
+    fun `does not match a summarize verb without the document name`() {
+        assertFalse(HermesDelegationTrigger.detectDocumentSummary("can you summarize the weather for me?"))
+    }
+
+    @Test
+    fun `does not match an inspection verb alone — that is the other trigger's job, not this one`() {
+        assertFalse(HermesDelegationTrigger.detectDocumentSummary("please check director-hermes-project-brief.md"))
+    }
+
+    @Test
+    fun `does not match unrelated conversation`() {
+        assertFalse(HermesDelegationTrigger.detectDocumentSummary("What time does school start?"))
+    }
+
+    @Test
+    fun `the fixture-marker trigger does not fire for the document summary filename`() {
+        assertFalse(HermesDelegationTrigger.detect("please check director-hermes-project-brief.md"))
+    }
+}

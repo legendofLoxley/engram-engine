@@ -98,12 +98,59 @@ open class HermesAcpClient(
         private const val WATCHDOG_POLL_MS = 100L
     }
 
+    /** The bounded fixture-marker slice — see this class's own doc. Shares [runAssignment]'s ACP
+     *  handshake/sandboxing with [summarizeDocument] below, differing only in the prompt text. */
     open suspend fun inspectFixture(
         assignment: HermesAssignment,
         fixtureFilename: String,
         cancelHandle: HermesCancelHandle,
+    ): HermesAssignmentOutcome = runAssignment(assignment, fixtureFilename, cancelHandle) { absolutePath ->
+        "Please read the file at the absolute path $absolutePath using your file-reading tool, then reply " +
+            "with exactly the Marker value it contains and nothing else."
+    }
+
+    /**
+     * Reads one approved document and summarizes it — the same real ACP tool-using round trip as
+     * [inspectFixture], not a second, cheaper mechanism: same container, same sandboxed
+     * read-only mount, same [HermesWorkspacePath] validation, same permission-approval callback,
+     * same cancellation/watchdog handling. The only difference is the instruction Hermes
+     * receives and, correspondingly, what [HermesAssignmentOutcome.Completed.findingsText] ends
+     * up containing (a short summary instead of one marker token) — [HermesCompletionDirector]
+     * needs no change to deliver either verbatim, since it was already content-agnostic.
+     */
+    open suspend fun summarizeDocument(
+        assignment: HermesAssignment,
+        targetFilename: String,
+        cancelHandle: HermesCancelHandle,
+    ): HermesAssignmentOutcome = runAssignment(assignment, targetFilename, cancelHandle) { absolutePath ->
+        "Please read the file at the absolute path $absolutePath using your file-reading tool, then " +
+            "summarize it for the user in four short labeled parts — Goal, Deadlines, Risks, Next actions " +
+            "— based only on what the file actually says. If a part genuinely isn't covered by the file, " +
+            "say so plainly instead of guessing or inventing detail."
+    }
+
+    private suspend fun runAssignment(
+        assignment: HermesAssignment,
+        targetFilename: String,
+        cancelHandle: HermesCancelHandle,
+        buildPrompt: (absolutePath: String) -> String,
     ): HermesAssignmentOutcome =
         withContext(Dispatchers.IO) {
+            // Enforced here, in code, before anything is spawned or sent to Hermes — not merely
+            // implied by the read-only bind mount or trusted from the prompt text alone. See
+            // HermesWorkspacePath's own doc for exactly what this catches (traversal, symlink
+            // escapes, a genuinely missing file) and why real path resolution is used rather than
+            // string matching.
+            if (HermesWorkspacePath.resolve(workspaceDir, targetFilename) == null) {
+                logger.warn(
+                    "hermes-acp: assignment {} rejected — {} does not resolve to an existing file inside the approved workspace",
+                    assignment.assignmentId, targetFilename,
+                )
+                return@withContext HermesAssignmentOutcome.Failed(
+                    "requested file is missing or not accessible within the approved workspace: $targetFilename",
+                )
+            }
+
             val process = try {
                 ProcessBuilder(buildCommand()).redirectErrorStream(false).start()
             } catch (e: Exception) {
@@ -143,7 +190,7 @@ open class HermesAcpClient(
             }.apply { isDaemon = true; start() }
 
             try {
-                exchange(process, assignment, fixtureFilename, cancelHandle)
+                exchange(process, assignment, targetFilename, cancelHandle, buildPrompt)
             } catch (e: Exception) {
                 logger.warn("hermes-acp: assignment {} failed: {}", assignment.assignmentId, e.message, e)
                 val cancelRequestedAt = cancelHandle.checkCancelledAndFinish()
@@ -189,13 +236,16 @@ open class HermesAcpClient(
      * by design (one assignment, one session, no concurrent exchange to coordinate) — verified
      * against the real installed runtime before this client was written (a raw JSON-RPC smoke
      * script against this exact image/config reproduced a genuine `read_file` tool call and a
-     * reply containing the fixture's own marker token).
+     * reply containing the fixture's own marker token). [buildPrompt] is the one thing that
+     * varies between [inspectFixture] and [summarizeDocument] — everything else here is shared,
+     * unparameterized wire protocol.
      */
     private fun exchange(
         process: Process,
         assignment: HermesAssignment,
-        fixtureFilename: String,
+        targetFilename: String,
         cancelHandle: HermesCancelHandle,
+        buildPrompt: (absolutePath: String) -> String,
     ): HermesAssignmentOutcome {
         val stdin = BufferedWriter(OutputStreamWriter(process.outputStream, Charsets.UTF_8))
         val stdout = BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8))
@@ -258,7 +308,7 @@ open class HermesAcpClient(
             }
             val locations = params["toolCall"]?.jsonObject?.get("locations")?.jsonArray
             val targetsFixtureOnly = locations != null && locations.isNotEmpty() &&
-                locations.all { it.jsonObject["path"]?.jsonPrimitive?.contentOrNull?.contains(fixtureFilename) == true }
+                locations.all { it.jsonObject["path"]?.jsonPrimitive?.contentOrNull?.contains(targetFilename) == true }
             val options = params["options"]?.jsonArray.orEmpty().map { it.jsonObject }
             val optionId = if (targetsFixtureOnly) {
                 options.firstOrNull { it["optionId"]?.jsonPrimitive?.contentOrNull in setOf("allow_once", "allow_session") }
@@ -347,18 +397,14 @@ open class HermesAcpClient(
             // session/new) plus the read-only bind mount remain the actual sandboxing mechanism
             // ("permission limited to reading that fixture") — this only fixes how the path is
             // named in the prompt so the tool can find it at all.
-            val absoluteFixturePath = "$containerWorkspacePath/$fixtureFilename"
+            val absoluteTargetPath = "$containerWorkspacePath/$targetFilename"
             val promptId = nextId.getAndIncrement()
             sendRequest("session/prompt", buildJsonObject {
                 put("sessionId", JsonPrimitive(sessionId))
                 put("prompt", JsonArray(listOf(
                     buildJsonObject {
                         put("type", JsonPrimitive("text"))
-                        put("text", JsonPrimitive(
-                            "Please read the file at the absolute path $absoluteFixturePath using " +
-                                "your file-reading tool, then reply with exactly the Marker value it " +
-                                "contains and nothing else.",
-                        ))
+                        put("text", JsonPrimitive(buildPrompt(absoluteTargetPath)))
                     },
                 )))
             }, promptId)
@@ -373,7 +419,7 @@ open class HermesAcpClient(
                 findingsText = messageText.toString().trim().ifBlank { "Hermes completed the read with no text reply." },
                 toolName = toolName,
                 toolTargetPath = toolPath,
-                toolSucceeded = stopReason == "end_turn" && toolPath?.contains(fixtureFilename) == true,
+                toolSucceeded = stopReason == "end_turn" && toolPath?.contains(targetFilename) == true,
             )
         } else if (!promptSent) {
             HermesAssignmentOutcome.Failed("cancelled during the test-only delay window, before session/prompt was ever sent")

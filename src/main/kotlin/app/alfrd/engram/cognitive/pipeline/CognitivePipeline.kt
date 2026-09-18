@@ -18,6 +18,7 @@ import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
@@ -689,15 +690,30 @@ open class CognitivePipeline(
         // doc for why that's what "let completion ingest when no Director turn is active" means
         // concretely. This turn's own reply is composed immediately below, unaffected by how long
         // Hermes actually takes.
-        val hermesDelegation = hermesDelegationDispatcher?.takeIf { HermesDelegationTrigger.detect(ctx.utterance) }?.let { dispatcher ->
+        val hermesDelegation = hermesDelegationDispatcher?.let { dispatcher ->
+            val kind = when {
+                HermesDelegationTrigger.detect(ctx.utterance) ->
+                    HermesAssignmentKind.MarkerCheck(HermesDelegationTrigger.FIXTURE_FILENAME)
+                HermesDelegationTrigger.detectDocumentSummary(ctx.utterance) ->
+                    HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.DOCUMENT_SUMMARY_FILENAME)
+                else -> null
+            } ?: return@let null
+            val task = when (kind) {
+                is HermesAssignmentKind.MarkerCheck ->
+                    "Please read the file ${kind.targetFilename} in your current working directory using " +
+                        "your file-reading tool, then report exactly the Marker value it contains and nothing else."
+                is HermesAssignmentKind.DocumentSummary ->
+                    "Please read the file ${kind.targetFilename} in your current working directory using your " +
+                        "file-reading tool, then summarize it for the user in four short labeled parts — Goal, " +
+                        "Deadlines, Risks, Next actions — based only on what the file actually says."
+            }
             val assignment = HermesAssignment(
                 assignmentId = java.util.UUID.randomUUID().toString(),
                 userEmail = ctx.userEmail,
-                task = "Please read the file ${HermesDelegationTrigger.FIXTURE_FILENAME} in your current " +
-                    "working directory using your file-reading tool, then report exactly the Marker value " +
-                    "it contains and nothing else.",
+                task = task,
                 originalRequest = ctx.utterance,
                 issuedAtCycleSeq = horizonCycleResult?.cycleSeq,
+                kind = kind,
             )
             dispatcher.dispatchAsync(assignment)
             assignment
@@ -707,7 +723,7 @@ open class CognitivePipeline(
         }
         val baseDirective = ctx.branchResult?.directive ?: "Respond naturally and briefly."
         val directive = if (hermesDelegation != null) {
-            baseDirective + "\n\nYou just asked Hermes to look into \"${HermesDelegationTrigger.FIXTURE_FILENAME}\" " +
+            baseDirective + "\n\nYou just asked Hermes to look into \"${hermesDelegation.kind.targetFilename}\" " +
                 "on the user's behalf. Tell them plainly that you've kicked that off and will let them know " +
                 "what Hermes finds — do not guess at the file's contents yourself."
         } else baseDirective

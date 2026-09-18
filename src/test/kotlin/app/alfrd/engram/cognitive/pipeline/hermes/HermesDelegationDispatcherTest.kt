@@ -68,11 +68,28 @@ class HermesDelegationDispatcherTest {
     private class FakeHermesAcpClient(
         private val behavior: suspend (HermesAssignment, HermesCancelHandle) -> HermesAssignmentOutcome,
     ) : HermesAcpClient() {
+        var summarizeDocumentCalls = 0
+            private set
+        var inspectFixtureCalls = 0
+            private set
+
         override suspend fun inspectFixture(
             assignment: HermesAssignment,
             fixtureFilename: String,
             cancelHandle: HermesCancelHandle,
-        ): HermesAssignmentOutcome = behavior(assignment, cancelHandle)
+        ): HermesAssignmentOutcome {
+            inspectFixtureCalls++
+            return behavior(assignment, cancelHandle)
+        }
+
+        override suspend fun summarizeDocument(
+            assignment: HermesAssignment,
+            targetFilename: String,
+            cancelHandle: HermesCancelHandle,
+        ): HermesAssignmentOutcome {
+            summarizeDocumentCalls++
+            return behavior(assignment, cancelHandle)
+        }
     }
 
     @Test
@@ -94,6 +111,40 @@ class HermesDelegationDispatcherTest {
             activeAssignments.requestCancellation(a.assignmentId, TEST_USER),
             "a finished assignment must no longer be cancellable",
         )
+    }
+
+    @Test
+    fun `a DocumentSummary assignment calls summarizeDocument, not inspectFixture`() {
+        val a = assignment("doc-summary").copy(
+            kind = HermesAssignmentKind.DocumentSummary(HermesDelegationTrigger.DOCUMENT_SUMMARY_FILENAME),
+        )
+        val client = FakeHermesAcpClient { _, _ ->
+            HermesAssignmentOutcome.Completed("Goal: ship the demo.", "read", "path", toolSucceeded = true)
+        }
+        runBlocking {
+            val dispatcher = HermesDelegationDispatcher(client, ingestionService, completionStore, activeAssignments, scope = this)
+            dispatcher.dispatchAsync(a)
+        }
+
+        assertEquals(1, client.summarizeDocumentCalls)
+        assertEquals(0, client.inspectFixtureCalls)
+        val completion = completionStore.get(a.assignmentId, TEST_USER)
+        assertTrue(completion?.decision is HermesCompletionDecision.Accepted)
+    }
+
+    @Test
+    fun `a default MarkerCheck assignment calls inspectFixture, not summarizeDocument`() {
+        val a = assignment("marker-check")
+        val client = FakeHermesAcpClient { _, _ ->
+            HermesAssignmentOutcome.Completed("DH-FIXTURE-normal", "read", "path", toolSucceeded = true)
+        }
+        runBlocking {
+            val dispatcher = HermesDelegationDispatcher(client, ingestionService, completionStore, activeAssignments, scope = this)
+            dispatcher.dispatchAsync(a)
+        }
+
+        assertEquals(1, client.inspectFixtureCalls)
+        assertEquals(0, client.summarizeDocumentCalls)
     }
 
     @Test

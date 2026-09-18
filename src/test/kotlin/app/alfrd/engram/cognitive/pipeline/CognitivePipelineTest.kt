@@ -590,4 +590,63 @@ class CognitivePipelineHermesDelegationTest {
 
         assertNull(debugResult.trace.hermesDelegation)
     }
+
+    @Test
+    fun `utterance naming the approved document with a summarize verb dispatches a DocumentSummary assignment`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+        )
+
+        val response = pipeline.process(
+            "Can you have Hermes summarize director-hermes-project-brief.md for me — goal, deadlines, risks, and next actions?",
+            "session-hermes-6", "user-hermes@example.com",
+        )
+
+        assertEquals(1, dispatched.size, "Expected exactly one assignment dispatched")
+        val assignment = dispatched.single()
+        val kind = assignment.kind
+        assertTrue(
+            kind is app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind.DocumentSummary,
+            "Expected a DocumentSummary assignment kind, got: $kind",
+        )
+        assertEquals(
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.DOCUMENT_SUMMARY_FILENAME,
+            kind.targetFilename,
+        )
+        assertTrue(assignment.task.contains("summarize", ignoreCase = true), "Assignment task must ask for a summary, got: ${assignment.task}")
+        assertTrue(assignment.task.contains("Goal") && assignment.task.contains("Deadlines") && assignment.task.contains("Risks"), "got: ${assignment.task}")
+        assertTrue(
+            response.contains("Hermes", ignoreCase = true),
+            "Expected the acknowledgment directive to reach the actor's prompt, got: $response",
+        )
+    }
+
+    @Test
+    fun `an utterance naming the fixture still dispatches MarkerCheck, not DocumentSummary, even with a summarize-shaped verb absent`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+        )
+
+        pipeline.process("Can you check director-hermes-fixture.txt for me?", "session-hermes-7", "user-hermes@example.com")
+
+        val kind = dispatched.single().kind
+        assertTrue(kind is app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind.MarkerCheck, "got: $kind")
+    }
+
+    @Test
+    fun `naming the approved document without a summarize verb never dispatches`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) },
+        )
+
+        pipeline.process("director-hermes-project-brief.md is a funny filename", "session-hermes-8", "user-hermes@example.com")
+
+        assertTrue(dispatched.isEmpty(), "Must not dispatch without a summarize-shaped verb")
+    }
 }
