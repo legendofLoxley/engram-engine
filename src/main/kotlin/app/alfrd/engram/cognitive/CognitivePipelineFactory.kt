@@ -127,6 +127,8 @@ object CognitivePipelineFactory {
             episodicLogService    = episodicLogService,
             horizonCycleCoordinator = horizonCycleCoordinator,
             hermesDelegationDispatcher = hermesDelegationDispatcher,
+            hermesActiveAssignments = hermesActiveAssignments,
+            hermesAssignmentCompletionStore = hermesCompletionStore,
         )
     }
 }

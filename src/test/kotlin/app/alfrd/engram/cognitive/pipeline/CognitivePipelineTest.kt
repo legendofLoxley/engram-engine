@@ -715,6 +715,316 @@ class CognitivePipelineHermesDelegationTest {
 
         assertEquals(0, fakeDirector.callCount)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Mid-flight conversational cancellation — bounded to DocumentSummary. The fake
+    // dispatcher below mimics only what HermesDelegationDispatcher's own doc requires of a
+    // caller: register a HermesCancelHandle in the same registry the cancellation check
+    // calls through. HermesDelegationDispatcher/HermesActiveAssignmentRegistry themselves
+    // are exercised by their own test suites — not re-tested here.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    private fun negatingDirector(approvedFilename: String, negationPhrase: String = "never mind") =
+        FakeHermesDocumentIntentDirector { utterance, _, _ ->
+            if (utterance.contains(negationPhrase, ignoreCase = true)) {
+                app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.NoDelegation,
+                    latencyMs = 5, modelCalled = true, rejectedReason = "model_classified_negated",
+                )
+            } else {
+                app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(approvedFilename),
+                    latencyMs = 5, modelCalled = true,
+                )
+            }
+        }
+
+    @Test
+    fun `negation with exactly one outstanding assignment requests cancellation through the existing registry`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val approvedFilename = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS[0].filename
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { assignment ->
+            dispatched.add(assignment)
+            registry.register(assignment.assignmentId, assignment.userEmail, app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle())
+        }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = negatingDirector(approvedFilename),
+        )
+
+        pipeline.process("Can you summarize that project brief for me?", "session-cancel-1", "user-cancel@example.com")
+        val assignmentId = dispatched.single().assignmentId
+
+        val debugResult = pipeline.processForDebug("Actually, never mind that", "session-cancel-1", "user-cancel@example.com")
+
+        assertEquals("requested", debugResult.trace.hermesCancellation?.outcome)
+        assertEquals(assignmentId, debugResult.trace.hermesCancellation?.assignmentId)
+        assertEquals(approvedFilename, debugResult.trace.hermesCancellation?.targetFilename)
+        // echoLlm echoes the actor's system prompt verbatim (see the class-level fixture doc), so
+        // the assembled directive itself is what's being inspected here, not simulated model
+        // output — it must say the honest "passed along, not confirmed stopped" thing and must
+        // never instruct the actor to claim anything was updated/corrected/saved.
+        assertTrue(debugResult.chat.responseText.contains("passed that along"), "got: ${debugResult.chat.responseText}")
+        assertTrue(
+            debugResult.chat.responseText.contains("do not say anything was updated, corrected, or saved"),
+            "got: ${debugResult.chat.responseText}",
+        )
+        // Already consumed — the assignment was removed from tracking the moment cancellation was
+        // requested, so a second identical negation has nothing left to act on and must not
+        // re-invoke the cancellation logic at all (HermesCancelHandle.requestCancel is itself
+        // idempotent and would still report "open" until the real exchange finishes, which never
+        // happens in this unit test — the correct thing this test can actually observe is that
+        // outstandingHermesAssignments is now empty, not the handle's own internal state).
+        val secondDebugResult = pipeline.processForDebug("Actually, never mind that", "session-cancel-1", "user-cancel@example.com")
+        assertNull(secondDebugResult.trace.hermesCancellation, "nothing left outstanding to cancel a second time")
+    }
+
+    @Test
+    fun `an unrelated new document request while one is already outstanding leaves the first running, untouched`() = runTest {
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val (docA, docB) = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS.map { it.filename }
+        val fakeDirector = FakeHermesDocumentIntentDirector { utterance, _, _ ->
+            val target = if (utterance.contains("second", ignoreCase = true)) docB else docA
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(target),
+                latencyMs = 5, modelCalled = true,
+            )
+        }
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { assignment ->
+            dispatched.add(assignment)
+            registry.register(assignment.assignmentId, assignment.userEmail, app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle())
+        }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = fakeDirector,
+        )
+
+        pipeline.process("Can you check the first document for me?", "session-cancel-2", "user-cancel@example.com")
+        val firstAssignmentId = dispatched.single().assignmentId
+
+        pipeline.process("Can you check the second document too?", "session-cancel-2", "user-cancel@example.com")
+
+        // A second, unrelated (non-negation) document request must dispatch its own assignment
+        // and never touch the first — both remain independently cancellable/active.
+        assertEquals(2, dispatched.size)
+        assertEquals(
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesCancellationRequestOutcome.Requested,
+            registry.requestCancellation(firstAssignmentId, "user-cancel@example.com"),
+            "the first assignment must still be genuinely active — the second request never cancelled it",
+        )
+    }
+
+    @Test
+    fun `negation unrelated to any summarize request never reaches the cancellation logic`() = runTest {
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val approvedFilename = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS[0].filename
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val fakeDirector = FakeHermesDocumentIntentDirector { utterance, _, _ ->
+            // A real classifier never reports a summarize-decline for grocery-list content —
+            // this fixture reflects that, rather than re-deriving it from a prompt.
+            if (utterance.contains("sugar", ignoreCase = true)) {
+                app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.NoDelegation,
+                    latencyMs = 5, modelCalled = true, rejectedReason = null,
+                )
+            } else {
+                app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(approvedFilename),
+                    latencyMs = 5, modelCalled = true,
+                )
+            }
+        }
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { assignment ->
+            dispatched.add(assignment)
+            registry.register(assignment.assignmentId, assignment.userEmail, app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle())
+        }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = fakeDirector,
+        )
+
+        pipeline.process("Can you check that document for me?", "session-cancel-3", "user-cancel@example.com")
+        val assignmentId = dispatched.single().assignmentId
+
+        val debugResult = pipeline.processForDebug("Don't add sugar to my shopping list", "session-cancel-3", "user-cancel@example.com")
+
+        assertNull(debugResult.trace.hermesCancellation)
+        assertEquals(
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesCancellationRequestOutcome.Requested,
+            registry.requestCancellation(assignmentId, "user-cancel@example.com"),
+            "an unrelated grocery-list comment must never cancel the outstanding document check",
+        )
+    }
+
+    @Test
+    fun `negation for an already-completed assignment is cleared by staleness cleanup, never a redundant cancel attempt`() = runTest {
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val approvedFilename = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS[0].filename
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { dispatched.add(it) }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = negatingDirector(approvedFilename),
+        )
+
+        pipeline.process("Can you summarize that project brief for me?", "session-cancel-4", "user-cancel@example.com")
+        val assignment = dispatched.single()
+        // Simulate the dispatcher's own real completion recording (see HermesDelegationDispatcher) —
+        // this assignment resolved before the user ever typed a follow-up.
+        completionStore.record(
+            assignmentId = assignment.assignmentId,
+            userEmail = assignment.userEmail,
+            outcome = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentOutcome.Completed(
+                findingsText = "done", toolName = "read", toolTargetPath = approvedFilename, toolSucceeded = true,
+            ),
+            decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesCompletionDecision.Accepted("done"),
+            graphIngestOutcome = "Committed",
+        )
+
+        val debugResult = pipeline.processForDebug("Actually, never mind that", "session-cancel-4", "user-cancel@example.com")
+
+        assertNull(debugResult.trace.hermesCancellation, "a resolved assignment must be cleared before the negation check ever considers it")
+    }
+
+    @Test
+    fun `the never-mind path never writes a spurious fact or claims one was updated`() = runTest {
+        val engramClient = app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient()
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val approvedFilename = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS[0].filename
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { assignment ->
+            registry.register(assignment.assignmentId, assignment.userEmail, app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle())
+        }
+        val pipeline = CognitivePipeline(
+            engramClient = engramClient,
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = negatingDirector(approvedFilename, negationPhrase = "actually, never mind that"),
+        )
+
+        pipeline.process("Can you summarize that project brief for me?", "session-cancel-5", "user-cancel@example.com")
+        val response = pipeline.process("actually, never mind that", "session-cancel-5", "user-cancel@example.com")
+
+        val storedPhrases = engramClient.queryPhrases("user-cancel@example.com", concept = null, limit = 50)
+        assertTrue(
+            storedPhrases.none { it.text.contains("never mind", ignoreCase = true) },
+            "must not ingest the cancellation utterance itself as a fact, got: ${storedPhrases.map { it.text }}",
+        )
+        // echoLlm echoes the system prompt verbatim — this inspects the assembled directive
+        // itself, confirming it instructs the actor honestly rather than to confirm a correction.
+        assertTrue(response.contains("passed that along"), "got: $response")
+        assertTrue(response.contains("do not say anything was updated, corrected, or saved"), "got: $response")
+        assertTrue(
+            !response.contains("confirm briefly and warmly that you've updated it", ignoreCase = true),
+            "must not still carry CorrectionBranch's own directive, got: $response",
+        )
+    }
+
+    @Test
+    fun `the document-intent classifier is consulted at most once per turn even when both the early and late blocks would otherwise call it`() = runTest {
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val (docA, docB) = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS.map { it.filename }
+        var callCount = 0
+        val fakeDirector = FakeHermesDocumentIntentDirector { utterance, _, _ ->
+            callCount++
+            val target = if (callCount == 1) docA else docB
+            app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(target),
+                latencyMs = 5, modelCalled = true,
+            )
+        }
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { assignment ->
+            dispatched.add(assignment)
+            registry.register(assignment.assignmentId, assignment.userEmail, app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle())
+        }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = fakeDirector,
+        )
+
+        pipeline.process("Can you check the first document for me?", "session-cancel-6", "user-cancel@example.com")
+        assertEquals(1, callCount)
+
+        pipeline.process("Can you check a second, different document too?", "session-cancel-6", "user-cancel@example.com")
+
+        assertEquals(2, callCount, "exactly one decide() call for the second turn — the early check's own result must be reused by the late block, not re-requested")
+        assertEquals(2, dispatched.size)
+    }
+
+    @Test
+    fun `two outstanding assignments and an unnamed negation asks for clarification instead of guessing`() = runTest {
+        val registry = app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry()
+        val completionStore = app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore()
+        val (docA, docB) = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger.APPROVED_DOCUMENTS.map { it.filename }
+        var callCount = 0
+        val fakeDirector = FakeHermesDocumentIntentDirector { utterance, _, _ ->
+            callCount++
+            when {
+                callCount == 1 -> app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(docA),
+                    latencyMs = 5, modelCalled = true,
+                )
+                callCount == 2 -> app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.Delegate(docB),
+                    latencyMs = 5, modelCalled = true,
+                )
+                else -> app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult(
+                    decision = app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision.NoDelegation,
+                    latencyMs = 5, modelCalled = true, rejectedReason = "model_classified_negated",
+                )
+            }
+        }
+        val dispatched = mutableListOf<app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment>()
+        val dispatcher = app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching { assignment ->
+            dispatched.add(assignment)
+            registry.register(assignment.assignmentId, assignment.userEmail, app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle())
+        }
+        val pipeline = CognitivePipeline(
+            llmClient = echoLlm,
+            hermesDelegationDispatcher = dispatcher,
+            hermesActiveAssignments = registry,
+            hermesAssignmentCompletionStore = completionStore,
+            documentIntentDirector = fakeDirector,
+        )
+
+        pipeline.process("Can you check the first document for me?", "session-cancel-7", "user-cancel@example.com")
+        pipeline.process("Can you check the second document too?", "session-cancel-7", "user-cancel@example.com")
+        val (firstId, secondId) = dispatched.map { it.assignmentId }
+
+        val debugResult = pipeline.processForDebug("never mind", "session-cancel-7", "user-cancel@example.com")
+
+        assertEquals("ambiguous", debugResult.trace.hermesCancellation?.outcome)
+        assertEquals(setOf(docA, docB), debugResult.trace.hermesCancellation?.candidateFilenames?.toSet())
+        assertTrue(!debugResult.chat.responseText.contains("updated", ignoreCase = true), "got: ${debugResult.chat.responseText}")
+        // Neither was actually cancelled.
+        assertEquals(app.alfrd.engram.cognitive.pipeline.hermes.HermesCancellationRequestOutcome.Requested, registry.requestCancellation(firstId, "user-cancel@example.com"))
+        assertEquals(app.alfrd.engram.cognitive.pipeline.hermes.HermesCancellationRequestOutcome.Requested, registry.requestCancellation(secondId, "user-cancel@example.com"))
+    }
 }
 
 private class FakeHermesDocumentIntentDirector(

@@ -17,6 +17,27 @@ data class PipelineTrace(
     var horizonCycle: HorizonCycleTrace? = null,
     var hermesDelegation: HermesDelegationTrace? = null,
     var documentIntent: HermesDocumentIntentTrace? = null,
+    var hermesCancellation: HermesCancellationTrace? = null,
+)
+
+/**
+ * Present only on a turn where this conversation's own outstanding-assignment negation check
+ * (see `CognitivePipeline`'s early hermes-cancellation block) actually acted — never on a turn
+ * with nothing outstanding, and never on a turn whose negation-shaped utterance named an approved
+ * document that wasn't among the outstanding ones (that turn is left to behave exactly as an
+ * ordinary declined-request turn, with no trace here at all). [outcome] is one of `"requested"`
+ * (a specific outstanding assignment was identified and cancellation was requested through the
+ * existing registry — never a claim that it actually stopped), `"not_active"` (identified, but it
+ * had already resolved or could no longer be cancelled by the time the request reached the
+ * registry), or `"ambiguous"` (two or more assignments were outstanding and the utterance did not
+ * specify which one — nothing was cancelled; [candidateFilenames] names what was asked about).
+ */
+@Serializable
+data class HermesCancellationTrace(
+    val outcome: String,
+    val assignmentId: String? = null,
+    val targetFilename: String? = null,
+    val candidateFilenames: List<String> = emptyList(),
 )
 
 /**

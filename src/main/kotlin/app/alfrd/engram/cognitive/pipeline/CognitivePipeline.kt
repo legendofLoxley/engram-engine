@@ -17,12 +17,16 @@ import app.alfrd.engram.cognitive.pipeline.posture.computePostureSignals
 import app.alfrd.engram.cognitive.pipeline.posture.selectMoveType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignment
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentKind
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesCancellationRequestOutcome
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationDispatching
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDirector
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentResult
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
@@ -97,6 +101,20 @@ open class CognitivePipeline(
      */
     private val hermesDelegationDispatcher: HermesDelegationDispatching? = null,
     /**
+     * Reused, never rebuilt, for the mid-flight conversational-cancellation increment below —
+     * the same registry the debug cancel route and the native WebUI's own Stop button already
+     * call. Null (the default) preserves today's behavior byte-for-byte: with no registry wired,
+     * [outstandingHermesAssignments] is still tracked (harmless bookkeeping) but the early
+     * negation check below never runs, since it has nothing to request cancellation through.
+     */
+    private val hermesActiveAssignments: HermesActiveAssignmentRegistry? = null,
+    /**
+     * Read-only here — used only to notice that a tracked assignment already resolved (so it can
+     * be dropped from [outstandingHermesAssignments] before the negation check ever considers it),
+     * never to record a completion. Same null-default convention as [hermesActiveAssignments].
+     */
+    private val hermesAssignmentCompletionStore: HermesAssignmentCompletionStore? = null,
+    /**
      * Decides whether a turn that didn't match the marker-check regex above wants one of
      * [HermesDelegationTrigger.APPROVED_DOCUMENTS] summarized — see that class's own doc. A
      * constructor parameter (not just an internal field) so tests can inject a fake subclass
@@ -170,6 +188,20 @@ open class CognitivePipeline(
     @Volatile private var pendingDocumentClarification: List<String>? = null
 
     /**
+     * Every currently-dispatched `DocumentSummary` assignment for this conversation not yet known
+     * to have resolved — most-recent-last. A list, not a single slot: dispatching a second summary
+     * before the first resolves is a real, reachable sequence (nothing gates it), and silently
+     * overwriting the first assignment's own tracking here would make it permanently uncancellable
+     * from an ordinary conversational turn once a second one starts. `MarkerCheck` assignments are
+     * never added here — this correction path is scoped to `DocumentSummary` only, same scoping
+     * already used elsewhere for this assignment kind (e.g. the activity feed). Entries are
+     * dropped once [hermesAssignmentCompletionStore] shows they resolved (checked at the very
+     * start of every turn, before this field is read for anything else) or once a turn's own
+     * negation cancels one — never left to grow unbounded.
+     */
+    @Volatile private var outstandingHermesAssignments: List<HermesAssignment> = emptyList()
+
+    /**
      * First-session state recorded when an invited user is greeted with the warm provenance
      * intro. Set during [initSession]; null when first-session handling is disabled or not triggered.
      */
@@ -207,6 +239,21 @@ open class CognitivePipeline(
          * clarification-answer turn may not classify as either.
          */
         private val DOCUMENT_INTENT_ELIGIBLE_INTENTS = setOf(IntentType.TASK, IntentType.QUESTION)
+
+        /**
+         * The two literal [HermesDocumentIntentResult.rejectedReason] values
+         * [HermesDocumentIntentDirector] already produces when it concludes the user is declining,
+         * cancelling, or refusing a summarize request — one from the model's own classification,
+         * one from the deterministic proximity-negation guard that backs it up regardless of what
+         * the model claimed. Reused as-is here (no new classifier, no new field on that result
+         * type) as the single signal that a negation-shaped turn is specifically *about a summarize
+         * request* — never a generic negation match. This is exactly what keeps an unrelated
+         * decline ("don't add sugar to my shopping list") from ever reaching the cancellation logic
+         * below: that utterance is not a summarize-request decline at all, so
+         * [HermesDocumentIntentDirector] never sets either of these reasons for it in the first
+         * place — nothing here re-checks the utterance's wording generically.
+         */
+        private val HERMES_NEGATION_REASONS = setOf("model_classified_negated", "negation_marker_detected")
 
         private fun selectTier2Model(llmClient: LlmClient?): LlmModel? {
             if (llmClient == null) return null
@@ -681,6 +728,101 @@ open class CognitivePipeline(
         val reasonStartNs = if (debug) System.nanoTime() else 0L
         branch.execute(ctx)
 
+        // ── Mid-flight conversational cancellation (bounded, DocumentSummary only) ──────────
+        // Runs BEFORE Script — never after, unlike the late Hermes-delegation block below. A
+        // live check showed why: a negation-shaped utterance like "actually, never mind that" is
+        // routed by Comprehension to IntentType.CORRECTION (its own "actually"/"wait" prefix
+        // rules), which CorrectionBranch treats as an ordinary fact correction — setting
+        // ctx.branchResult to RetrievalIntent.Correction with no matching stored phrase. Left
+        // alone, Script.runCorrection would then decompose/ingest "never mind that" as a brand-new
+        // fact, while the reply simultaneously claimed "I've updated it" — a real, reachable bug,
+        // not hypothetical. This block fully overwrites ctx.branchResult before Script ever runs,
+        // whenever it acts at all — never appends to whatever branch.execute already produced.
+        var earlyDocumentIntentResult: HermesDocumentIntentResult? = null
+        var hermesCancellationHandled = false
+        if (hermesAssignmentCompletionStore != null) {
+            // Staleness cleanup runs every turn, independent of whether anything below fires — an
+            // assignment already resolved has nothing left to cancel, and leaving it tracked would
+            // needlessly widen the classifier-eligibility bypass just below forever.
+            outstandingHermesAssignments = outstandingHermesAssignments.filter {
+                hermesAssignmentCompletionStore.get(it.assignmentId, ctx.userEmail) == null
+            }
+        }
+        val stillOutstandingHermesAssignments = outstandingHermesAssignments
+        if (stillOutstandingHermesAssignments.isNotEmpty() && hermesActiveAssignments != null && hermesAssignmentCompletionStore != null) {
+            // Bypasses DOCUMENT_INTENT_ELIGIBLE_INTENTS entirely, same rationale as
+            // pendingDocumentClarification's own bypass just below: a bare "never mind that" may
+            // not classify as TASK/QUESTION either, and there is real outstanding work a turn like
+            // that could plausibly be about.
+            val result = documentIntentDirector.decide(
+                utterance = ctx.utterance,
+                recentTurns = recentTurns.map { "${it.role}: ${it.text}" },
+                pendingClarificationCandidates = pendingDocumentClarification,
+            )
+            earlyDocumentIntentResult = result
+            // Recorded unconditionally whenever this early check actually calls the classifier —
+            // not only on the branches below that act on a negation — so a live trace can always
+            // show what the real classifier decided, even when nothing was recognized as a
+            // cancellation. The late block's own trace-recording, further down, only ever fires
+            // when ITS OWN gate (pendingDocumentClarification/DOCUMENT_INTENT_ELIGIBLE_INTENTS)
+            // passes, which a negation-shaped utterance classified as IntentType.CORRECTION may
+            // never satisfy — leaving this the only place such a turn's real decision is visible.
+            if (debug) {
+                trace!!.documentIntent = buildDocumentIntentTrace(result, usedPendingClarification = pendingDocumentClarification != null)
+            }
+            if (result.rejectedReason in HERMES_NEGATION_REASONS) {
+                // Bind to a SPECIFIC outstanding assignment — generic negation alone is never
+                // enough. A named approved document wins if it actually matches one of the
+                // outstanding ones; a bare "never mind that" with exactly one candidate is
+                // unambiguous; two or more candidates with nothing named is genuinely ambiguous.
+                val namedFilename = HermesDelegationTrigger.APPROVED_DOCUMENTS
+                    .map { it.filename }
+                    .firstOrNull { ctx.utterance.contains(it, ignoreCase = true) }
+                val target = if (namedFilename != null) {
+                    stillOutstandingHermesAssignments.firstOrNull { it.kind.targetFilename == namedFilename }
+                } else {
+                    stillOutstandingHermesAssignments.singleOrNull()
+                }
+                if (target != null) {
+                    val cancelOutcome = hermesActiveAssignments.requestCancellation(target.assignmentId, ctx.userEmail)
+                    outstandingHermesAssignments = outstandingHermesAssignments - target
+                    hermesCancellationHandled = true
+                    ctx.branchResult = BranchResult(
+                        responseStrategy = ResponseStrategy.SIMPLE,
+                        retrieval = RetrievalIntent.None,
+                        directive = describeHermesCancellationDirective(target.kind.targetFilename, cancelOutcome),
+                    )
+                    if (debug) {
+                        trace!!.hermesCancellation = HermesCancellationTrace(
+                            outcome = if (cancelOutcome is HermesCancellationRequestOutcome.Requested) "requested" else "not_active",
+                            assignmentId = target.assignmentId,
+                            targetFilename = target.kind.targetFilename,
+                        )
+                    }
+                } else if (namedFilename == null && stillOutstandingHermesAssignments.size > 1) {
+                    // Ambiguous: multiple candidates, nothing named. Ask — never guess, never
+                    // cancel more than one, never claim anything happened.
+                    hermesCancellationHandled = true
+                    val candidateFilenames = stillOutstandingHermesAssignments.map { it.kind.targetFilename }
+                    ctx.branchResult = BranchResult(
+                        responseStrategy = ResponseStrategy.SIMPLE,
+                        retrieval = RetrievalIntent.None,
+                        directive = "The user wants to cancel an outstanding Hermes check, but more than one is " +
+                            "in flight and they didn't say which. Ask them, briefly, to choose between: " +
+                            describeApprovedDocuments(candidateFilenames) + ". Do not cancel anything and do not " +
+                            "claim anything was stopped yet.",
+                    )
+                    if (debug) {
+                        trace!!.hermesCancellation = HermesCancellationTrace(outcome = "ambiguous", candidateFilenames = candidateFilenames)
+                    }
+                }
+                // else: namedFilename named a real approved document, but it isn't (or is no
+                // longer) among the outstanding ones — not about our outstanding work at all.
+                // hermesCancellationHandled stays false; this turn proceeds exactly like an
+                // ordinary declined-request turn (today's unchanged NoDelegation behavior).
+            }
+        }
+
         // ── Script (retrieval) + Horizon cycle (interpret/mutate/propagate/assemble) ──
         // The only components allowed to touch EngramClient/LlmClient for this turn, besides
         // Actor. Both run inside PerUserCycleLock (when horizonCycleCoordinator is wired) as one
@@ -691,7 +833,18 @@ open class CognitivePipeline(
         // outside it.
         val coordinator = horizonCycleCoordinator
         var horizonCycleResult: HorizonCycleResult? = null
-        val retrievedScript: RetrievedScript = if (coordinator != null) {
+        // hermesCancellationHandled turns never reach the Interpreter, never mind ctx.branchResult
+        // already being overridden above: coordinator.runCycle interprets ctx.utterance directly —
+        // completely independent of which branch/retrieval was chosen — so overriding
+        // ctx.branchResult alone (the fix for Script.runCorrection's own decompose/ingest) does
+        // NOT stop it from separately deciding "actually, never mind that" looks like a fact worth
+        // capturing. A live check confirmed this is reachable, not hypothetical: the exact same
+        // utterance that correctly triggered cancellation was ALSO durably ingested as its own
+        // phrase via the Horizon cycle's independent interpret/mutate step. This turn's reply is
+        // already a fixed, self-contained, directive-driven acknowledgment — it needs no fresh
+        // Horizon assembly — so the smallest fix is to skip the whole cycle for this one turn
+        // rather than trying to sanitize what Interpreter sees.
+        val retrievedScript: RetrievedScript = if (coordinator != null && !hermesCancellationHandled) {
             val (rs, hcr) = PerUserCycleLock.withLock(ctx.userEmail) {
                 val r = script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
                 val h = coordinator.runCycle(ctx.userEmail, effectiveRequestId, ctx.utterance)
@@ -734,7 +887,7 @@ open class CognitivePipeline(
         // output is still only ever a *proposal*, independently re-validated in code before
         // anything is dispatched.
         var documentClarifyCandidates: List<String>? = null
-        val hermesDelegation = hermesDelegationDispatcher?.let { dispatcher ->
+        val hermesDelegation = if (hermesCancellationHandled) null else hermesDelegationDispatcher?.let { dispatcher ->
             if (HermesDelegationTrigger.detect(ctx.utterance)) {
                 val kind = HermesAssignmentKind.MarkerCheck(HermesDelegationTrigger.FIXTURE_FILENAME)
                 val assignment = HermesAssignment(
@@ -750,25 +903,18 @@ open class CognitivePipeline(
                 assignment
             } else if (pendingDocumentClarification != null || ctx.intent in DOCUMENT_INTENT_ELIGIBLE_INTENTS) {
                 val pendingBefore = pendingDocumentClarification
-                val intentResult = documentIntentDirector.decide(
+                // Reuses the early cancellation check's own decide() result when it already ran
+                // this turn (stillOutstandingHermesAssignments was non-empty) instead of calling
+                // the classifier a second time for the same utterance — the result is identical
+                // either way, since decide() is a pure function of (utterance, recentTurns,
+                // pendingClarificationCandidates), all unchanged between the two call sites.
+                val intentResult = earlyDocumentIntentResult ?: documentIntentDirector.decide(
                     utterance = ctx.utterance,
                     recentTurns = recentTurns.map { "${it.role}: ${it.text}" },
                     pendingClarificationCandidates = pendingBefore,
                 )
                 if (debug) {
-                    trace!!.documentIntent = HermesDocumentIntentTrace(
-                        action = when (intentResult.decision) {
-                            is HermesDocumentIntentDecision.Delegate -> "delegate"
-                            is HermesDocumentIntentDecision.Clarify -> "clarify"
-                            HermesDocumentIntentDecision.NoDelegation -> "none"
-                        },
-                        targetDocument = (intentResult.decision as? HermesDocumentIntentDecision.Delegate)?.targetFilename,
-                        candidateDocuments = (intentResult.decision as? HermesDocumentIntentDecision.Clarify)?.candidateFilenames ?: emptyList(),
-                        modelCalled = intentResult.modelCalled,
-                        latencyMs = intentResult.latencyMs,
-                        rejectedReason = intentResult.rejectedReason,
-                        usedPendingClarification = pendingBefore != null,
-                    )
+                    trace!!.documentIntent = buildDocumentIntentTrace(intentResult, usedPendingClarification = pendingBefore != null)
                 }
                 when (val decision = intentResult.decision) {
                     is HermesDocumentIntentDecision.Delegate -> {
@@ -789,6 +935,11 @@ open class CognitivePipeline(
                             kind = kind,
                         )
                         dispatcher.dispatchAsync(assignment)
+                        // Appended, never assigned — a second DocumentSummary dispatched while an
+                        // earlier one is still outstanding must not silently overwrite (and lose
+                        // the ability to cancel) the first one's own tracking. See this field's own
+                        // doc on outstandingHermesAssignments.
+                        outstandingHermesAssignments = outstandingHermesAssignments + assignment
                         assignment
                     }
                     is HermesDocumentIntentDecision.Clarify -> {
@@ -1193,6 +1344,45 @@ open class CognitivePipeline(
             val doc = HermesDelegationTrigger.APPROVED_DOCUMENTS.find { it.filename == filename }
             if (doc != null) "\"${doc.filename}\" (${doc.description})" else "\"$filename\""
         }
+
+    /** Shared by the early cancellation check and the late Hermes-delegation block — both call
+     *  [HermesDocumentIntentDirector.decide] and need the identical trace shape from its result;
+     *  factored out so neither call site can drift from the other. */
+    private fun buildDocumentIntentTrace(result: HermesDocumentIntentResult, usedPendingClarification: Boolean) =
+        HermesDocumentIntentTrace(
+            action = when (result.decision) {
+                is HermesDocumentIntentDecision.Delegate -> "delegate"
+                is HermesDocumentIntentDecision.Clarify -> "clarify"
+                HermesDocumentIntentDecision.NoDelegation -> "none"
+            },
+            targetDocument = (result.decision as? HermesDocumentIntentDecision.Delegate)?.targetFilename,
+            candidateDocuments = (result.decision as? HermesDocumentIntentDecision.Clarify)?.candidateFilenames ?: emptyList(),
+            modelCalled = result.modelCalled,
+            latencyMs = result.latencyMs,
+            rejectedReason = result.rejectedReason,
+            usedPendingClarification = usedPendingClarification,
+        )
+
+    /**
+     * Always fully overrides whatever directive would otherwise apply for this turn — never
+     * appended to a pre-existing one — precisely because the pre-existing one (e.g.
+     * CorrectionBranch's "confirm you've updated it") can itself be actively wrong for a negation
+     * turn (see the early cancellation block's own doc). Honest per [HermesCancellationRequestOutcome]:
+     * [HermesCancellationRequestOutcome.Requested] never claims the work has definitely stopped —
+     * only that the request was passed along, consistent with [HermesCancelHandle]'s own doc that a
+     * late result can still arrive after cancellation was requested. [HermesCancellationRequestOutcome.NotActive]
+     * means it already resolved or could no longer be reached — never phrased as "stopped."
+     */
+    private fun describeHermesCancellationDirective(targetFilename: String, outcome: HermesCancellationRequestOutcome): String = when (outcome) {
+        is HermesCancellationRequestOutcome.Requested ->
+            "You just asked Hermes to stop working on \"$targetFilename\". Tell the user, briefly and plainly, " +
+                "that you've passed that along — do not claim it has definitely stopped yet, and do not say " +
+                "anything was updated, corrected, or saved."
+        is HermesCancellationRequestOutcome.NotActive ->
+            "The user just asked about the outstanding work on \"$targetFilename\", but it had already finished " +
+                "or could no longer be stopped by the time that reached the system. Tell them plainly, without " +
+                "claiming you stopped anything, and without saying anything was updated, corrected, or saved."
+    }
 
     /**
      * Every greeting [initSession] can send goes through here so [recordTurn] never misses one —
