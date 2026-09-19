@@ -19,18 +19,25 @@ class InMemoryEngramClient : EngramClient {
     /**
      * Naive heuristic decomposition — splits on sentence boundaries and classifies
      * each segment by keyword matching. The real decomposition will use an LLM.
+     *
+     * Returns only candidate *claims*: per the semantic-graph design, a Phrase is an assertion, and
+     * the exact utterance (questions and greetings included) belongs to the episode ledger, which
+     * records every turn separately. So this drops questions, bare greetings/pleasantries, and bare
+     * discourse lead-ins ("Unrelated," left over when a sentence is split at "but"). A sentence that
+     * ends in "?" but opens with a declarative clause ("I'm worried about X, should I do Y?") keeps
+     * that clause. Everything else — including splitting only on `. ! ?` and contrastive markers,
+     * not "and" — is unchanged; proper claim extraction is the LLM step this placeholder stands in for.
      */
     override suspend fun decompose(text: String, context: List<String>): List<PhraseCandidate> {
-        val segments = text.split(Regex("[.!?]+"))
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
+        val segments = SENTENCE.findAll(text)
+            .flatMap { match -> claimBearingText(match.groupValues[1].trim(), match.groupValues[2]) }
             .flatMap { sentence ->
                 // Split further on contrastive markers — each clause may carry a different truth value
                 sentence.split(CONTRASTIVE_MARKERS)
                     .map { it.trim() }
-                    .filter { it.isNotBlank() }
+                    .filter { it.isNotBlank() && !isNonClaim(it) }
             }
-        return segments.map { segment ->
+        return segments.toList().map { segment ->
             PhraseCandidate(
                 content = segment,
                 source = "user",
@@ -39,11 +46,57 @@ class InMemoryEngramClient : EngramClient {
         }
     }
 
+    /** The parts of one sentence that could carry a claim, given its terminator; empty for a pure question/blank. */
+    private fun claimBearingText(sentence: String, terminator: String): Sequence<String> {
+        if (sentence.isBlank()) return emptySequence()
+        val firstWord = firstWordOf(sentence)
+        // No terminator at all: only a wh-word opener reads as a question ("who did I need to ask ...").
+        // A '.' or '!' means the writer made it a statement ("What I need is a break.").
+        val unpunctuatedQuestion = terminator.isEmpty() && firstWord in WH_WORDS
+        if (!terminator.contains('?') && !unpunctuatedQuestion) return sequenceOf(sentence)
+        // A question. Keep a leading declarative clause if there is one ("I'm worried about X, should I ...?").
+        val head = sentence.substringBeforeLast(',', missingDelimiterValue = "").trim()
+        val headIsDeclarative = head.isNotEmpty() &&
+            head.split(Regex("\\s+")).size >= 3 &&
+            firstWordOf(head) !in QUESTION_OR_CONDITIONAL_OPENERS
+        return if (headIsDeclarative) sequenceOf(head) else emptySequence()
+    }
+
+    private fun firstWordOf(text: String): String =
+        text.trim().lowercase().split(Regex("\\s+")).firstOrNull()?.trimEnd(',', ':', ';') ?: ""
+
+    private fun isNonClaim(segment: String): Boolean =
+        segment.lowercase().trim().trim(',', '.', '!', ';', ':', ' ') in NON_CLAIM_SEGMENTS
+
     companion object {
         /** Matches contrastive conjunctions used to split a sentence into distinct claims. */
         private val CONTRASTIVE_MARKERS = Regex(
             """\s+(?:but|however|although|yet|while|whereas|though|even\s+though)\s+""",
             RegexOption.IGNORE_CASE,
+        )
+
+        /** One sentence body plus its (possibly empty) terminator run — unlike a plain split, keeps the "?" so questions are recognizable. */
+        private val SENTENCE = Regex("""([^.!?]+)([.!?]*)""")
+
+        private val WH_WORDS = setOf("what", "who", "whom", "whose", "when", "where", "why", "how", "which")
+
+        /** Words that make a clause before a trailing question a poor candidate for a stand-alone claim. */
+        private val QUESTION_OR_CONDITIONAL_OPENERS = WH_WORDS + setOf(
+            "is", "are", "do", "does", "did", "can", "could", "would", "should", "will", "have", "has",
+            "if", "unless", "when", "since", "because", "so", "and", "but", "also", "actually",
+        )
+
+        /**
+         * Whole segments that assert nothing: pleasantries, acknowledgements, and the bare discourse
+         * lead-ins that are left behind when a sentence is cut at a contrastive marker ("Unrelated,"
+         * from "Unrelated, but ..."). Generic English; not tied to any scenario's vocabulary.
+         */
+        private val NON_CLAIM_SEGMENTS = setOf(
+            "hi", "hey", "hello", "hi there", "hey there", "hello there", "good morning", "good afternoon",
+            "good evening", "thanks", "thank you", "thanks a lot", "ok", "okay", "sure", "yes", "no", "yeah",
+            "nope", "bye", "goodbye", "cheers",
+            "unrelated", "separately", "anyway", "also", "actually", "honestly", "basically", "well",
+            "meanwhile", "incidentally", "by the way", "that said", "on another note",
         )
     }
 

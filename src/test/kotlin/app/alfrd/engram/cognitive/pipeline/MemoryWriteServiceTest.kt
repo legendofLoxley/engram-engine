@@ -153,3 +153,85 @@ class ContrastiveDecomposeTest {
         assertEquals(3, candidates.size)
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// InMemoryEngramClient - only claims become phrases (questions/greetings/fragments do not)
+//
+// Per the semantic-graph design, a Phrase is an assertion; the exact utterance — questions and
+// greetings included — belongs to the episode ledger, which records every turn separately. These
+// pin what decompose() must NOT hand to the claim graph, and what it must still keep.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ClaimOnlyDecomposeTest {
+
+    private suspend fun contents(text: String) =
+        InMemoryEngramClient().decompose(text, emptyList()).map { it.content }
+
+    @Test
+    fun `a question ending in a question mark is not a claim`() = runTest {
+        assertEquals(emptyList<String>(), contents("What was worrying me about the demo?"))
+    }
+
+    @Test
+    fun `a wh-question with no punctuation at all is not a claim`() = runTest {
+        assertEquals(emptyList<String>(), contents("Who did I need to ask about the script"))
+    }
+
+    @Test
+    fun `a greeting followed by a question yields nothing`() = runTest {
+        assertEquals(emptyList<String>(), contents("Hey, where were we?"))
+    }
+
+    @Test
+    fun `bare greetings and acknowledgements are not claims`() = runTest {
+        for (text in listOf("Hello there!", "Thanks.", "ok", "Yes.")) {
+            assertEquals(emptyList<String>(), contents(text), "expected no claim from \"$text\"")
+        }
+    }
+
+    @Test
+    fun `a statement sentence next to a question sentence keeps the statement`() = runTest {
+        assertEquals(
+            listOf("I'm worried about the firewall rules"),
+            contents("I'm worried about the firewall rules. What should I do?"),
+        )
+    }
+
+    @Test
+    fun `a question that opens with a declarative clause keeps that clause`() = runTest {
+        assertEquals(
+            listOf("I'm worried about the firewall rules"),
+            contents("I'm worried about the firewall rules, should I open the port?"),
+        )
+    }
+
+    @Test
+    fun `a conditional or too-short lead-in before a trailing question is not kept as a claim`() = runTest {
+        assertEquals(emptyList<String>(), contents("If the port is closed, should we tell IT?"))
+        assertEquals(emptyList<String>(), contents("Well, is it done?"))
+    }
+
+    @Test
+    fun `a wh-word opening a statement that ends with a period is still a claim`() = runTest {
+        assertEquals(listOf("What I need is a break"), contents("What I need is a break."))
+    }
+
+    @Test
+    fun `a bare discourse lead-in left by a contrastive split is dropped, the claim after it kept`() = runTest {
+        assertEquals(listOf("I take my coffee black"), contents("Unrelated, but I take my coffee black."))
+    }
+
+    @Test
+    fun `a real short clause before a contrastive marker is not mistaken for a lead-in`() = runTest {
+        // Same two-phrase split as before this change: "I'm tired," is a claim, not a lead-in.
+        assertEquals(2, contents("I'm tired, but happy.").size)
+    }
+
+    @Test
+    fun `an ordinary statement and a compound sentence are unchanged`() = runTest {
+        assertEquals(listOf("I need to ask Priya to rehearse the demo script twice before Friday"),
+            contents("I need to ask Priya to rehearse the demo script twice before Friday."))
+        // Splitting on "and" is deliberately not part of this placeholder; proper extraction is a separate step.
+        assertEquals(1, contents("I'm getting the Meridian demo ready and the port 8081 firewall rules still worry me.").size)
+    }
+}

@@ -1,6 +1,7 @@
 package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
+import app.alfrd.engram.cognitive.pipeline.memory.EpisodicLogService
 import app.alfrd.engram.cognitive.pipeline.memory.InMemoryEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
@@ -13,12 +14,16 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 /**
- * Acceptance tests for universal memory ingestion (Problem 1 fix):
- *   - Every PROCESS turn ingests exactly once, regardless of branch.
- *   - QUESTION turns ingest.
- *   - SOCIAL turns ingest.
+ * Acceptance tests for the memory write path on every PROCESS turn:
+ *   - A turn that states something ingests it exactly once, regardless of branch.
+ *   - QUESTION and SOCIAL turns write no *claim* to the memory graph — a Phrase is an assertion; the
+ *     exact utterance (questions and greetings included) is recorded in the episode ledger instead.
  *   - No double-ingestion per turn.
  *   - Returning users are never interrogated mid-conversation.
+ *
+ * (This file first pinned "QUESTION and SOCIAL turns also ingest" — the earlier universal-ingestion
+ * decision. That is deliberately reversed: recall was being crowded out by the user's own questions
+ * stored as facts. See ClaimOnlyDecomposeTest.)
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class UnifiedIngestionTest {
@@ -28,35 +33,41 @@ class UnifiedIngestionTest {
         scope: kotlinx.coroutines.test.TestScope,
     ): Pair<CognitivePipeline, InMemoryEngramClient> {
         val mws = MemoryWriteService(engram, scope)
-        val pipeline = CognitivePipeline(engramClient = engram, memoryWriteService = mws)
+        val pipeline = CognitivePipeline(
+            engramClient = engram,
+            memoryWriteService = mws,
+            episodicLogService = EpisodicLogService(engram, scope),
+        )
         return pipeline to engram
     }
 
     @Test
-    fun `QUESTION turn ingests utterance into memory graph`() = runTest {
+    fun `QUESTION turn writes no claim to the memory graph, but the utterance is in the episode ledger`() = runTest {
         val (pipeline, engram) = pipelineWithTracking(scope = this)
 
         val before = engram.allPhrases().size
         pipeline.process("What's the weather like?", "session-1", "user-1")
         advanceUntilIdle()
 
+        assertEquals(before, engram.allPhrases().size, "a question is not a claim and must not become a Phrase")
         assertTrue(
-            engram.allPhrases().size > before,
-            "Expected phrase count to grow after QUESTION turn",
+            engram.getEpisodicLog(userId = "user-1").any { it.role == "user" && it.text == "What's the weather like?" },
+            "the exact question must still be recorded in the episode ledger",
         )
     }
 
     @Test
-    fun `SOCIAL turn also ingests utterance`() = runTest {
+    fun `SOCIAL turn writes no claim to the memory graph, but the utterance is in the episode ledger`() = runTest {
         val (pipeline, engram) = pipelineWithTracking(scope = this)
 
         val before = engram.allPhrases().size
         pipeline.process("Hey", "session-1", "user-1")
         advanceUntilIdle()
 
+        assertEquals(before, engram.allPhrases().size, "a bare greeting is not a claim and must not become a Phrase")
         assertTrue(
-            engram.allPhrases().size > before,
-            "Expected phrase count to grow after SOCIAL turn",
+            engram.getEpisodicLog(userId = "user-1").any { it.role == "user" && it.text == "Hey" },
+            "the greeting must still be recorded in the episode ledger",
         )
     }
 
@@ -73,10 +84,29 @@ class UnifiedIngestionTest {
         val mws = MemoryWriteService(countingEngram, this)
         val pipeline = CognitivePipeline(engramClient = countingEngram, memoryWriteService = mws)
 
-        pipeline.process("What's the weather like?", "session-1", "user-1")
+        pipeline.process("I like hiking on weekends", "session-1", "user-1")
         advanceUntilIdle()
 
         assertEquals(1, ingestCallCount, "Expected exactly one ingest call per turn, got $ingestCallCount")
+    }
+
+    @Test
+    fun `a pure question turn makes no ingest call at all`() = runTest {
+        var ingestCallCount = 0
+        val delegate = InMemoryEngramClient()
+        val countingEngram = object : EngramClient by delegate {
+            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
+                ingestCallCount++
+                return delegate.ingest(candidates, userEmail)
+            }
+        }
+        val mws = MemoryWriteService(countingEngram, this)
+        val pipeline = CognitivePipeline(engramClient = countingEngram, memoryWriteService = mws)
+
+        pipeline.process("What's the weather like?", "session-1", "user-1")
+        advanceUntilIdle()
+
+        assertEquals(0, ingestCallCount, "a question carries no claim, so nothing should be ingested")
     }
 
     @Test
@@ -144,7 +174,7 @@ class UnifiedIngestionTest {
         val mws = MemoryWriteService(engram, this)
         val pipeline = CognitivePipeline(engramClient = engram, memoryWriteService = mws)
 
-        pipeline.process("What is the capital of France?", "session-1", "user-1")
+        pipeline.process("I work as a backend engineer", "session-1", "user-1")
         advanceUntilIdle()
 
         // InMemoryEngramClient.decompose assigns a category-based source; the sourceTag in

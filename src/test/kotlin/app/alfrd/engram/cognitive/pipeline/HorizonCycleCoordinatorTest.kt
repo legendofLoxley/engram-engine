@@ -147,10 +147,9 @@ class HorizonCycleCoordinatorTest {
 
     @Test
     fun `a NoOperation interpretation never fabricates an intention, ordinary fact capture is unaffected`() = runBlocking {
-        // decompose()'s naive heuristic treats any non-blank utterance as fact-shaped — that is
-        // correct, existing behavior this task must preserve, not something to suppress. What
-        // this coordinator must guarantee is narrower: no InterpretOutcome.NoOperation ever
-        // produces an OPEN-status (intention) item.
+        // What this coordinator must guarantee here: no InterpretOutcome.NoOperation ever
+        // produces an OPEN-status (intention) item. (decompose() separately declines to treat a
+        // bare greeting like "hey" as a claim at all — see ClaimOnlyDecomposeTest.)
         val email = "coord-noop-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
         val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
@@ -161,6 +160,22 @@ class HorizonCycleCoordinatorTest {
         assertTrue(result.mutationOutcomes.none { it is MutationOutcome.Intention }, "no intention was proposed, so none must be written")
         val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
         assertTrue(horizon.items.none { it.status == AssertionStatus.OPEN }, "no OPEN item may appear without an actual proposal")
+    }
+
+    @Test
+    fun `a question-only turn writes no fact, does not fail the cycle, and adds nothing to the Horizon`() = runBlocking {
+        // The exact utterance still lives in the episode ledger (EpisodicLogService); the claim graph
+        // and Horizon must not hold "What was worrying me about the demo" as if the user asserted it.
+        val email = "coord-question-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
+
+        val result = c.runCycle(email, requestId = "req-q", utterance = "What was worrying me about the demo?")
+
+        assertNotNull(result.cycleSeq)
+        assertTrue(result.mutationOutcomes.isEmpty(), "no claim, so no write to confirm or fail: ${result.mutationOutcomes}")
+        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
+        assertTrue(horizon.items.none { it.text.text.contains("worrying") }, "the question must not appear as a Horizon item")
     }
 
     // ── Failed writes must be visible to response handling, never silently dropped ──
