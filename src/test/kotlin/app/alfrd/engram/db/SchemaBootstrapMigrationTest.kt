@@ -136,4 +136,115 @@ class SchemaBootstrapMigrationTest {
         assertEquals("open", edge.get("status"))
         assertEquals(1L, (edge.get("cycleSeq") as Number).toLong())
     }
+
+    // ── Context Horizon structure: containers, typed items, focus ────────────
+
+    @Test
+    fun `bootstrap creates the container types, the item subtypes and the structure edges`() {
+        SchemaBootstrap.bootstrap(dbManager.getDatabase())
+        val schema = dbManager.getDatabase().schema
+
+        for (name in listOf("Domain", "Project", "Task", "Event", "Question")) assertTrue(schema.existsType(name), "$name must exist")
+        for (name in listOf("PART_OF", "ABOUT", "FOCUSES_ON")) assertTrue(schema.existsType(name), "$name must exist")
+
+        // Item subtypes extend Phrase, so Phrase queries and Phrase-typed code keep working.
+        for (name in listOf("Task", "Event", "Question")) {
+            assertTrue(schema.getType(name).instanceOf("Phrase"), "$name must extend Phrase")
+            assertTrue(schema.getType(name).getPolymorphicProperty("text") != null, "$name must inherit Phrase.text")
+            assertTrue(schema.getType(name).getPolymorphicProperty("opKey") != null, "$name must inherit Phrase.opKey")
+        }
+        assertTrue(!schema.getType("Domain").instanceOf("Phrase") && !schema.getType("Project").instanceOf("Phrase"), "containers are not Phrases")
+
+        assertEquals(Type.LONG, schema.getType("Task").getProperty("dueAt").type)
+        assertEquals(Type.LONG, schema.getType("Event").getProperty("occursAt").type)
+        assertEquals(Type.STRING, schema.getType("Question").getProperty("askedBy").type)
+        assertEquals(Type.LONG, schema.getType("Project").getProperty("dueAt").type)
+        assertEquals(Type.STRING, schema.getType("Project").getProperty("ownerEmail").type)
+        assertEquals(Type.STRING, schema.getType("FOCUSES_ON").getProperty("mode").type)
+        assertEquals(Type.STRING, schema.getType("FOCUSES_ON").getProperty("zoom").type)
+        assertEquals(Type.LONG, schema.getType("User").getProperty("lastActiveAt").type)
+    }
+
+    @Test
+    fun `a Task is found through the Phrase uid index, on a fresh database`() {
+        SchemaBootstrap.bootstrap(dbManager.getDatabase())
+        assertItemSubtypesAreInThePhraseIndex()
+    }
+
+    /** A database that already holds Phrase data, indexed exactly as [SchemaBootstrap] created it before the structure types existed. */
+    private fun createPrePhase1PhraseSchema(): String {
+        val db = dbManager.getDatabase()
+        val existingUid = UUID.randomUUID().toString()
+        db.transaction {
+            val phrase = db.schema.createVertexType("Phrase")
+            phrase.createProperty("uid", Type.STRING)
+            phrase.createProperty("text", Type.STRING)
+            phrase.createProperty("hash", Type.STRING)
+            phrase.createProperty("createdAt", Type.LONG)
+            phrase.createProperty("updatedAt", Type.LONG)
+            phrase.createProperty("visibility", Type.STRING)
+            phrase.createProperty("userId", Type.STRING)
+            phrase.createProperty("source", Type.STRING)
+            phrase.createProperty("trustPhase", Type.INTEGER)
+            phrase.createProperty("score", Type.DOUBLE)
+            for (indexed in listOf("uid", "hash", "userId")) {
+                phrase.getOrCreateTypeIndex(com.arcadedb.schema.Schema.INDEX_TYPE.LSM_TREE, false, indexed)
+            }
+            val user = db.schema.createVertexType("User")
+            user.createProperty("uid", Type.STRING)
+            user.createProperty("username", Type.STRING)
+            user.createProperty("email", Type.STRING)
+            user.createProperty("tier", Type.INTEGER)
+            user.createProperty("createdAt", Type.LONG)
+            user.createProperty("updatedAt", Type.LONG)
+            db.newVertex("Phrase").apply {
+                set("uid", existingUid); set("text", "pre-existing claim"); set("hash", existingUid)
+                set("visibility", "private"); set("createdAt", 1L); set("updatedAt", 1L); save()
+            }
+        }
+        return existingUid
+    }
+
+    @Test
+    fun `bootstrap migrates a database with existing indexed Phrase data, keeping it and indexing the new subtypes`() {
+        val existingUid = createPrePhase1PhraseSchema()
+        val db = dbManager.getDatabase()
+        assertTrue(!db.schema.existsType("Task"))
+
+        assertDoesNotThrow { SchemaBootstrap.bootstrap(db) }
+
+        assertTrue(db.schema.getType("Task").instanceOf("Phrase"))
+        assertEquals(Type.STRING, db.schema.getType("Phrase").getProperty("opKey").type)
+        assertEquals(Type.LONG, db.schema.getType("User").getProperty("lastActiveAt").type)
+        assertEquals(1L, db.query("sql", "SELECT count(*) as n FROM Phrase WHERE uid = :u", mapOf("u" to existingUid))
+            .use { (it.next().toMap()["n"] as Number).toLong() }, "the pre-existing claim survives the migration")
+        assertItemSubtypesAreInThePhraseIndex()
+
+        assertDoesNotThrow { SchemaBootstrap.bootstrap(db) }
+        assertEquals(1L, db.query("sql", "SELECT count(*) as n FROM Phrase WHERE uid = :u", mapOf("u" to existingUid))
+            .use { (it.next().toMap()["n"] as Number).toLong() })
+    }
+
+    /** Creates one record of each item subtype and proves each is reachable by key through the Phrase index, not just by scan. */
+    private fun assertItemSubtypesAreInThePhraseIndex() {
+        val db = dbManager.getDatabase()
+        val uids = mutableMapOf<String, String>()
+        db.transaction {
+            for (type in listOf("Task", "Event", "Question")) {
+                val uid = UUID.randomUUID().toString()
+                uids[type] = uid
+                db.newVertex(type).apply {
+                    set("uid", uid); set("text", "a $type"); set("hash", uid); set("visibility", "private")
+                    set("createdAt", 1L); set("updatedAt", 1L); set("opKey", "k|$uid"); save()
+                }
+            }
+        }
+        for ((type, uid) in uids) {
+            val cursor = db.lookupByKey("Phrase", "uid", uid)
+            assertTrue(cursor.hasNext(), "the Phrase.uid index must contain the $type record")
+            assertEquals(type, cursor.next().record.asVertex().typeName)
+            assertEquals(1L, db.query("sql", "SELECT count(*) as n FROM Phrase WHERE opKey = :k", mapOf("k" to "k|$uid"))
+                .use { (it.next().toMap()["n"] as Number).toLong() }, "$type must be found by Phrase.opKey")
+        }
+    }
 }

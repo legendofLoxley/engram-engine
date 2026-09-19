@@ -91,6 +91,53 @@ object SchemaBootstrap {
                 vt.createProperty("createdAt", Type.LONG)
             }
 
+            // ── Context Horizon structure: containers and typed items ─────
+            // Domain > Project > Item. Domain and Project are plain vertex types owned via the
+            // denormalized `ownerEmail` (there is no Source/ASSERTS chain for a container the way
+            // there is for a claim). Items are Phrase subtypes so every existing Phrase query and
+            // index keeps working (ArcadeDB queries are polymorphic) and an item is still reached
+            // through Source -ASSERTS-> item, i.e. the same ownership rule as any other claim.
+            // See HorizonStructureStore for the write/read contract.
+            ensureVertex(schema, "Domain") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("name", Type.STRING)
+                vt.createProperty("normalizedName", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("status", Type.STRING)        // active | archived
+                vt.createProperty("createdAt", Type.LONG)
+                vt.createProperty("updatedAt", Type.LONG)
+            }
+
+            ensureVertex(schema, "Project") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("name", Type.STRING)
+                vt.createProperty("normalizedName", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("status", Type.STRING)        // active | done | archived
+                vt.createProperty("dueAt", Type.LONG)           // nullable, epoch millis
+                vt.createProperty("createdAt", Type.LONG)
+                vt.createProperty("updatedAt", Type.LONG)
+            }
+
+            ensureVertex(schema, "Task") { vt ->
+                vt.addSuperType("Phrase")
+                vt.createProperty("dueAt", Type.LONG)           // nullable, epoch millis
+                vt.createProperty("status", Type.STRING)        // open | resolved
+                vt.createProperty("resolvedAt", Type.LONG)      // nullable
+            }
+
+            ensureVertex(schema, "Event") { vt ->
+                vt.addSuperType("Phrase")
+                vt.createProperty("occursAt", Type.LONG)        // nullable, epoch millis
+            }
+
+            ensureVertex(schema, "Question") { vt ->
+                vt.addSuperType("Phrase")
+                vt.createProperty("status", Type.STRING)        // open | resolved
+                vt.createProperty("askedBy", Type.STRING)       // alfrd | user
+                vt.createProperty("resolvedAt", Type.LONG)      // nullable
+            }
+
             // Durable per-user cycle-sequence identity and a bounded, checkpointed record of
             // in-flight/completed conversational-cycle requests. See
             // app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer and RequestLedger. The
@@ -199,6 +246,37 @@ object SchemaBootstrap {
                 et.createProperty("updatedAt", Type.LONG)
             }
 
+            // Item -PART_OF-> Project, Project -PART_OF-> Domain. Created bidirectional so a
+            // container's members can be read by incoming traversal (see RelatedToEdges for why
+            // bidirectional=false leaves that silently empty). Not to be confused with
+            // RELATED_TO(relationType=part_of), which relates Concepts, not containers.
+            ensureEdge(schema, "PART_OF") { et ->
+                et.createProperty("createdAt", Type.LONG)
+                et.createProperty("cycleSeq", Type.LONG)
+                et.createProperty("ownerEmail", Type.STRING)
+            }
+
+            // Item -ABOUT-> Concept — ties an item to the shared entity hubs so recall can
+            // travel item -> Concept -> other items ("my sister" -> allergy). Bidirectional for
+            // the same reason as PART_OF. Concepts are global, not per user, so any traversal
+            // through one MUST re-check ownership of what it reaches.
+            ensureEdge(schema, "ABOUT") { et ->
+                et.createProperty("createdAt", Type.LONG)
+                et.createProperty("cycleSeq", Type.LONG)
+                et.createProperty("ownerEmail", Type.STRING)
+                et.createProperty("strength", Type.DOUBLE)
+            }
+
+            // User -FOCUSES_ON-> Domain | Project | item. The user-directed focus: `mode` is
+            // "pinned" (an explicit instruction; persists until changed, at most one per user) or
+            // "nudge" (a casual mention; fades). `zoom` is overview | binoculars | telescope.
+            ensureEdge(schema, "FOCUSES_ON") { et ->
+                et.createProperty("zoom", Type.STRING)
+                et.createProperty("mode", Type.STRING)
+                et.createProperty("setCycleSeq", Type.LONG)
+                et.createProperty("updatedAt", Type.LONG)
+            }
+
             // ── Additive migrations — safe to run on pre-existing types ──
             ensureProperty(schema, "User",    "email",               Type.STRING)
             ensureProperty(schema, "User",    "updatedAt",           Type.LONG)
@@ -206,6 +284,12 @@ object SchemaBootstrap {
             // app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer. Never a wall-clock
             // timestamp; allocated atomically under HorizonConsistencyLock's write lock.
             ensureProperty(schema, "User",    "lastCycleSeq",        Type.LONG)
+            // Wall-clock time of the user's most recent turn — read to detect a long silence
+            // (HorizonStructureStore.lastActiveAt). Deliberately wall-clock, unlike lastCycleSeq.
+            ensureProperty(schema, "User",    "lastActiveAt",        Type.LONG)
+            // Idempotency key for an item created by a Horizon write operation, namespaced by
+            // owner — see HorizonStructureStore.createItem. Null for ordinarily-ingested phrases.
+            ensureProperty(schema, "Phrase",  "opKey",               Type.STRING)
             ensureProperty(schema, "ASSERTS", "scores",              Type.STRING)
             ensureProperty(schema, "INVITED", "relationshipContext", Type.STRING)
             ensureProperty(schema, "INVITED", "trustPhase",          Type.STRING)
@@ -254,6 +338,16 @@ object SchemaBootstrap {
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
             ensureIndex(schema, "Phrase",      "userId")
+            ensureIndex(schema, "Phrase",      "opKey")
+            // Container lookup by owner + normalized name (createContainer is idempotent on this
+            // pair) and by uid; item time-bound lookups for urgency selection.
+            ensureIndex(schema, "Domain",      "uid")
+            ensureIndex(schema, "Project",     "uid")
+            ensureCompositeIndex(schema, "Domain",  "ownerEmail", "normalizedName")
+            ensureCompositeIndex(schema, "Project", "ownerEmail", "normalizedName")
+            ensureIndex(schema, "Project",     "dueAt")
+            ensureIndex(schema, "Task",        "dueAt")
+            ensureIndex(schema, "Event",       "occursAt")
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Source",      "uid")
