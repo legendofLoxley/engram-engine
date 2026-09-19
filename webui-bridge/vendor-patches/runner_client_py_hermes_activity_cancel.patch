@@ -1,0 +1,19 @@
+--- a/runner_client.py
++++ b/runner_client.py
+@@ -111,6 +111,16 @@
+         """
+         return self._get("/v1/activity")
+
++    def cancel_hermes_activity(self, assignment_id: str) -> dict[str, Any]:
++        """engram-engine dev-bridge addition: the running-executions panel's own Cancel button
++        (see engram-engine's webui-bridge/README.md). Mirrors cancel_run()'s own shape exactly —
++        a request, never a guarantee; the actual outcome is only ever knowable from a later read
++        of the activity list itself, same as every other cancellation path in this bridge.
++        """
++        return self._post(
++            f"/v1/hermes-activity/{urllib.parse.quote(str(assignment_id), safe='')}/cancel", {},
++        )
++
+     def _headers(self) -> dict[str, str]:
+         headers = {
+             "Accept": "application/json",

@@ -1,5 +1,7 @@
 package app.alfrd.engram.api
 
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesCancelHandle
 import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService
 import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventKind
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
@@ -59,7 +61,7 @@ class DebugHermesActivityRoutesTest {
         File(testDbPath).deleteRecursively()
     }
 
-    private fun Application.testModule(registerRoute: Boolean = true) {
+    private fun Application.testModule(registerRoute: Boolean = true, activeAssignments: HermesActiveAssignmentRegistry = HermesActiveAssignmentRegistry()) {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
@@ -71,7 +73,7 @@ class DebugHermesActivityRoutesTest {
             }
         }
         if (registerRoute) {
-            configureDebugHermesActivityRoutes(dbManager.getDatabase())
+            configureDebugHermesActivityRoutes(dbManager.getDatabase(), activeAssignments)
         }
     }
 
@@ -170,5 +172,26 @@ class DebugHermesActivityRoutesTest {
         }
         assertEquals(HttpStatusCode.OK, response.status)
         assertTrue(response.bodyAsText().contains("\"items\":[]"))
+    }
+
+    // ── Running items — sourced from the active-assignment registry, not the graph ──
+
+    @Test
+    fun `a currently-active assignment is returned labeled running, with its assignmentId`() = testApplication {
+        seedUser("debug+owner@test.alfrd.internal")
+        val activeAssignments = HermesActiveAssignmentRegistry()
+        activeAssignments.register(
+            "s1", "debug+owner@test.alfrd.internal", HermesCancelHandle(),
+            "document_summary", "director-hermes-project-brief.md", 1_700_000_000_000L,
+        )
+        application { testModule(activeAssignments = activeAssignments) }
+        val response = client.get("/debug/hermes-activity?syntheticUserId=owner") {
+            header(HttpHeaders.Authorization, "Bearer $TEST_DEBUG_TOKEN")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.bodyAsText()
+        assertTrue(body.contains("\"state\":\"running\""))
+        assertTrue(body.contains("\"assignmentId\":\"s1\""))
+        assertTrue(body.contains("\"cycleSeq\":null"))
     }
 }

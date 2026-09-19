@@ -1,0 +1,45 @@
+--- a/routes.py
++++ b/routes.py
+@@ -10712,6 +10712,29 @@
+     return j(handler, {"items": items if isinstance(items, list) else []})
+ 
+ 
++def _handle_hermes_activity_cancel(handler, parsed) -> bool:
++    """engram-engine dev-bridge addition. The running-executions panel's own Cancel button —
++    proxies, server-side, to this container's configured runner adapter's
++    ``POST /v1/hermes-activity/{id}/cancel`` (see ``api/runner_client.py``'s
++    ``HttpRunnerClient.cancel_hermes_activity``). GET + query param, not a path-parameterized
++    POST — mirrors this file's own existing ``/api/chat/cancel`` convention (see below), which
++    keeps this route outside the CSRF-gated POST path entirely; a request here is honest about
++    being a *request*, never a guarantee, same as every other cancellation path in this bridge.
++    """
++    from api.runner_client import HttpRunnerClient, RunnerClientError, runner_client_configured
++
++    assignment_id = parse_qs(parsed.query).get("assignmentId", [""])[0]
++    if not assignment_id:
++        return bad(handler, "assignmentId required")
++    if not runner_client_configured():
++        return j(handler, {"error": "runner not configured"}, status=502)
++    try:
++        result = HttpRunnerClient.from_env().cancel_hermes_activity(assignment_id)
++    except (RunnerClientError, ValueError, NotImplementedError) as exc:
++        return j(handler, {"error": str(exc)}, status=502)
++    return j(handler, result if isinstance(result, dict) else {"error": "malformed upstream response"})
++
++
+ def _handle_insights(handler, parsed) -> bool:
+     """Return usage analytics from local WebUI session data."""
+     import collections
+@@ -12163,6 +12186,12 @@
+     # configured identity, same as every other call through it.
+     if parsed.path == "/api/hermes-activity":
+         return _handle_hermes_activity(handler, parsed)
++    # engram-engine dev-bridge addition: the running-executions panel's own Cancel button — see
++    # engram-engine's webui-bridge/README.md. Same no-browser-identity convention as
++    # /api/hermes-activity above; the assignmentId itself is opaque and owner-checked entirely
++    # server-side by engram-engine's own /debug/hermes-assignment/{id}/cancel route.
++    if parsed.path == "/api/hermes-activity/cancel":
++        return _handle_hermes_activity_cancel(handler, parsed)
+     if parsed.path == "/api/project-os/dashboard":
+         return _handle_project_os_dashboard(handler, parsed)
+ 

@@ -207,7 +207,7 @@ class DebugHermesAssignmentRoutesTest {
     fun `cancel for a genuinely active assignment reports requested=true`() = testApplication {
         val store = HermesAssignmentCompletionStore()
         val activeAssignments = HermesActiveAssignmentRegistry()
-        activeAssignments.register("a1", "debug+owner@test.alfrd.internal", HermesCancelHandle())
+        activeAssignments.register("a1", "debug+owner@test.alfrd.internal", HermesCancelHandle(), "document_summary", "doc.md", 1L)
         application { testModule(store, activeAssignments = activeAssignments) }
 
         val response = client.post("/debug/hermes-assignment/a1/cancel?syntheticUserId=owner") {
@@ -235,7 +235,7 @@ class DebugHermesAssignmentRoutesTest {
     fun `cancel under a different synthetic identity than the one that owns the assignment reports requested=false`() = testApplication {
         val store = HermesAssignmentCompletionStore()
         val activeAssignments = HermesActiveAssignmentRegistry()
-        activeAssignments.register("a1", "debug+owner@test.alfrd.internal", HermesCancelHandle())
+        activeAssignments.register("a1", "debug+owner@test.alfrd.internal", HermesCancelHandle(), "document_summary", "doc.md", 1L)
         application { testModule(store, activeAssignments = activeAssignments) }
 
         val response = client.post("/debug/hermes-assignment/a1/cancel?syntheticUserId=someone-else") {

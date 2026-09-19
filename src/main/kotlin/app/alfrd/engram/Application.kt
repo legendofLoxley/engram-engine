@@ -159,7 +159,7 @@ fun main() {
             configureDebugEnvironmentSignalRoutes(db)
             configureDebugActorEventRoutes(db)
             configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
-            configureDebugHermesActivityRoutes(db)
+            configureDebugHermesActivityRoutes(db, hermesActiveAssignments)
             log.info("debug-converse endpoint enabled")
         }
         routing {

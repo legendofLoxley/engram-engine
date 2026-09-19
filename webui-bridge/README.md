@@ -424,3 +424,61 @@ further user message or extra Director model call is involved.
   after the (fast) assignment had already completed — cancelled-vs-failed-vs-completed labeling is
   verified through `HermesDelegationDispatcherTest`'s new real-dispatcher tests instead, per this
   increment's own "controlled tests where browser timing is impractical" allowance.
+
+## Running executions, with a direct Cancel button (Layer 1 of the mid-flight-cancellation fix)
+
+Extends the same activity tab to show **currently-running** `DocumentSummary` assignments alongside
+the terminal history above, with a **Cancel** button — the direct fix for a gap the prior
+mid-flight-cancellation increment (`codex/hermes-midflight-correction`) surfaced live: the native
+WebUI's composer queues any typed message while a Hermes assignment is outstanding (the chat "run"
+is deliberately held open so an earlier, separately-shipped feature can auto-deliver Hermes's
+completion into that same conversation), so a typed cancellation attempt structurally cannot arrive
+before the work already finished. A panel button is a channel entirely separate from that chat
+"run," sidestepping the problem instead of fighting it.
+
+- **One combined list, not two.** `HermesActivityFeed.list` gained an optional
+  `activeAssignments: HermesActiveAssignmentRegistry?` parameter (default `null`, preserving every
+  existing caller's behavior byte-for-byte); passed a real registry, it returns running items
+  (`state: "running"`, `cycleSeq: null`) ahead of the same terminal items as before, in one array.
+  The entire read side below Kotlin — `fetch_hermes_activity`, `GET /v1/activity`,
+  `_handle_hermes_activity`, `_renderActivityItems` — needed **zero** changes, since none of them do
+  per-field validation; only the new `assignmentId`/`running` state needed to reach the JSON shape.
+- **De-duplication is server-side, not client-side.** `HermesDelegationDispatcher` unregisters from
+  the active registry only in a `finally` block *after* both graph ingestion and completion
+  recording, so there is a narrow window where an assignment could appear in both lists at once.
+  `HermesActivityFeed` resolves it before the client ever sees it: terminal wins, matched by
+  `assignmentId` (a first-class field on `ActorEventSummary`, not parsed out of `eventId`).
+- **No new engram-engine cancel route.** The panel's Cancel button reuses
+  `POST /debug/hermes-assignment/{id}/cancel` (`DebugHermesAssignmentRoutes.kt`) — the exact same
+  route the native Stop button and the typed-negation path already call through
+  `HermesActiveAssignmentRegistry.requestCancellation`. Verified live end-to-end (adapter → engram,
+  with `HERMES_DEV_TEST_DELAY_MS` creating a reliable window): a running item's Cancel request came
+  back `requested: true`, and the activity feed transitioned it straight to `state: "cancelled"` with
+  no duplicate entry; a second attempt against an already-finished assignment correctly came back
+  `requested: false` rather than a false "stopped" claim.
+- **Reused, not duplicated, cancel plumbing on the Python side.** `request_hermes_cancellation`
+  (`engram_client.py`) already existed — added for the native Stop button's own Hermes-pending case —
+  so no new bridge function was needed. Only a new adapter route
+  (`POST /v1/hermes-activity/{id}/cancel`, mirroring `/v1/runs/{id}/cancel`'s own dispatch shape) and
+  two new vendor patches were added: `runner_client_py_hermes_activity_cancel.patch`
+  (`HttpRunnerClient.cancel_hermes_activity`) and `routes_py_hermes_activity_cancel_route.patch` (a
+  new `GET /api/hermes-activity/cancel?assignmentId=...` route — GET + query param, not a
+  path-parameterized POST, mirroring this vendor's own existing `/api/chat/cancel` convention, which
+  keeps it outside the CSRF-gated POST path entirely). `workspace_js_activity_running_cancel.patch`
+  adds the button itself, wired through a single delegated click listener that survives
+  `_renderActivityItems`' full innerHTML rebuild on every poll.
+- **`apply.sh` sourcing fix.** Regenerating patches a second time against the long-running
+  `hermes-webui-dev` instance failed: its own `/app` is rsynced from `/apptoo` at every container
+  start, and `/apptoo` was already bind-mounted with previously-patched files, so "pristine" source
+  read from it already had earlier hunks baked in, and re-applying them failed. `apply.sh` now
+  sources from its own throwaway, mount-free container started fresh from the pinned digest for each
+  run, then removes it — never from a container that may have ever had the bind mounts attached.
+- **Known limits**: still `document_summary`-only, matching the terminal feed's own scope; running
+  items are exempt from `HermesActivityFeed.MAX_ITEMS` (a history display cap, not a concurrency
+  bound — there are only ever a handful of assignments genuinely in flight); browser-level
+  verification of the Cancel button's click handler itself is still pending (Chrome MCP navigation to
+  the dev WebUI has been blocked all session) — everything below the vendor's own session-auth
+  boundary is verified live through the real adapter/engram-engine chain, and `/api/hermes-activity/cancel`
+  was confirmed to reach that boundary with the identical 401 behavior the already-working
+  `/api/hermes-activity` read route has, so only the vendor's own cookie-auth layer itself is
+  unverified here, not this route's own logic.

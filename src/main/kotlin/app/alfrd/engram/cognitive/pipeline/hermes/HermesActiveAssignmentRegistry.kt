@@ -13,6 +13,15 @@ sealed interface HermesCancellationRequestOutcome {
     object NotActive : HermesCancellationRequestOutcome
 }
 
+/** Enough of one currently-active assignment to display it in a running-executions panel — see
+ *  [HermesActiveAssignmentRegistry.listActive]. Deliberately not the full [Entry]: a display
+ *  surface has no business seeing the [HermesCancelHandle] itself. */
+data class HermesActiveAssignmentSummary(
+    val assignmentId: String,
+    val targetFilename: String,
+    val issuedAt: Long,
+)
+
 /**
  * Shared, cross-session registry of currently-dispatched-but-not-yet-finished Hermes
  * assignments, keyed by assignment id — the mirror-image lifecycle phase of
@@ -27,17 +36,38 @@ sealed interface HermesCancellationRequestOutcome {
  * already-accepted restart limitations — not a new gap introduced here.
  */
 class HermesActiveAssignmentRegistry {
-    private data class Entry(val userEmail: String, val handle: HermesCancelHandle)
+    private data class Entry(
+        val userEmail: String,
+        val handle: HermesCancelHandle,
+        val assignmentKind: String,
+        val targetFilename: String,
+        val issuedAt: Long,
+    )
 
     private val active = ConcurrentHashMap<String, Entry>()
 
-    fun register(assignmentId: String, userEmail: String, handle: HermesCancelHandle) {
-        active[assignmentId] = Entry(userEmail, handle)
+    fun register(
+        assignmentId: String,
+        userEmail: String,
+        handle: HermesCancelHandle,
+        assignmentKind: String,
+        targetFilename: String,
+        issuedAt: Long,
+    ) {
+        active[assignmentId] = Entry(userEmail, handle, assignmentKind, targetFilename, issuedAt)
     }
 
     fun unregister(assignmentId: String) {
         active.remove(assignmentId)
     }
+
+    /** Currently-active assignments of [assignmentKind] (e.g. `"document_summary"`) belonging to
+     *  [userEmail] — the read side [HermesActivityFeed] combines with durable terminal history to
+     *  render a running-executions panel. Order is unspecified; callers sort as needed. */
+    fun listActive(userEmail: String, assignmentKind: String): List<HermesActiveAssignmentSummary> =
+        active.entries
+            .filter { (_, entry) -> entry.userEmail == userEmail && entry.assignmentKind == assignmentKind }
+            .map { (assignmentId, entry) -> HermesActiveAssignmentSummary(assignmentId, entry.targetFilename, entry.issuedAt) }
 
     /** [userEmail] must match the assignment's own owner — a mismatch is reported identically to
      *  an unknown assignment id, the same "cannot distinguish by probing" convention used

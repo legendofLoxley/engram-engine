@@ -252,4 +252,89 @@ class HermesActivityFeedTest {
         val result = runBlocking { HermesActivityFeed.list(email, failingStore) }
         assertTrue(result is HermesActivityFeedResult.Failed)
     }
+
+    // ── Running items — omitting activeAssignments preserves today's terminal-only behavior ──
+
+    @Test
+    fun `omitting activeAssignments behaves exactly as before — terminal history only, no running items`() {
+        val email = "debug+k@test.alfrd.internal"
+        seedUser(email)
+        ingestDocumentSummary(email, "k1", "director-hermes-project-brief.md", "completed")
+        val items = (list(email) as HermesActivityFeedResult.Ok).items
+        assertEquals(1, items.size)
+        assertEquals("completed", items.single().state)
+    }
+
+    @Test
+    fun `a registered, still-active assignment appears as running, with no cycleSeq`() {
+        val email = "debug+l@test.alfrd.internal"
+        seedUser(email)
+        val registry = HermesActiveAssignmentRegistry()
+        registry.register("l1", email, HermesCancelHandle(), "document_summary", "director-hermes-release-checklist.md", 999L)
+
+        val items = (runBlocking { HermesActivityFeed.list(email, store, registry) } as HermesActivityFeedResult.Ok).items
+        assertEquals(1, items.size)
+        val item = items.single()
+        assertEquals("running", item.state)
+        assertEquals("l1", item.assignmentId)
+        assertEquals(null, item.cycleSeq)
+        assertEquals("director-hermes-release-checklist.md", item.targetFilename)
+        assertEquals(999L, item.occurredAt)
+    }
+
+    @Test
+    fun `a marker_check active assignment is excluded from running, same as terminal already excludes it`() {
+        val email = "debug+m@test.alfrd.internal"
+        seedUser(email)
+        val registry = HermesActiveAssignmentRegistry()
+        registry.register("m1", email, HermesCancelHandle(), "marker_check", "fixture.txt", 1L)
+
+        val items = (runBlocking { HermesActivityFeed.list(email, store, registry) } as HermesActivityFeedResult.Ok).items
+        assertTrue(items.isEmpty())
+    }
+
+    @Test
+    fun `an active assignment's own user isolation matches the existing terminal isolation`() {
+        val owner = "debug+n-owner@test.alfrd.internal"
+        val other = "debug+n-other@test.alfrd.internal"
+        seedUser(owner)
+        seedUser(other)
+        val registry = HermesActiveAssignmentRegistry()
+        registry.register("n1", owner, HermesCancelHandle(), "document_summary", "doc.md", 1L)
+
+        val ownerItems = (runBlocking { HermesActivityFeed.list(owner, store, registry) } as HermesActivityFeedResult.Ok).items
+        val otherItems = (runBlocking { HermesActivityFeed.list(other, store, registry) } as HermesActivityFeedResult.Ok).items
+        assertEquals(1, ownerItems.size)
+        assertTrue(otherItems.isEmpty())
+    }
+
+    @Test
+    fun `the narrow race window — once terminal, an assignment is never also shown as running`() {
+        val email = "debug+o@test.alfrd.internal"
+        seedUser(email)
+        // Simulates the exact window HermesDelegationDispatcher can momentarily be in: the graph
+        // write and completion record have both already landed, but unregister() (a `finally`
+        // block after both) hasn't run yet — so the registry still reports it active.
+        val registry = HermesActiveAssignmentRegistry()
+        registry.register("o1", email, HermesCancelHandle(), "document_summary", "director-hermes-project-brief.md", 1L)
+        ingestDocumentSummary(email, "o1", "director-hermes-project-brief.md", "completed")
+
+        val items = (runBlocking { HermesActivityFeed.list(email, store, registry) } as HermesActivityFeedResult.Ok).items
+        assertEquals(1, items.size, "terminal must win — the same assignment must never appear twice")
+        assertEquals("completed", items.single().state)
+    }
+
+    @Test
+    fun `running items are unaffected by the terminal history's MAX_ITEMS display cap`() {
+        val email = "debug+p@test.alfrd.internal"
+        seedUser(email)
+        for (i in 1..HermesActivityFeed.MAX_ITEMS) {
+            ingestDocumentSummary(email, "p%02d".format(i), "director-hermes-project-brief.md", "completed")
+        }
+        val registry = HermesActiveAssignmentRegistry()
+        registry.register("running1", email, HermesCancelHandle(), "document_summary", "director-hermes-release-checklist.md", 1L)
+
+        val items = (runBlocking { HermesActivityFeed.list(email, store, registry) } as HermesActivityFeedResult.Ok).items
+        assertTrue(items.any { it.assignmentId == "running1" && it.state == "running" }, "a running item must not be crowded out by a full terminal history")
+    }
 }

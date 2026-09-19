@@ -742,6 +742,33 @@ class RunnerHttpIntegrationTest(unittest.TestCase):
             resp = conn.getresponse()
             self.assertEqual(resp.status, 502)
 
+    # ── /v1/hermes-activity/{id}/cancel — the running-executions panel's own Cancel button ──
+
+    def test_unauthenticated_hermes_activity_cancel_is_rejected(self):
+        conn = self._conn()
+        conn.request("POST", "/v1/hermes-activity/a1/cancel", body=b"", headers=self._auth_headers(key=None))
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 401)
+
+    def test_hermes_activity_cancel_returns_the_upstream_result(self):
+        result = {"assignmentId": "a1", "requested": True}
+        with patch.object(ra, "request_hermes_cancellation", return_value=result) as mocked:
+            conn = self._conn()
+            conn.request("POST", "/v1/hermes-activity/a1/cancel", body=b"", headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read()), result)
+        mocked.assert_called_once_with(
+            self.config["engram_base_url"], self.config["engram_debug_token"], "a1", self.config["synthetic_user_id"],
+        )
+
+    def test_hermes_activity_cancel_upstream_failure_is_a_502(self):
+        with patch.object(ra, "request_hermes_cancellation", return_value=None):
+            conn = self._conn()
+            conn.request("POST", "/v1/hermes-activity/a1/cancel", body=b"", headers=self._auth_headers())
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 502)
+
     def test_cancel_for_an_unknown_run_reports_unknown_run_not_a_generic_unsupported_message(self):
         conn = self._conn()
         conn.request("POST", "/v1/runs/whatever/cancel", body=b"{}", headers=self._auth_headers())

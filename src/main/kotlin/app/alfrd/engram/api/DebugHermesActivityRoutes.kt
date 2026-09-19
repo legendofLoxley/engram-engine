@@ -1,5 +1,6 @@
 package app.alfrd.engram.api
 
+import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActivityFeed
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActivityFeedResult
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
@@ -17,7 +18,8 @@ private val logger = LoggerFactory.getLogger("app.alfrd.engram.api.DebugHermesAc
 @Serializable
 data class HermesActivityItemResponse(
     val eventId: String,
-    val cycleSeq: Long,
+    val assignmentId: String,
+    val cycleSeq: Long?,
     val targetFilename: String,
     val state: String,
     val summary: String,
@@ -54,7 +56,7 @@ data class HermesActivityListResponse(
  * `GET /debug/actor-event/{eventId}` already uses for [app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore.ActorEventLookupResult.LookupFailed]
  * — so a caller already handling that convention needs no new one here.
  */
-fun Application.configureDebugHermesActivityRoutes(db: Database) {
+fun Application.configureDebugHermesActivityRoutes(db: Database, activeAssignments: HermesActiveAssignmentRegistry) {
     val horizonGraphStore = ArcadeHorizonGraphStore(db)
 
     routing {
@@ -72,7 +74,7 @@ fun Application.configureDebugHermesActivityRoutes(db: Database) {
                         )
                     }
 
-                    when (val result = HermesActivityFeed.list(userEmail, horizonGraphStore)) {
+                    when (val result = HermesActivityFeed.list(userEmail, horizonGraphStore, activeAssignments)) {
                         is HermesActivityFeedResult.Ok -> {
                             logger.info("hermes-activity userEmail={} items={}", userEmail, result.items.size)
                             call.respond(
@@ -81,6 +83,7 @@ fun Application.configureDebugHermesActivityRoutes(db: Database) {
                                     items = result.items.map {
                                         HermesActivityItemResponse(
                                             eventId = it.eventId,
+                                            assignmentId = it.assignmentId,
                                             cycleSeq = it.cycleSeq,
                                             targetFilename = it.targetFilename,
                                             state = it.state,

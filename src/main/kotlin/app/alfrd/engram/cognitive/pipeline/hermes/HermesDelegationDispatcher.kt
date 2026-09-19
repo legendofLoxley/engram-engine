@@ -56,22 +56,25 @@ class HermesDelegationDispatcher(
             "hermes-delegation dispatching assignmentId={} userEmail={} task={}",
             assignment.assignmentId, assignment.userEmail, assignment.task,
         )
+        // Known regardless of what actually happens — computed once up front so it's available
+        // both to the active-assignment registration below (for a running-executions panel) and,
+        // reused unchanged, to the durable-event labeling after the exchange finishes.
+        val assignmentKindLabel = when (assignment.kind) {
+            is HermesAssignmentKind.DocumentSummary -> "document_summary"
+            is HermesAssignmentKind.MarkerCheck -> "marker_check"
+        }
+        val targetFilename = assignment.kind.targetFilename
         val cancelHandle = HermesCancelHandle()
-        activeAssignments.register(assignment.assignmentId, assignment.userEmail, cancelHandle)
+        activeAssignments.register(
+            assignment.assignmentId, assignment.userEmail, cancelHandle,
+            assignmentKindLabel, targetFilename, assignment.issuedAt,
+        )
         scope.launch {
             try {
                 val outcome = when (val assignmentKind = assignment.kind) {
                     is HermesAssignmentKind.MarkerCheck -> client.inspectFixture(assignment, assignmentKind.targetFilename, cancelHandle)
                     is HermesAssignmentKind.DocumentSummary -> client.summarizeDocument(assignment, assignmentKind.targetFilename, cancelHandle)
                 }
-                // Known regardless of what actually happened — carried into every branch below so a
-                // durable reader (HermesActivityFeed) can identify and label this event from the
-                // graph alone, even for a Failed/Cancelled outcome that never touched a real tool.
-                val assignmentKindLabel = when (assignment.kind) {
-                    is HermesAssignmentKind.DocumentSummary -> "document_summary"
-                    is HermesAssignmentKind.MarkerCheck -> "marker_check"
-                }
-                val targetFilename = assignment.kind.targetFilename
                 val kind = when (outcome) {
                     is HermesAssignmentOutcome.Completed -> ActorEventKind.ToolResult(
                         text = outcome.findingsText,

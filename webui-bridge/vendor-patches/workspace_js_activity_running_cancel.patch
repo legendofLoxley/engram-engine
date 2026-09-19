@@ -1,0 +1,51 @@
+--- a/workspace.js
++++ b/workspace.js
+@@ -421,6 +421,7 @@
+ }
+ 
+ function _activityStateLabel(state){
++  if(state==='running') return 'Running';
+   if(state==='completed') return 'Completed';
+   if(state==='failed') return 'Failed';
+   if(state==='cancelled') return 'Cancelled';
+@@ -436,13 +437,40 @@
+   }
+   panel.innerHTML=items.map(function(item){
+     const when=item.occurredAt?new Date(item.occurredAt).toLocaleString():'';
++    const cancelBtn=item.state==='running'
++      ?'<button type="button" class="activity-cancel-btn" data-assignment-id="'+_escHtml(item.assignmentId||'')+'" style="margin-top:4px;font-size:11px">Cancel</button>'
++      :'';
+     return '<div class="activity-item activity-state-'+_escHtml(item.state||'')+'" style="padding:8px 0;border-bottom:1px solid var(--border2)">'
+       +'<div style="font-size:12px">'+_escHtml(item.summary||'')+'</div>'
+       +'<div style="font-size:11px;color:var(--muted);margin-top:2px">'+_escHtml(_activityStateLabel(item.state))+(when?' · '+_escHtml(when):'')+'</div>'
++      +cancelBtn
+       +'</div>';
+   }).join('');
+ }
+ 
++// engram-engine dev-bridge addition: the running-executions panel's own Cancel button. A single
++// delegated listener (not one per rendered button) survives _renderActivityItems' own full
++// innerHTML rebuild on every poll, so it never needs re-attaching.
++document.addEventListener('click', function(e){
++  const btn = e.target && e.target.closest && e.target.closest('.activity-cancel-btn');
++  if(!btn) return;
++  _cancelHermesActivity(btn.dataset.assignmentId, btn);
++});
++
++async function _cancelHermesActivity(assignmentId, btn){
++  if(!assignmentId) return;
++  if(btn){ btn.disabled = true; btn.textContent = 'Cancelling…'; }
++  try{
++    await api('/api/hermes-activity/cancel?assignmentId='+encodeURIComponent(assignmentId), {timeoutToast:false, retries:0});
++    // Whatever the outcome (requested or not-active), re-poll immediately rather than waiting up
++    // to 15s for the next tick — no optimistic removal before that confirms it, since a request
++    // is never a guarantee (same framing as every other cancellation path in this bridge).
++    _loadWorkspacePanelActivity();
++  }catch(e){
++    if(btn){ btn.disabled = false; btn.textContent = 'Cancel'; }
++  }
++}
++
+ async function _loadWorkspacePanelActivity(){
+   const panel=$('workspaceActivityPanel');
+   if(!panel) return;

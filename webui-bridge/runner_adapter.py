@@ -1328,6 +1328,22 @@ def make_handler(config: dict[str, Any], store: RunStore) -> type[BaseHTTPReques
             if len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "cancel":
                 self._send_json(200, handle_cancel_request(config, store, parts[2]))
                 return
+            # POST /v1/hermes-activity/{assignment_id}/cancel — the running-executions panel's own
+            # Cancel button (see engram-engine's webui-bridge/README.md). Deliberately independent
+            # of the /v1/runs/{id}/cancel path above: a panel cancellation has no run_id/stream_id
+            # at all, and reuses request_hermes_cancellation directly — the exact same call
+            # handle_cancel_request already makes for the native Stop button's own Hermes-pending
+            # case, just reached from a different, run-independent entry point.
+            if len(parts) == 4 and parts[:2] == ["v1", "hermes-activity"] and parts[3] == "cancel":
+                assignment_id = parts[2]
+                result = request_hermes_cancellation(
+                    config["engram_base_url"], config["engram_debug_token"], assignment_id, config["synthetic_user_id"],
+                )
+                if result is None:
+                    self._send_json(502, {"error": "hermes-activity cancel failed"})
+                    return
+                self._send_json(200, result)
+                return
             if len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "approval":
                 self._send_json(200, _unsupported("Approval is not supported in this development slice."))
                 return
