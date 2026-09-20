@@ -89,6 +89,39 @@ open class Interpreter(private val llmClient: LlmClient?) {
         return InterpretOutcome.Operations(parsed.operations, parsed.rejections, latencyMs)
     }
 
+    /**
+     * A narrow second look, for exactly one case: the message mentions a date ([DateHints]) and [interpret]
+     * returned no operations. Asks only whether it states a dated event or a task with a deadline, and allows
+     * only `record_item` of those two kinds in reply; the answer goes through the same [OperationParser] as
+     * any other. A failed call is reported as [InterpretOutcome.LlmFailure] for the caller to ignore — this is
+     * a safety net, never a reason to lose or delay the turn beyond its own call.
+     */
+    open suspend fun interpretDated(utterance: String, snapshot: ViewSnapshot, now: ZonedDateTime): InterpretOutcome {
+        val client = llmClient ?: return InterpretOutcome.LlmFailure("no LLM client configured")
+        val startMs = System.currentTimeMillis()
+        val response = try {
+            client.complete(buildDatedRequest(utterance, now))
+        } catch (e: Exception) {
+            return InterpretOutcome.LlmFailure(e.message ?: "dated-statement LLM call failed")
+        }
+        val call = response.toolCalls.firstOrNull { it.name == TOOL_NAME } ?: return InterpretOutcome.NoOperation
+        val parsed = OperationParser.parse(call.input, utterance, snapshot, snapshot.zone)
+        val recorded = parsed.operations.filter { it is app.alfrd.engram.cognitive.pipeline.horizon.RecordItem && it.kind in DATED_KINDS }
+        if (recorded.isEmpty()) return InterpretOutcome.NoOperation
+        return InterpretOutcome.Operations(recorded, parsed.rejections, System.currentTimeMillis() - startMs)
+    }
+
+    internal fun buildDatedRequest(utterance: String, now: ZonedDateTime): LlmRequest = LlmRequest(
+        prompt = "User message:\n$utterance",
+        systemPrompt = datedSystemPrompt(now),
+        model = LlmModel.CLAUDE_SONNET_4_5,
+        maxTokens = 512,
+        timeoutMs = 20_000,
+        tools = listOf(DATED_TOOL),
+        forcedToolName = TOOL_NAME,
+        temperature = 0.0,
+    )
+
     /** The exact request sent — exposed so the prompt and tool schema can be inspected and evaluated as shipped. */
     internal fun buildRequest(utterance: String, snapshot: ViewSnapshot, now: ZonedDateTime): LlmRequest = LlmRequest(
         prompt = "${snapshot.render()}\n\nUser message:\n$utterance",
@@ -112,6 +145,10 @@ open class Interpreter(private val llmClient: LlmClient?) {
             append("and decide what (if anything) to write by calling apply_operations. You never write replies. ")
             append("Today is ${now.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)} ${now.toLocalDate()} (${now.zone}).\n")
             append(RULES)
+            appendCalendar(now)
+        }.trimEnd()
+
+        private fun StringBuilder.appendCalendar(now: ZonedDateTime) {
             append("\n\nDates: resolve every relative date from this calendar, never by counting in your head. A bare weekday or \"next <weekday>\" means the first such day after today. A bare day of the month (\"the 24th\") is the entry below tagged with that day number.\n")
             for (i in 0 until CALENDAR_DAYS) {
                 val day = now.toLocalDate().plusDays(i.toLong())
@@ -119,6 +156,20 @@ open class Interpreter(private val llmClient: LlmClient?) {
                 // The day number is spelled out on every row so "the 24th" is a lookup, not arithmetic.
                 append("  ${day.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)} $day day-${day.dayOfMonth}$tag\n")
             }
+        }
+
+        /**
+         * The system prompt of the narrow second look at a message that mentions a date and produced no operations
+         * — see [Interpreter.interpretDated]. Deliberately separate from [systemPrompt]: the main prompt's wording
+         * is fragile (any edit moves its accuracy by a few cases), so the safety net asks its own single question.
+         */
+        internal fun datedSystemPrompt(now: ZonedDateTime): String = buildString {
+            append("You maintain a person's memory for an assistant named Alfrd. The user's message mentions a date or time. ")
+            append("Decide ONE thing: does it state something the user would want remembered on that date — an event (a birthday, a visit, an appointment, a trip) or a task with a deadline? ")
+            append("If it does, call apply_operations with one record_item per such thing: kind event or task, the quote copied verbatim from their message, due resolved from the calendar, the people or things it concerns in about, and a short plain title (at most 8 words). ")
+            append("If it does not — a question, small talk, something already in the past, a hypothetical, or a date that is not about the user's own life or plans — call apply_operations with ops []. ")
+            append("Never write replies. Today is ${now.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)} ${now.toLocalDate()} (${now.zone}).")
+            appendCalendar(now)
         }.trimEnd()
 
         private val RULES = """
@@ -246,6 +297,40 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         )
 
         private val OP_SCHEMA: JsonObject = buildJsonObject { putJsonArray("anyOf") { OPERATION_VARIANTS.forEach { add(it) } } }
+
+        /** The only kinds the dated second look may record. */
+        private val DATED_KINDS = setOf(app.alfrd.engram.cognitive.pipeline.horizon.ItemKind.EVENT, app.alfrd.engram.cognitive.pipeline.horizon.ItemKind.TASK)
+
+        /** `apply_operations` as the dated second look sees it: nothing but `record_item`, as an event or a task. */
+        internal val DATED_TOOL = ToolDefinition(
+            name = TOOL_NAME,
+            description = "Record a dated event or a task with a deadline the user stated. ops may be EMPTY.",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("ops") {
+                        put("type", "array")
+                        put(
+                            "items",
+                            variant("record_item", listOf("kind", "quote", "due")) {
+                                mapOf(
+                                    "kind" to enumOf("event", "task"),
+                                    "quote" to QUOTE,
+                                    "due" to str("ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+                                    "title" to str("A short plain label, at most 8 words, e.g. \"Sister's birthday\"."),
+                                    "about" to buildJsonObject {
+                                        put("type", "array")
+                                        putJsonObject("items") { put("type", "string") }
+                                        put("description", "Short names of the people/things this concerns.")
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+                putJsonArray("required") { add("ops") }
+            },
+        )
 
         internal val APPLY_OPERATIONS_TOOL = ToolDefinition(
             name = TOOL_NAME,

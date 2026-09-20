@@ -189,7 +189,7 @@ interface HorizonStructureStore {
      * Marks a task, event or question `resolved` (or `open` again when [resolved] is false), or a
      * project `done`/`active`. False for any other target or one the user doesn't own. Records
      * `resolvedAt` when resolving; a no-op if it is already in the requested state. For a task or
-     * question the legacy `ASSERTS.status` the current Horizon reads is kept in step (see [createItem]).
+     * question the `ASSERTS.status` copy is kept in step too (see [createItem]).
      */
     suspend fun resolve(userEmail: String, cycleSeq: Long, targetUid: String, resolved: Boolean = true): Boolean
 
@@ -236,6 +236,9 @@ interface HorizonStructureStore {
 
     suspend fun getItem(userEmail: String, uid: String): ItemRecord?
 
+    /** The item this user's request created under [opKey] (`requestId:index`), if it did — how a retry recognizes its own earlier write. */
+    suspend fun itemByOpKey(userEmail: String, opKey: String): ItemRecord?
+
     /** The items filed directly under project [projectUid] (never nested projects), oldest first. Empty for a project the user doesn't own. */
     suspend fun itemsIn(userEmail: String, projectUid: String): List<ItemRecord>
 
@@ -251,7 +254,18 @@ interface HorizonStructureStore {
      * show the interpretation model what it can refer to; a bounded read, never the whole graph.
      */
     suspend fun listRecentItems(userEmail: String, limit: Int, openOnly: Boolean = false): List<ItemRecord>
+
+    /**
+     * Just the words of the most recent things the user's own Sources assert (their statements, and
+     * reports made for them), newest first, capped at [limit] — one query, nothing else loaded. This is what "the message mentions something they
+     * told me" is matched against, so it has to reach further back than [listRecentItems] is asked to
+     * and stay cheap enough to run every turn.
+     */
+    suspend fun scanItemTexts(userEmail: String, limit: Int): List<ItemText>
 }
+
+/** An item's identity and words, nothing more — see [HorizonStructureStore.scanItemTexts]. */
+data class ItemText(val uid: String, val text: String)
 
 class ArcadeHorizonStructureStore(
     private val db: Database,
@@ -361,9 +375,9 @@ class ArcadeHorizonStructureStore(
                 set("timestamp", now)
                 set("scores", """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
-                // Legacy dual-write, removed with the legacy Horizon pools: today's assembler decides
-                // "open" from ASSERTS.status, so a task or question must carry it or it would vanish
-                // from the Horizon until the selector replaces those pools.
+                // Kept in step with the vertex's own `status`: selection reads the vertex, but propagation
+                // (which items a new report may be linked to) and how an item's status is worded in the
+                // reply's prompt still read the edge. Once those read the vertex, this copy can go.
                 if (kind == ItemKind.TASK || kind == ItemKind.QUESTION) applyLegacyStatus(this, "open", cycleSeq, now)
                 save()
             }
@@ -447,7 +461,7 @@ class ArcadeHorizonStructureStore(
                 save()
             }
             if (target.typeName == "Task" || target.typeName == "Question") {
-                // Keep the legacy ASSERTS.status the current Horizon reads in step — see createItem.
+                // Keep the ASSERTS.status copy in step — see createItem.
                 HorizonOwnership.ownedAssertsEdges(db, userEmail, targetUid).forEach { edge ->
                     val mutable = edge.modify()
                     applyLegacyStatus(mutable, if (resolved) "resolved" else "open", cycleSeq, now)
@@ -596,6 +610,10 @@ class ArcadeHorizonStructureStore(
         HorizonOwnership.findPhraseOwnedByUser(db, userEmail, uid)?.toItemRecord()
     }
 
+    override suspend fun itemByOpKey(userEmail: String, opKey: String): ItemRecord? = read("itemByOpKey", null) {
+        findOwnedItemByOpKey(userEmail, "$userEmail|$opKey")?.toItemRecord()
+    }
+
     override suspend fun itemsIn(userEmail: String, projectUid: String): List<ItemRecord> = read("itemsIn", emptyList()) {
         val project = findOwnedContainer(userEmail, projectUid, ContainerKind.PROJECT) ?: return@read emptyList()
         project.getVertices(Vertex.DIRECTION.IN, "PART_OF")
@@ -662,12 +680,38 @@ class ArcadeHorizonStructureStore(
             }
         }
 
+    override suspend fun scanItemTexts(userEmail: String, limit: Int): List<ItemText> =
+        read("scanItemTexts", emptyList()) {
+            if (limit <= 0) return@read emptyList()
+            val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@read emptyList()
+            // Everything the user's own Sources assert — what they said, and also what Hermes or the environment
+            // reported on their behalf, since a question about a report should find it (the assembler frames those
+            // by provenance when they surface). Ownership is the TRUSTS edge, as everywhere else.
+            val sourceUids = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
+                .mapNotNull { it.get("uid") as? String }
+            if (sourceUids.isEmpty()) return@read emptyList()
+            db.query(
+                "sql",
+                "SELECT @in.uid AS uid, @in.text AS text FROM ASSERTS WHERE @out.uid IN :sourceUids ORDER BY timestamp DESC LIMIT :limit",
+                mapOf("sourceUids" to sourceUids, "limit" to limit),
+            ).use { rs ->
+                val out = LinkedHashMap<String, String>()
+                while (rs.hasNext()) {
+                    val row = rs.next().toMap()
+                    val uid = row["uid"] as? String ?: continue
+                    val text = row["text"] as? String ?: continue
+                    out.putIfAbsent(uid, text)
+                }
+                out.map { (uid, text) -> ItemText(uid, text) }
+            }
+        }
+
     // ── Plumbing ─────────────────────────────────────────────────────────────
 
     /**
-     * Sets the legacy `status`/`statusHistory`/`statusCycleSeq` on an ASSERTS edge — the exact shape
-     * [ArcadeHorizonGraphStore.markAssertionStatus] writes — so today's Horizon assembler, which
-     * reads open/resolved from there, sees a task or question the way it saw an intention.
+     * Sets `status`/`statusHistory`/`statusCycleSeq` on an ASSERTS edge — the exact shape
+     * [ArcadeHorizonGraphStore.markAssertionStatus] writes — so what still reads open/resolved from the edge
+     * (propagation's candidates, the status shown with an item) sees a task or question as it always saw an intention.
      */
     private fun applyLegacyStatus(edge: com.arcadedb.graph.MutableEdge, state: String, cycleSeq: Long, now: Long) {
         val history = legacyHistory(edge.get("statusHistory") as? String) + StatusHistoryEntry(state, now)

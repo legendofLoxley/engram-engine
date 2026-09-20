@@ -40,8 +40,6 @@ data class CognitiveContext(
     var intent: IntentType = IntentType.AMBIGUOUS,
     var intentConfidence: Double = 0.0,
     var comprehensionTier: Int = 1,
-    var requiresMemory: Boolean = false,
-    var memoryQueryHint: String? = null,
     var secondaryIntent: IntentType? = null,
     /** Text-path turn shape, null when no explicit signal was detected. */
     var turnShape: TurnShape? = null,

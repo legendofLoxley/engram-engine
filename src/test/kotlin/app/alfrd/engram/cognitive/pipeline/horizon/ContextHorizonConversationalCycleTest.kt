@@ -607,4 +607,121 @@ class ContextHorizonConversationalCycleTest {
         assertEquals("Activated", recall.trace.horizonCycle!!.horizonAfterPropagation.first { it.text.contains("firewall") }.surfacing)
         assertTrue(promptOf(recall.trace.horizonCycle!!).contains("Sort out the firewall rules"), "and it reaches the reply's prompt")
     }
+
+    // ── A reminder is raised, not repeated every turn ─────────────────────────
+
+    private val dayMs = 86_400_000L
+
+    /** A user whose only thing in view is one deadline, and a pipeline whose reply model says whatever [reply] holds at the time. */
+    private fun deadlineScenario(reply: () -> String): Triple<String, CognitivePipeline, String> = runBlocking {
+        val email = "raised-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val dinner = structureStore.createItem(email, 0, ItemKind.EVENT, "Sister's birthday dinner", dueAt = System.currentTimeMillis() + 2 * dayMs)!!
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) opsResponse() else LlmResponse(text = reply(), latencyMs = 5, retryCount = 0)
+        }
+        Triple(email, buildPipeline(llmClient), dinner.uid)
+    }
+
+    private fun quiet(turn: CognitivePipeline.DebugChatResult) = promptOf(turn.trace.horizonCycle!!).contains("already reminded them of this recently")
+
+    @Test
+    fun `a deadline the reply brought up is not raised again for a while, and comes back after that`() = runBlocking {
+        var reply = "Don't forget your sister's birthday dinner is in two days."
+        val (email, pipeline, _) = deadlineScenario { reply }
+
+        val first = pipeline.processForDebug("What should I cook tonight?", "s1", email, requestId = "req-1")
+        assertFalse(quiet(first), "the first time it is in view, it may be raised")
+        assertTrue(first.trace.horizonCycle!!.quietDeadlines.isEmpty())
+
+        reply = "Something simple, like pasta."
+        val second = pipeline.processForDebug("Any other ideas?", "s1", email, requestId = "req-2")
+        assertTrue(quiet(second), "the reply just mentioned it, so the next prompt says not to again")
+        assertEquals(listOf("Sister's birthday dinner"), second.trace.horizonCycle!!.quietDeadlines)
+        assertTrue(promptOf(second.trace.horizonCycle!!).contains("Sister's birthday dinner"), "still in the prompt, so it stays answerable")
+
+        // Quiet for the cooldown, then it may be raised once more.
+        var last = second
+        repeat(7) { i -> last = pipeline.processForDebug("Tell me more $i", "s1", email, requestId = "req-c$i") }
+        assertTrue(quiet(last), "still within the cooldown")
+        val after = pipeline.processForDebug("And after all that?", "s1", email, requestId = "req-after")
+        assertFalse(quiet(after), "the cooldown is over")
+    }
+
+    @Test
+    fun `a reply that did not mention the deadline does not silence it`() = runBlocking {
+        val (email, pipeline, _) = deadlineScenario { "Something simple, like pasta." }
+
+        pipeline.processForDebug("What should I cook tonight?", "s1", email, requestId = "req-1")
+        val second = pipeline.processForDebug("Any other ideas?", "s1", email, requestId = "req-2")
+
+        assertFalse(quiet(second), "it was never raised, so nothing says it was")
+    }
+
+    @Test
+    fun `a deadline that is now worded differently is news again, even inside the cooldown`() = runBlocking {
+        val (email, pipeline, dinnerUid) = deadlineScenario { "Don't forget your sister's birthday dinner." }
+        pipeline.processForDebug("What should I cook tonight?", "s1", email, requestId = "req-1")
+        assertTrue(quiet(pipeline.processForDebug("Any other ideas?", "s1", email, requestId = "req-2")))
+
+        structureStore.setDue(email, 50, dinnerUid, System.currentTimeMillis() + dayMs) // two days away became one
+
+        assertFalse(quiet(pipeline.processForDebug("Still thinking.", "s1", email, requestId = "req-3")), "'in 2 days' became 'tomorrow'")
+    }
+
+    // ── The focus follows the subject; the reply says so ──────────────────────
+
+    @Test
+    fun `talking about another project moves the focus, the reply is told, and nothing is lost`() = runBlocking {
+        val email = "follow-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val demo = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        val garden = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structureStore.createItem(email, 0, ItemKind.TASK, "Book the conference room", projectUid = demo.uid)
+        structureStore.createItem(email, 0, ItemKind.TASK, "Choose the plants", projectUid = garden.uid)
+        structureStore.setFocus(email, 1, demo.uid, FocusMode.PINNED)
+        val pipeline = buildPipeline(TestLlmClient { request -> if (request.isInterpretation) opsResponse() else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0) })
+
+        val stay = pipeline.processForDebug("What is the weather like?", "s1", email, requestId = "req-1")
+        assertNull(stay.trace.horizonCycle!!.focusMoved)
+        assertTrue(stay.trace.horizonCycle!!.horizonAfterPropagation.any { it.text == "Book the conference room" })
+
+        val moved = pipeline.processForDebug("How is the garden redesign going?", "s1", email, requestId = "req-2")
+
+        val cycle = moved.trace.horizonCycle!!
+        assertEquals("Meridian demo -> Garden redesign", cycle.focusMoved)
+        assertTrue(cycle.focus!!.startsWith("Garden redesign"))
+        assertTrue(cycle.horizonAfterPropagation.any { it.text == "Choose the plants" }, "the new subject's items are in view the same turn")
+        assertTrue(cycle.horizonAfterPropagation.none { it.text == "Book the conference room" })
+        assertTrue(promptOf(cycle).contains("Focus moved from \"Meridian demo\" to \"Garden redesign\""), "the reply is told, so a wrong guess is visible and correctable")
+
+        val back = pipeline.processForDebug("Back to the meridian demo please", "s1", email, requestId = "req-3")
+        assertEquals("Garden redesign -> Meridian demo", back.trace.horizonCycle!!.focusMoved)
+        assertTrue(back.trace.horizonCycle!!.horizonAfterPropagation.any { it.text == "Book the conference room" }, "refocusing brings everything back")
+    }
+
+    @Test
+    fun `saying a task twice leaves one task, and the reply is told it was already there`() = runBlocking {
+        val email = "twice-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                when {
+                    request.interpretedMessage.startsWith("I need to book the conference room") ->
+                        opsResponse(op("record_item", "kind" to "task", "quote" to "I need to book the conference room", "title" to "Book the conference room for the demo"))
+                    request.interpretedMessage.startsWith("I'll do the room booking tomorrow") ->
+                        opsResponse(op("record_item", "kind" to "task", "quote" to "I'll do the room booking tomorrow", "title" to "Book the conference room", "due" to "2099-01-02"))
+                    else -> opsResponse()
+                }
+            } else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        pipeline.processForDebug("I need to book the conference room for the demo.", "s1", email, requestId = "req-1")
+        val again = pipeline.processForDebug("I'll do the room booking tomorrow.", "s1", email, requestId = "req-2")
+
+        assertEquals(1, structureStore.listRecentItems(email, 20).count { it.kind == ItemKind.TASK }, "one task, not two")
+        assertTrue(promptOf(again.trace.horizonCycle!!).contains("Already on the list: \"Book the conference room for the demo\""), promptOf(again.trace.horizonCycle!!))
+        assertTrue(again.trace.horizonCycle!!.horizonAfterPropagation.count { it.text.contains("conference room") } == 1)
+    }
 }

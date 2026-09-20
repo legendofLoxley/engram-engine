@@ -194,6 +194,160 @@ class HorizonSeederTest {
         assertEquals(HorizonSeeder.Seeded(0, 0, 0, 0, 0), seeded)
     }
 
+    // ── The focus follows the subject ────────────────────────────────────────
+
+    private fun pinned(user: String) = runBlocking { structure.getFocus(user) }.filter { it.mode == FocusMode.PINNED }.map { it.targetUid }
+
+    @Test
+    fun `while a project is pinned, a message about one other project moves the pin there`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        val garden = structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structure.createItem(user, 0, ItemKind.TASK, "Book the conference room", projectUid = demo.uid)
+        structure.createItem(user, 0, ItemKind.TASK, "Choose the plants", projectUid = garden.uid)
+        structure.setFocus(user, 2, demo.uid, FocusMode.PINNED)
+        assertTrue(horizon(user).items.any { it.text.text == "Book the conference room" })
+
+        val seeded = seeder().seedTurn(user, 5, "How is the garden redesign going?", emptyList())
+
+        assertEquals(HorizonSeeder.FocusMove("Meridian demo", garden.uid, "Garden redesign"), seeded.focusMove)
+        assertEquals(listOf(garden.uid), pinned(user), "one pin, now on the garden")
+        val h = horizon(user)
+        assertTrue(h.items.any { it.text.text == "Choose the plants" && it.surfacing is SurfacingReason.InFocus })
+        assertTrue(h.items.none { it.text.text == "Book the conference room" }, "the old project recedes, nothing is deleted")
+        assertEquals("Meridian demo", structure.listContainers(user).first { it.uid == demo.uid }.name)
+    }
+
+    @Test
+    fun `it does not move when nothing is pinned, or the message names several projects or the pinned one`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        val garden = structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")!!
+
+        assertNull(seeder().seedTurn(user, 5, "How is the garden redesign going?", emptyList()).focusMove, "a first pin is the user's to make")
+        assertTrue(pinned(user).isEmpty())
+
+        structure.setFocus(user, 6, demo.uid, FocusMode.PINNED)
+        assertNull(seeder().seedTurn(user, 7, "Compare the garden redesign with the meridian demo.", emptyList()).focusMove, "names the pinned one too")
+        assertNull(seeder().seedTurn(user, 8, "What is the weather like?", emptyList()).focusMove, "a change of subject to something that is not a project leaves it")
+        assertEquals(listOf(demo.uid), pinned(user))
+        assertNotNull(garden)
+    }
+
+    @Test
+    fun `an instruction the interpretation model just acted on wins, and a pin on a single item is left alone`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        val garden = structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        val other = structure.createContainer(user, 1, ContainerKind.PROJECT, "Kitchen remodel")!!
+        val task = structure.createItem(user, 1, ItemKind.TASK, "Choose the plants", projectUid = garden.uid)!!
+        structure.setFocus(user, 2, demo.uid, FocusMode.PINNED)
+
+        // The model set the focus itself this turn (to the kitchen), in a message that also names the garden.
+        structure.setFocus(user, 3, other.uid, FocusMode.PINNED)
+        val explicit = seeder().seedTurn(user, 5, "Let's do the kitchen remodel, after the garden redesign", listOf(AppliedOperation(SetFocus(other.uid, "Let's do the kitchen remodel"), true, "Focus set")))
+        assertNull(explicit.focusMove)
+        assertEquals(listOf(other.uid), pinned(user))
+
+        structure.setFocus(user, 6, task.uid, FocusMode.PINNED)
+        assertNull(seeder().seedTurn(user, 7, "What about the meridian demo?", emptyList()).focusMove, "focus on one item is the user's close look, not a project to leave")
+        assertEquals(listOf(task.uid), pinned(user))
+    }
+
+    @Test
+    fun `a long silence changes nothing about the focus, and the first message after it can still move it`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        val garden = structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structure.setFocus(user, 2, demo.uid, FocusMode.PINNED)
+        structure.touchLastActive(user, now - 30 * day)
+
+        seeder().checkSilence(user, 5, "req-back")
+        assertEquals(listOf(demo.uid), pinned(user), "no reset for having been away")
+
+        assertNotNull(seeder().seedTurn(user, 5, "Good morning, how is the garden redesign?", emptyList()).focusMove)
+        assertEquals(listOf(garden.uid), pinned(user))
+    }
+
+    @Test
+    fun `recording something already on the list nudges that item`() = runBlocking {
+        val user = newUser()
+        val existing = structure.createItem(user, 1, ItemKind.TASK, "Book the conference room")!!
+
+        val seeded = seeder().seedTurn(
+            user, 5, "Okay.",
+            listOf(AppliedOperation(RecordItem(ItemKind.TASK, "I'll do the booking tomorrow"), true, "Already on the list", existingUid = existing.uid)),
+        )
+
+        assertEquals(1, seeded.touched)
+        assertEquals(setOf(existing.uid), nudged(user).keys)
+    }
+
+    // ── Recall: a question about something they said is a mention like any other ──
+
+    @Test
+    fun `a question about something said long ago finds it, however much has been said since`() = runBlocking {
+        val user = newUser()
+        val old = structure.createItem(user, 1, ItemKind.FACT, "My cat Biscuit hates the vet")!!
+        repeat(250) { structure.createItem(user, 2, ItemKind.FACT, "Unrelated remark number $it about the weather") }
+
+        val seeded = seeder().seedTurn(user, 300, "How is Biscuit doing these days?", emptyList())
+
+        assertEquals(1, seeded.mentionedItems)
+        assertTrue(nudged(user).containsKey(old.uid))
+        val recalled = horizon(user, 300).items.firstOrNull { it.text.text == old.text }
+        assertNotNull(recalled, "the old fact is in view for the reply, from the mention alone")
+        assertTrue(recalled!!.surfacing is SurfacingReason.Activated)
+
+        // What used to bound this: matching against only the 200 most recent items misses it. It is a policy knob, not a constant.
+        val narrow = seeder(HorizonPolicy(mentionScanItems = 200)).seedTurn(user, 301, "How is Biscuit doing these days?", emptyList())
+        assertEquals(0, narrow.mentionedItems)
+    }
+
+    @Test
+    fun `a question about something Hermes reported long ago finds it, and it comes back framed as self-reported`() = runBlocking {
+        val user = newUser()
+        val ingest = ActorEventIngestionService(ArcadeCycleSequencer(dbManager.getDatabase()), graph, NoOpHorizonPropagator())
+        val committed = ingest.ingest(
+            user, "evt-release", ActorEventKind.ToolResult("Cut a known-good v0.2 release candidate", toolName = "release", toolSucceeded = true), "hermes",
+        ) as ActorEventIngestOutcome.Committed
+        val later = 500L
+
+        val seeded = seeder().seedTurn(user, later, "How did the release candidate go?", emptyList())
+
+        assertEquals(1, seeded.mentionedItems)
+        val h = horizon(user, later)
+        val item = h.items.firstOrNull { it.sourceRefs.first().phraseUid == committed.phraseUid }
+        assertNotNull(item, "a report Hermes made is recalled like anything else the user's own Sources hold")
+        assertEquals(ProvenanceKind.ACTOR_TOOL_RESULT, item!!.provenance)
+        val rendered = HorizonItemsRenderer.render(h).first { it.renderedLine.contains("known-good") }
+        assertTrue(rendered.renderedLine.contains("self-reported, not independently verified"), rendered.renderedLine)
+        assertEquals("Reported from outside this conversation", rendered.group)
+    }
+
+    @Test
+    fun `the seeded result names each nudge, where it came from and what it is on`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Demo")!!
+        val note = structure.createItem(user, 1, ItemKind.FACT, "Firewall rules block the demo box")!!
+        val task = structure.createItem(user, 1, ItemKind.TASK, "Send the invoice")!!
+
+        val seeded = seeder().seedTurn(
+            user, 5, "Is the firewall on the demo box sorted?",
+            listOf(AppliedOperation(ResolveItem(task.uid, "sent"), true, "Marked done")),
+        )
+
+        val bySource = seeded.nudges.associateBy { it.source }
+        assertEquals(setOf("touched", "container", "text"), bySource.keys)
+        assertEquals(task.uid, bySource.getValue("touched").uid)
+        assertEquals("Marked done", bySource.getValue("touched").label)
+        assertEquals(demo.uid, bySource.getValue("container").uid)
+        assertEquals("Demo", bySource.getValue("container").label)
+        assertEquals(note.uid, bySource.getValue("text").uid)
+        assertEquals(note.text, bySource.getValue("text").label)
+        assertTrue(bySource.getValue("text").weight in 0.34..1.0)
+    }
+
     @Test
     fun `one user's mention never nudges another user's things, even through a shared entity`() = runBlocking {
         val a = newUser()

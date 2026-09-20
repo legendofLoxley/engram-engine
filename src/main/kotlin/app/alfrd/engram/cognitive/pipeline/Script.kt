@@ -2,11 +2,7 @@ package app.alfrd.engram.cognitive.pipeline
 
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicConfidenceService
 import app.alfrd.engram.cognitive.pipeline.confidence.TopicResolver
-import app.alfrd.engram.cognitive.pipeline.horizon.ACTOR_INTERPRETATION_SOURCE_TYPE
-import app.alfrd.engram.cognitive.pipeline.horizon.ACTOR_OBSERVATION_SOURCE_TYPE
-import app.alfrd.engram.cognitive.pipeline.horizon.ACTOR_TOOL_RESULT_SOURCE_TYPE
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
-import app.alfrd.engram.cognitive.pipeline.memory.ScoredPhrase
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionQuery
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionResult
 import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
@@ -16,11 +12,10 @@ import app.alfrd.engram.cognitive.pipeline.selection.ResponseSelectionService
  * routing or the actor. [coverage] is a 0..1 scalar combining three signals already
  * produced by the retrieval it describes:
  *  - [activationMass]: how strongly retrieval activated (composite score for a phrase-pool
- *    pick; mean trust score for memory-query hits; a fixed value for a correction write).
+ *    pick; a fixed value for a correction write).
  *  - [playFired]: whether the retrieval pass produced any usable grounding material.
  *  - [conceptResolutionRatio]: fraction of the referenced concepts that resolved — template
- *    interpolation keys for a phrase-pool pick, phrases-returned/requested for a memory
- *    query, whether an existing phrase was found for a correction.
+ *    interpolation keys for a phrase-pool pick, whether an existing phrase was found for a correction.
  * [gaps] lists human-readable reasons for any shortfall; empty when coverage is full.
  */
 data class RetrievalCoverage(
@@ -61,6 +56,11 @@ data class RetrievalCoverage(
  *
  * Turns a director's [RetrievalIntent] into grounding material for the [Actor]. Branches
  * describe *what* to fetch; this stage does the fetching (and, for corrections, the writing).
+ *
+ * Recalling what the user has told Alfrd is deliberately not one of the things fetched here: that
+ * is the Context Horizon's job (a message that mentions something makes it a fading nudge, and the
+ * selector puts it in view), so there is exactly one path by which remembered material reaches the
+ * reply. A second, keyword-based lookup used to live here and is gone.
  */
 class Script(
     private val engramClient: EngramClient,
@@ -92,7 +92,6 @@ class Script(
             RetrievedScript()
         }
         is RetrievalIntent.PhrasePool -> runPhrasePool(ctx, intent)
-        is RetrievalIntent.MemoryQuery -> runMemoryQuery(ctx, intent)
         is RetrievalIntent.Correction -> runCorrection(ctx, intent)
     }
 
@@ -158,69 +157,6 @@ class Script(
             activationMass = result.compositeScore, playFired = true,
             conceptResolutionRatio = resolutionRatio, gaps = gaps,
         )
-    }
-
-    // ── Memory graph ─────────────────────────────────────────────────────────
-
-    private suspend fun runMemoryQuery(ctx: CognitiveContext, intent: RetrievalIntent.MemoryQuery): RetrievedScript {
-        val phrases = try {
-            engramClient.queryPhrases(ctx.userEmail, intent.hint, limit = intent.limit)
-        } catch (_: Exception) {
-            ctx.retrievalCoverage = RetrievalCoverage.of(
-                activationMass = 0.0, playFired = false, conceptResolutionRatio = 0.0,
-                gaps = listOf("memory query threw for hint '${intent.hint}'"),
-            )
-            emptyList()
-        }
-        if (phrases.isEmpty()) {
-            if (ctx.retrievalCoverage == null) {
-                ctx.retrievalCoverage = RetrievalCoverage.of(
-                    activationMass = 0.0, playFired = false, conceptResolutionRatio = 0.0,
-                    gaps = listOf("memory query returned no phrases for hint '${intent.hint}'"),
-                )
-            }
-            return RetrievedScript(label = "memory")
-        }
-
-        val lines = phrases.take(5).map { phrase -> renderMemoryQueryLine(phrase) }
-        val activationMass = phrases.map { it.scores["trust"] ?: 0.5 }.average()
-        val resolutionRatio = phrases.size.toDouble() / intent.limit
-        val gaps = if (resolutionRatio < 1.0) {
-            listOf("resolved ${phrases.size}/${intent.limit} concepts for hint '${intent.hint}'")
-        } else {
-            emptyList()
-        }
-        ctx.retrievalCoverage = RetrievalCoverage.of(
-            activationMass = activationMass, playFired = true,
-            conceptResolutionRatio = resolutionRatio, gaps = gaps,
-        )
-        return RetrievedScript(lines = lines, label = "memory")
-    }
-
-    /**
-     * A plain user-conversation phrase renders with its confidence percentage, unchanged from
-     * before this correction. An Actor-attributed phrase (a source reused by
-     * [app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService] — a tool result, an
-     * observation, or an interpretation) gets the SAME qualitative framing
-     * [app.alfrd.engram.cognitive.pipeline.Actor]'s own [HorizonItemsRenderer] already gives these
-     * exact provenance kinds, never a bare `[source: actor_tool_result, confidence: 50%]` tag —
-     * that generic form is exactly the "unframed duplicate material" a memory-recall query could
-     * otherwise hand the actor with no hint that it is Hermes's own self-report, not the user's own
-     * words. [queryPhrases] itself is untouched: every trusted source is still queried and returned
-     * exactly as before — this only changes how one already-returned phrase is worded.
-     */
-    private fun renderMemoryQueryLine(phrase: ScoredPhrase): String {
-        val sourceType = phrase.sourceTypes.firstOrNull() ?: "unknown"
-        val tag = when (sourceType) {
-            ACTOR_TOOL_RESULT_SOURCE_TYPE -> "Actor tool result — self-reported, not independently verified"
-            ACTOR_OBSERVATION_SOURCE_TYPE -> "Actor observation"
-            ACTOR_INTERPRETATION_SOURCE_TYPE -> "Actor interpretation"
-            else -> {
-                val confidence = "%.0f".format((phrase.scores["trust"] ?: 0.5) * 100)
-                "source: $sourceType, confidence: $confidence%"
-            }
-        }
-        return "${phrase.text} [$tag]"
     }
 
     // ── Correction ───────────────────────────────────────────────────────────

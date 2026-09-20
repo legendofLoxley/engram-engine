@@ -183,6 +183,13 @@ internal class HorizonSelector(
             }
         }
 
+        // ── Still open, and in no project ────────────────────────────────────
+        // An open task or question that belongs to no project has no container to be out of view with, so it
+        // keeps a modest place of its own. One filed under a project is in view exactly when its project is.
+        val openUnfiled = openUnfiledItems(userEmail, freshUids.toSet())
+        truncated = truncated || openUnfiled.truncated
+        for (uid in openUnfiled.uids) addItem(uid, "baseline", policy.unfiledOpenActivation, "still open", 0)
+
         // ── Combine ──────────────────────────────────────────────────────────
         val activations = LinkedHashMap<String, ItemActivation>()
         for (uid in itemUids) {
@@ -315,6 +322,35 @@ internal class HorizonSelector(
         scan("Event", "open", policy.eventUrgencyHalfDays, true, "occursAt")
         scan("Project", "active", policy.projectUrgencyHalfDays, false, "dueAt")
         return DatedScan(found.values.toList(), truncated)
+    }
+
+    private data class OpenScan(val uids: List<String>, val truncated: Boolean)
+
+    /**
+     * The user's open tasks and questions that are filed under no project, most recently changed first, at most
+     * [HorizonPolicy.openBaselineItems]. Found by the owner-scoped `(ownerEmail, status)` index and ordered here,
+     * not by the database (an ORDER BY over that index range has returned duplicates and gaps). [fresh] items are
+     * left out: what was just said is already counted as just said.
+     */
+    private fun openUnfiledItems(userEmail: String, fresh: Set<String>): OpenScan {
+        val found = LinkedHashMap<String, Long>()
+        var truncated = false
+        for (type in listOf("Task", "Question")) {
+            var rows = 0
+            db.query("sql", "SELECT FROM $type WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.urgencyScanLimit}", mapOf("e" to userEmail)).use { rs ->
+                while (rs.hasNext()) {
+                    rows++
+                    val vertex = rs.next().toElement().asVertex()
+                    val uid = vertex.get("uid") as? String ?: continue
+                    if (uid in fresh) continue
+                    if (vertex.getVertices(Vertex.DIRECTION.OUT, "PART_OF").any { it.ownedBy(userEmail) }) continue
+                    found[uid] = (vertex.get("updatedAt") as? Number)?.toLong() ?: 0L
+                }
+            }
+            if (rows >= policy.urgencyScanLimit) truncated = true
+        }
+        val newestFirst = found.entries.sortedByDescending { it.value }.map { it.key }
+        return OpenScan(newestFirst.take(policy.openBaselineItems), truncated || newestFirst.size > policy.openBaselineItems)
     }
 
     // ── Attention ────────────────────────────────────────────────────────────

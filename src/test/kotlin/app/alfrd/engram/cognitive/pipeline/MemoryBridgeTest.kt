@@ -25,33 +25,28 @@ class MemoryBridgeIntegrationTest {
     // ── Question branch with graph context ────────────────────────────────────
 
     @Test
-    fun `question with graph context injects phrase context into LLM prompt`() = runTest {
-        val engram = InMemoryEngramClient()
-        engram.ingest(
-            listOf(
-                PhraseCandidate("I am a Kotlin developer", "user", PhraseCategory.IDENTITY),
-                PhraseCandidate("I work at a fintech startup", "user", PhraseCategory.CONTEXT),
-            )
-        )
-
+    fun `a question turn runs no keyword lookup of its own, recall is the Horizon's job`() = runTest {
+        var lookups = 0
+        val counting = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient by InMemoryEngramClient() {
+            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
+                lookups++
+                return emptyList()
+            }
+        }
         var capturedPrompt: LlmRequest? = null
         val llm = TestLlmClient { req ->
             capturedPrompt = req
-            LlmResponse(text = "You're a Kotlin developer.", latencyMs = 0, retryCount = 0)
+            LlmResponse(text = "I don't have that noted.", latencyMs = 0, retryCount = 0)
         }
-        val pipeline = CognitivePipeline(engramClient = engram, llmClient = llm)
+        val pipeline = CognitivePipeline(engramClient = counting, llmClient = llm)
 
         pipeline.process("What languages do I work with?", "s1", "user-1")
 
-        assertNotNull(capturedPrompt, "LLM should have been called")
+        assertEquals(0, lookups, "a question must not trigger a second retrieval path")
+        assertNotNull(capturedPrompt, "the model is still asked")
         assertTrue(
-            capturedPrompt!!.systemPrompt?.contains("Kotlin") == true ||
-                capturedPrompt!!.systemPrompt?.contains("fintech") == true,
-            "Expected phrase context injected into system prompt, got: ${capturedPrompt!!.systemPrompt}",
-        )
-        assertTrue(
-            capturedPrompt!!.systemPrompt?.contains("source:") == true,
-            "Expected source attribution in system prompt, got: ${capturedPrompt!!.systemPrompt}",
+            capturedPrompt!!.systemPrompt!!.contains("say plainly that you don't have it noted rather than guessing"),
+            "with nothing in view the reply is told to be honest about it, not to guess about their life",
         )
     }
 
@@ -95,79 +90,6 @@ class MemoryBridgeIntegrationTest {
             Actor.DEGRADED_TEXT, response,
             "LLM failure must surface the single centralized degraded message, not a per-branch string",
         )
-    }
-
-    @Test
-    fun `pipeline propagates JWT userId as userEmail to queryPhrases`() = runTest {
-        var capturedEmail: String? = null
-        val trackingEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
-            override suspend fun decompose(text: String, context: List<String>) = emptyList<PhraseCandidate>()
-            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = emptyList<String>()
-            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
-                capturedEmail = userEmail
-                return emptyList()
-            }
-            override suspend fun getScaffoldState(userId: String) = ScaffoldState()
-            override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = Unit
-            override suspend fun amendPhrase(phraseId: String, newContent: String) = Unit
-            override suspend fun getTopicConfidence(userEmail: String, topic: String) =
-                app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence(topic = topic)
-            override suspend fun updateTopicConfidence(
-                userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
-            ) = Unit
-            override suspend fun appendEpisodicTurn(
-                sessionId: String, userId: String, turnIndex: Int, userUtterance: String, alfrdResponse: String,
-            ) = Unit
-            override suspend fun getEpisodicLog(
-                userId: String, sinceMillis: Long?, untilMillis: Long?, keyword: String?, limit: Int,
-            ) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.EpisodicTurn>()
-        }
-        val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
-        val pipeline = CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
-
-        pipeline.process("What do I work on?", "s1", "alice@example.com")
-
-        assertEquals(
-            "alice@example.com", capturedEmail,
-            "Pipeline must pass the userId (JWT email) as userEmail to queryPhrases"
-        )
-    }
-
-    @Test
-    fun `queryPhrases receives different emails for different users`() = runTest {
-        val capturedEmails = mutableListOf<String>()
-        val trackingEngram = object : app.alfrd.engram.cognitive.pipeline.memory.EngramClient {
-            override suspend fun decompose(text: String, context: List<String>) = emptyList<PhraseCandidate>()
-            override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String) = emptyList<String>()
-            override suspend fun queryPhrases(userEmail: String, concept: String?, limit: Int): List<ScoredPhrase> {
-                capturedEmails.add(userEmail)
-                return emptyList()
-            }
-            override suspend fun getScaffoldState(userId: String) = ScaffoldState()
-            override suspend fun updateScaffoldState(userId: String, state: ScaffoldState) = Unit
-            override suspend fun amendPhrase(phraseId: String, newContent: String) = Unit
-            override suspend fun getTopicConfidence(userEmail: String, topic: String) =
-                app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence(topic = topic)
-            override suspend fun updateTopicConfidence(
-                userEmail: String, topic: String, confidence: app.alfrd.engram.cognitive.pipeline.memory.TopicConfidence,
-            ) = Unit
-            override suspend fun appendEpisodicTurn(
-                sessionId: String, userId: String, turnIndex: Int, userUtterance: String, alfrdResponse: String,
-            ) = Unit
-            override suspend fun getEpisodicLog(
-                userId: String, sinceMillis: Long?, untilMillis: Long?, keyword: String?, limit: Int,
-            ) = emptyList<app.alfrd.engram.cognitive.pipeline.memory.EpisodicTurn>()
-        }
-        val llm = TestLlmClient { LlmResponse(text = "Answer.", latencyMs = 0, retryCount = 0) }
-
-        CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
-            .process("What do I work on?", "s1", "alice@example.com")
-        CognitivePipeline(engramClient = trackingEngram, llmClient = llm)
-            .process("What do I work on?", "s2", "bob@example.com")
-
-        assertTrue(capturedEmails.contains("alice@example.com"), "alice's email must reach queryPhrases")
-        assertTrue(capturedEmails.contains("bob@example.com"), "bob's email must reach queryPhrases")
-        assertNotEquals(capturedEmails[0], capturedEmails[1], "Different users must produce different emails")
     }
 
     // ── Recall-question routing ───────────────────────────────────────────────

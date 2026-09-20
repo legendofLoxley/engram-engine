@@ -562,13 +562,55 @@ class HorizonScenarioTest {
         assertTrue(h.moreCandidatesAvailable || h.items.size <= 12, "the cap is reported, never silently lost")
     }
 
+    // ── Still open, in no project ────────────────────────────────────────────
+
     @Test
-    fun `a legacy phrase with no structure is untouched by all this`() {
-        // The old shape: a plain open phrase asserted from the user's own Source, with no container and no owner stamp.
+    fun `an open task in no project keeps a place of its own, and says why`() {
         val user = newUser()
-        val uid = task(user, "Get the plain thing done").uid
-        assertNotNull(uid)
-        assertNotNull(view(user).item("Get the plain thing done"))
+        val demo = project(user, "Demo")
+        task(user, "Call the plumber")
+        task(user, "Send the invoice", demo)
+
+        val h = view(user)
+
+        val plumber = h.item("Call the plumber")!!
+        assertEquals(AssertionStatus.OPEN, plumber.status)
+        assertTrue(plumber.surfacing is SurfacingReason.DormantOpen, plumber.surfacing.toString())
+        assertTrue(plumber.why.any { it.kind == "baseline" && it.detail == "still open" }, "the trace says why it is here: ${plumber.why}")
+        assertNull(h.item("Send the invoice"), "one filed under a project is in view exactly when its project is")
+
+        pin(user, demo.uid)
+        assertTrue(view(user).item("Send the invoice")!!.surfacing is SurfacingReason.InFocus)
+    }
+
+    @Test
+    fun `a finished task, another user's task and what was just said are not the baseline's business`() {
+        val user = newUser()
+        val other = newUser()
+        val done = task(user, "Renew the passport")
+        runBlocking { structure.resolve(user, 2, done.uid) }
+        task(other, "Someone else's open task")
+        task(user, "Just said this", cycle = 10)
+
+        val h = view(user, cycle = 10)
+
+        assertNull(h.item("Renew the passport"), "finished work leaves")
+        assertNull(h.item("Someone else's open task"))
+        val fresh = h.item("Just said this")!!
+        assertTrue(fresh.surfacing is SurfacingReason.JustAsserted, "what was just said is counted as just said")
+        assertTrue(fresh.why.none { it.kind == "baseline" })
+    }
+
+    @Test
+    fun `only the most recently changed open tasks are put forward, and the rest are reported as more`() {
+        val user = newUser()
+        val policy = HorizonPolicy(openBaselineItems = 3)
+        repeat(6) { i -> task(user, "Open task $i").also { Thread.sleep(3) } }
+
+        val h = view(user, policy = policy)
+
+        assertEquals(setOf("Open task 5", "Open task 4", "Open task 3"), h.texts().toSet(), "the newest three")
+        assertTrue(h.moreCandidatesAvailable, "and it says there were more than it looked at")
     }
 
     // ── Reports from outside the conversation ────────────────────────────────

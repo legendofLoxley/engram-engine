@@ -556,7 +556,7 @@ class HorizonCycleCoordinatorTest {
     }
 
     @Test
-    fun `a new request id for the same text is a genuinely new event, not deduplicated`() = runBlocking {
+    fun `a new request id for the same text is a genuinely new event, and the task it names is already on the list`() = runBlocking {
         val email = "coord-new-event-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
         val quote = "getting Alfrd running on Arx is a priority for me"
@@ -565,7 +565,87 @@ class HorizonCycleCoordinatorTest {
         val first = c.runCycle(email, requestId = "req-distinct-1", utterance = quote)
         val second = c.runCycle(email, requestId = "req-distinct-2", utterance = quote)
 
-        assertNotEquals(first.cycleSeq, second.cycleSeq, "a genuinely new requestId must allocate its own cycle")
-        assertEquals(2, assembled(second).items.count { it.status == AssertionStatus.OPEN }, "two distinct conversational events each produce their own OPEN task, even with identical text")
+        assertNotEquals(first.cycleSeq, second.cycleSeq, "a genuinely new requestId is processed as its own event, never mistaken for a retry")
+        val again = second.mutationOutcomes.filterIsInstance<MutationOutcome.Operation>().single().result
+        assertTrue(again.applied && again.summary.startsWith("Already on the list"), "the same open task said twice is one task: ${again.summary}")
+        assertEquals(1, assembled(second).items.count { it.status == AssertionStatus.OPEN }, "and there is still only the one")
+    }
+
+    // ── A message with a date that produced nothing gets one more look ────────
+
+    /** Answers the first look with [first] and the dated look with [second], counting both. */
+    private class TwoLookInterpreter(private val first: InterpretOutcome, private val second: InterpretOutcome) : Interpreter(null) {
+        var firstLooks = 0
+        var datedLooks = 0
+        override suspend fun interpret(utterance: String, snapshot: ViewSnapshot, now: ZonedDateTime): InterpretOutcome { firstLooks++; return first }
+        override suspend fun interpretDated(utterance: String, snapshot: ViewSnapshot, now: ZonedDateTime): InterpretOutcome { datedLooks++; return second }
+    }
+
+    private val birthdayEvent = RecordItem(ItemKind.EVENT, "My sister's birthday is on the 22nd", dueAt = System.currentTimeMillis() + 2 * 86_400_000L, about = listOf("sister"), title = "Sister's birthday")
+    private val foundBirthday = InterpretOutcome.Operations(listOf(birthdayEvent), emptyList(), 5)
+
+    @Test
+    fun `a dated statement the first look skipped is recorded by the second, like any other operation`() = runBlocking {
+        val email = "coord-dated-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val interpreter = TwoLookInterpreter(InterpretOutcome.NoOperation, foundBirthday)
+
+        val result = coordinator(interpreter).runCycle(email, "req-d1", "My sister's birthday is on the 22nd.")
+
+        assertEquals(1, interpreter.firstLooks)
+        assertEquals(1, interpreter.datedLooks)
+        assertEquals("recorded 1", result.datedBackstop)
+        assertTrue(result.mutationOutcomes.filterIsInstance<MutationOutcome.Operation>().single().result.applied)
+        assertTrue(assembled(result).items.any { it.text.text == "Sister's birthday" && it.dueAt != null && it.why.any { w -> w.kind == "urgency" } }, "it is a real dated item: in view, with its deadline counting toward it")
+        assertTrue(result.interpretOutcome is InterpretOutcome.Operations)
+    }
+
+    @Test
+    fun `the plan the second look made is checkpointed, so a retry replays it without asking the model again`() = runBlocking {
+        val email = "coord-dated-retry-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val interpreter = TwoLookInterpreter(InterpretOutcome.NoOperation, foundBirthday)
+        val c = coordinator(interpreter)
+        c.runCycle(email, "req-d2", "My sister's birthday is on the 22nd.")
+
+        c.runCycle(email, "req-d2", "My sister's birthday is on the 22nd.")
+
+        assertEquals(1, interpreter.firstLooks)
+        assertEquals(1, interpreter.datedLooks)
+        assertEquals(1, structureStore.listRecentItems(email, 10).count { it.text == "Sister's birthday" }, "the retry wrote nothing twice")
+    }
+
+    @Test
+    fun `no second look without a date, for a question, after operations, or when answering something Alfrd asked`() = runBlocking {
+        val email = "coord-dated-skip-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+
+        fun run(first: InterpretOutcome, utterance: String, pending: PendingInterpretation = PendingInterpretation.NONE): TwoLookInterpreter {
+            val interpreter = TwoLookInterpreter(first, foundBirthday)
+            runBlocking { coordinator(interpreter).runCycle(email, "req-${UUID.randomUUID()}", utterance, pending) }
+            return interpreter
+        }
+
+        assertEquals(0, run(InterpretOutcome.NoOperation, "My sister is lovely.").datedLooks, "no date")
+        assertEquals(0, run(InterpretOutcome.NoOperation, "Is her birthday on the 22nd?").datedLooks, "a question")
+        assertEquals(0, run(InterpretOutcome.Operations(listOf(RecordItem(ItemKind.FACT, "x")), emptyList(), 5), "Her birthday is on the 22nd").datedLooks, "the first look already produced operations")
+        assertEquals(0, run(InterpretOutcome.NoOperation, "Yes, by Friday", PendingInterpretation(emotionQuote = "I'm stressed")).datedLooks, "it answers a question Alfrd asked")
+        assertEquals(1, run(InterpretOutcome.NoOperation, "Her birthday is on the 22nd").datedLooks, "control: this one does get the second look")
+    }
+
+    @Test
+    fun `when the second look finds nothing, or fails, the turn goes on as if it had not run`() = runBlocking {
+        val email = "coord-dated-none-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+
+        val none = coordinator(TwoLookInterpreter(InterpretOutcome.NoOperation, InterpretOutcome.NoOperation)).runCycle(email, "req-n1", "I was born on the 3rd.")
+        assertEquals("nothing dated to record", none.datedBackstop)
+        assertTrue(none.mutationOutcomes.isEmpty())
+
+        val failed = coordinator(TwoLookInterpreter(InterpretOutcome.NoOperation, InterpretOutcome.LlmFailure("timeout"))).runCycle(email, "req-n2", "Party on the 3rd.")
+        assertEquals("failed: timeout", failed.datedBackstop)
+        assertTrue(failed.mutationOutcomes.isEmpty())
+        assertNotNull(failed.cycleSeq)
+        assertTrue(HorizonItemsRenderer.composeIntegrityCaveat(failed) == null, "nothing was claimed and nothing failed to write")
     }
 }
