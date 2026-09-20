@@ -67,8 +67,18 @@ data class HorizonPromptItem(val renderedLine: String, val essential: Boolean, v
 
 /** Pure functions turning graph-level Horizon/cycle results into what [Actor] renders — kept separate from [Actor] itself so its dependency on [app.alfrd.engram.cognitive.pipeline.horizon] types is contained to one small surface. */
 object HorizonItemsRenderer {
-    /** [ContextHorizon.items] is already priority-ordered (active reactivations, then just-asserted, then dormant open, per [app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler]) — preserved here, not re-sorted. */
-    fun render(horizon: ContextHorizon, zone: java.time.ZoneId = java.time.ZoneOffset.UTC): List<HorizonPromptItem> = horizon.items.map { item ->
+    /**
+     * [ContextHorizon.items] is already priority-ordered (active reactivations, then just-asserted, then dormant open, per [app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler]) — preserved here, not re-sorted.
+     * [alreadyRaised] holds the source uids of deadline items the reply has recently brought up with the user
+     * (see [urgentDeadlines]): each is still shown — it must stay answerable, and never droppable — but is
+     * told, in its own line, not to be raised again unprompted. Asking a model to notice from its own recent
+     * replies that it has already said something works only partly; saying it about the item works.
+     */
+    fun render(
+        horizon: ContextHorizon,
+        zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
+        alreadyRaised: Set<String> = emptySet(),
+    ): List<HorizonPromptItem> = horizon.items.map { item ->
         val surfacing = item.surfacing
         val essential = surfacing is SurfacingReason.ActiveReactivation || surfacing is SurfacingReason.JustAsserted ||
             surfacing is SurfacingReason.Pinned || surfacing is SurfacingReason.Urgent
@@ -87,7 +97,8 @@ object HorizonItemsRenderer {
             is SurfacingReason.Pinned -> "they asked you to keep this in front of them"
             is SurfacingReason.InFocus -> "part of what they are focused on"
             is SurfacingReason.Activated -> "connected to what they have been talking about (${surfacing.via})"
-            is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone)
+            is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone) +
+                if (item.sourceRefs.firstOrNull()?.phraseUid in alreadyRaised) ALREADY_RAISED_NOTE else ""
             is SurfacingReason.Peripheral -> "reported recently by the environment, independent of this conversation"
         }
         // A question Alfrd itself is waiting on: say so, so it is asked rather than assumed answered.
@@ -116,18 +127,38 @@ object HorizonItemsRenderer {
         return if (fromOutside) "Reported from outside this conversation" else "Not filed under any project"
     }
 
+    /** A deadline item in view: [uid] is its source phrase, [text] its words, [deadline] how the prompt words its closeness ("due in 2 days (2026-09-22)"). */
+    data class UrgentDeadline(val uid: String, val text: String, val deadline: String)
+
+    /** The deadline items in [horizon], as the prompt words them — what the pipeline tracks so a reminder is not repeated every turn. */
+    fun urgentDeadlines(horizon: ContextHorizon, zone: java.time.ZoneId = java.time.ZoneOffset.UTC): List<UrgentDeadline> =
+        horizon.items.mapNotNull { item ->
+            val reason = item.surfacing as? SurfacingReason.Urgent ?: return@mapNotNull null
+            val uid = item.sourceRefs.firstOrNull()?.phraseUid ?: return@mapNotNull null
+            UrgentDeadline(uid, item.text.text, describeDeadline(reason, horizon.asOf, zone))
+        }
+
+    private const val ALREADY_RAISED_NOTE =
+        " — you have already reminded them of this recently: do not bring it up again unless they ask, it comes up in what they are " +
+            "saying, or it is now due today or overdue"
+
     /**
      * Where the user is in their own picture, in a few lines: what they are focused on (and how closely),
      * and what else they have going, with how much is open in each — so the model knows the shape of their
      * life even where none of a project's items is in view, and can say "that's under your Garden project".
      * Also carries the one instruction about time-sensitive items, since it only matters when one is in
      * view: raise it when it bears on what they are saying or the first time it appears, not every turn.
-     * Null when there is no focus and no projects yet (nothing worth saying).
+     * Null when there is no focus, no projects and nothing time-sensitive (nothing worth saying).
      */
-    fun composeOrientation(horizon: ContextHorizon, zone: java.time.ZoneId = java.time.ZoneOffset.UTC): String? {
+    fun composeOrientation(
+        horizon: ContextHorizon,
+        zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
+        alreadyRaised: Set<String> = emptySet(),
+    ): String? {
         val focus = horizon.focus
         val others = horizon.containers.filter { it.uid != focus?.uid }.take(MAX_ORIENTATION_CONTAINERS)
-        if (focus == null && others.isEmpty()) return null
+        val timeSensitive = horizon.items.any { it.surfacing is SurfacingReason.Urgent && it.sourceRefs.firstOrNull()?.phraseUid !in alreadyRaised }
+        if (focus == null && others.isEmpty() && !timeSensitive) return null
         fun openWords(view: app.alfrd.engram.cognitive.pipeline.horizon.HorizonContainerView?): String {
             if (view == null) return ""
             val open = if (view.openItems == 0) "nothing open" else "${view.openItems} open"
@@ -143,13 +174,13 @@ object HorizonItemsRenderer {
             }
             val view = horizon.containers.firstOrNull { it.uid == focus.uid }
             lines += "Where they are right now: focused on the ${focus.kind} \"${focus.name}\"${openWords(view)} — $how."
-        } else {
+        } else if (others.isNotEmpty()) {
             lines += "Where they are right now: no particular focus — the broad view."
         }
         if (others.isNotEmpty()) {
             lines += "What else they have going: " + others.joinToString(", ") { "\"${it.name}\"${openWords(it)}" } + "."
         }
-        if (horizon.items.any { it.surfacing is SurfacingReason.Urgent }) {
+        if (timeSensitive) {
             lines += "Items marked with a deadline are time-sensitive: bring one up when it bears on what they are saying, or the first " +
                 "time it comes into view. If your recent replies already mentioned it, leave it out unless it is now due today or " +
                 "overdue, or they ask."

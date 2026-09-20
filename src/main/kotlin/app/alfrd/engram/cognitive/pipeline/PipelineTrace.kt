@@ -235,6 +235,8 @@ data class HorizonCycleTrace(
     var promptGroups: List<String> = emptyList(),
     /** The orientation lines that head the Horizon block (focus, zoom, what else they have going); null when there was nothing to say. */
     var orientation: String? = null,
+    /** Deadline items in view that the reply had already brought up recently, and so were told not to raise again unprompted. */
+    var quietDeadlines: List<String> = emptyList(),
     var promptBudgetOutcome: String? = null,
     var finalSystemPromptSent: String? = null,
     var finalUserPromptSent: String? = null,

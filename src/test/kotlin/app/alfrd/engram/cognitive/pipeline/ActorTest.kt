@@ -273,6 +273,41 @@ class ActorTest {
         assertTrue(withDeadline.contains("already mentioned it"), withDeadline)
     }
 
+    private fun deadlineItem(text: String, uid: String, dueAt: Long) =
+        selectedItem(text, SurfacingReason.Urgent(dueAt, overdue = false)).copy(sourceRefs = listOf(app.alfrd.engram.cognitive.pipeline.horizon.SourceRef(uid, "src", "conversation", 1L, 1L)))
+
+    @Test
+    fun `a deadline already raised is still shown and still undroppable, but told not to be raised again`() {
+        val horizon = horizonWith(0L, listOf(deadlineItem("Sister's birthday", "u1", 2 * dayMs), deadlineItem("Pay the invoice", "u2", 3 * dayMs)))
+
+        val rendered = HorizonItemsRenderer.render(horizon, alreadyRaised = setOf("u1"))
+
+        val raised = rendered.first { it.renderedLine.contains("Sister's birthday") }
+        val fresh = rendered.first { it.renderedLine.contains("Pay the invoice") }
+        assertTrue(raised.renderedLine.contains("due in 2 days") && raised.renderedLine.contains("already reminded them of this recently"), raised.renderedLine)
+        assertTrue(raised.essential, "it must stay answerable when they ask")
+        assertTrue(!fresh.renderedLine.contains("already reminded"), fresh.renderedLine)
+    }
+
+    @Test
+    fun `urgentDeadlines names each deadline item's source, words and closeness as the prompt words it`() {
+        val horizon = horizonWith(0L, listOf(deadlineItem("Sister's birthday", "u1", 2 * dayMs), filedItem("Book the room", demo)))
+
+        val urgent = HorizonItemsRenderer.urgentDeadlines(horizon)
+
+        assertEquals(listOf(HorizonItemsRenderer.UrgentDeadline("u1", "Sister's birthday", "due in 2 days (1970-01-03)")), urgent)
+    }
+
+    @Test
+    fun `the time-sensitive guidance is offered for a user with no projects and no focus, and dropped once every deadline was raised`() {
+        val horizon = horizonWith(0L, listOf(deadlineItem("Sister's birthday", "u1", 2 * dayMs)))
+
+        val fresh = HorizonItemsRenderer.composeOrientation(horizon)
+        assertNotNull(fresh, "a deadline in view is worth an orientation even with no projects")
+        assertTrue(fresh!!.contains("time-sensitive") && !fresh.contains("no particular focus"), fresh)
+        assertNull(HorizonItemsRenderer.composeOrientation(horizon, alreadyRaised = setOf("u1")), "nothing left to say once it has been raised")
+    }
+
     @Test
     fun `the orientation heads the Horizon block, and a user with projects but nothing in view still gets it`() = runBlocking {
         var receivedRequest: LlmRequest? = null

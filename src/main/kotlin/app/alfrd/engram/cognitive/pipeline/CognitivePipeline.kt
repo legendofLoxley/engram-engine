@@ -28,6 +28,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.CycleFollowUp
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
 import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
+import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
 import app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.EpisodicLogService
@@ -165,6 +166,15 @@ open class CognitivePipeline(
      */
     private val recentTurnsRestored = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /**
+     * Deadline items the reply has brought up, by source uid — what keeps a reminder from being repeated every
+     * turn. Held here rather than asked of the model because it can be checked: after each reply, an item counts
+     * as raised when the reply shares at least half of its distinctive words. In memory per pipeline, so a restart
+     * costs at most one repeat.
+     */
+    private data class RaisedMark(val turnIndex: Int, val deadline: String)
+    private val raisedDeadlines = java.util.concurrent.ConcurrentHashMap<String, RaisedMark>()
+
     /** How many of [recentTurns] were read back from the ledger rather than made in this session — for tracing. */
     @Volatile private var recentTurnsRestoredCount: Int = 0
 
@@ -222,6 +232,15 @@ open class CognitivePipeline(
 
         /** Per-entry text cap in [recentTurns] — see [recordTurn]. */
         private const val MAX_TURN_TEXT_LENGTH = 280
+
+        /**
+         * How many turns a deadline the reply has raised stays "already said" — provisional. It ends sooner
+         * when the wording of the deadline changes (tomorrow becoming today is news again).
+         */
+        private const val RAISED_DEADLINE_COOLDOWN_TURNS = 8
+
+        /** Bound on [raisedDeadlines], so a long session cannot grow it without limit. */
+        private const val MAX_RAISED_MARKS = 64
 
         /**
          * How far back the ledger is read to restore [recentTurns]. Provisional: long enough that a restart
@@ -749,8 +768,10 @@ open class CognitivePipeline(
         }
         val promptZone = sessionZoneId ?: java.time.ZoneId.systemDefault()
         val assembledHorizon = (horizonCycleResult?.assembleOutcome as? AssembleOutcome.Assembled)?.horizon
-        val horizonItems = assembledHorizon?.let { HorizonItemsRenderer.render(it, promptZone) } ?: emptyList()
-        val horizonFrame = assembledHorizon?.let { HorizonItemsRenderer.composeOrientation(it, promptZone) }
+        val urgentDeadlines = assembledHorizon?.let { HorizonItemsRenderer.urgentDeadlines(it, promptZone) } ?: emptyList()
+        val alreadyRaised = urgentDeadlines.filter { recentlyRaised(it, turnIndex) }.map { it.uid }.toSet()
+        val horizonItems = assembledHorizon?.let { HorizonItemsRenderer.render(it, promptZone, alreadyRaised) } ?: emptyList()
+        val horizonFrame = assembledHorizon?.let { HorizonItemsRenderer.composeOrientation(it, promptZone, alreadyRaised) }
         val integrityCaveat = HorizonItemsRenderer.composeIntegrityCaveat(horizonCycleResult)
         val persona = script.persona(ctx.modality)
         // Posture read as a natural-language directive — computed independent of which branch
@@ -899,6 +920,7 @@ open class CognitivePipeline(
             "conditioners=${conditioners.toString().replace('\n', ' ')}"
         )
         ctx.actorResult = actor.compose(ctx.utterance, retrievedScript, conditioners)
+        if (ctx.actorResult?.source == "llm") noteRaisedDeadlines(urgentDeadlines, ctx.actorResult?.text.orEmpty(), turnIndex)
 
         // ── Universal memory ingestion ────────────────────────────────────────
         // When horizonCycleCoordinator is wired, it already owns both ordinary-fact and
@@ -1006,6 +1028,7 @@ open class CognitivePipeline(
                     promptOmissions = promptDebug?.omissions ?: emptyList(),
                     promptGroups = promptDebug?.horizonItemsIncluded.orEmpty().groupBy { it.group ?: "(ungrouped)" }.map { (heading, items) -> "$heading (${items.size})" },
                     orientation = horizonFrame,
+                    quietDeadlines = urgentDeadlines.filter { it.uid in alreadyRaised }.map { it.text },
                     promptBudgetOutcome = promptDebug?.outcome,
                     finalSystemPromptSent = promptDebug?.finalSystemPrompt,
                     finalUserPromptSent = promptDebug?.finalUserPrompt,
@@ -1270,6 +1293,24 @@ open class CognitivePipeline(
         }
         turns.forEach { recordTurn(it.role, it.text) }
         recentTurnsRestoredCount = recentTurns.size
+    }
+
+    /** True while [deadline] was brought up within the last [RAISED_DEADLINE_COOLDOWN_TURNS] turns and is still worded the same way. */
+    private fun recentlyRaised(deadline: HorizonItemsRenderer.UrgentDeadline, turnIndex: Int): Boolean =
+        raisedDeadlines[deadline.uid]?.let { it.deadline == deadline.deadline && turnIndex - it.turnIndex <= RAISED_DEADLINE_COOLDOWN_TURNS } == true
+
+    /** Marks each deadline the just-composed [reply] brought up: one that shares at least half of its distinctive words with it. */
+    private fun noteRaisedDeadlines(urgent: List<HorizonItemsRenderer.UrgentDeadline>, reply: String, turnIndex: Int) {
+        if (urgent.isEmpty() || reply.isBlank()) return
+        val said = SalientTokenPropagator.salientTokens(reply)
+        for (deadline in urgent) {
+            val words = SalientTokenPropagator.salientTokens(deadline.text)
+            if (words.isEmpty() || (words intersect said).size < maxOf(1, (words.size + 1) / 2)) continue
+            raisedDeadlines[deadline.uid] = RaisedMark(turnIndex, deadline.deadline)
+        }
+        if (raisedDeadlines.size > MAX_RAISED_MARKS) {
+            raisedDeadlines.entries.sortedBy { it.value.turnIndex }.take(raisedDeadlines.size - MAX_RAISED_MARKS).forEach { raisedDeadlines.remove(it.key) }
+        }
     }
 
     /** Renders [recentTurns] for [Conditioners.recentTurns]; null when empty (fresh session). */

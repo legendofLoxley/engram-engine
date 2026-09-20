@@ -607,4 +607,65 @@ class ContextHorizonConversationalCycleTest {
         assertEquals("Activated", recall.trace.horizonCycle!!.horizonAfterPropagation.first { it.text.contains("firewall") }.surfacing)
         assertTrue(promptOf(recall.trace.horizonCycle!!).contains("Sort out the firewall rules"), "and it reaches the reply's prompt")
     }
+
+    // ── A reminder is raised, not repeated every turn ─────────────────────────
+
+    private val dayMs = 86_400_000L
+
+    /** A user whose only thing in view is one deadline, and a pipeline whose reply model says whatever [reply] holds at the time. */
+    private fun deadlineScenario(reply: () -> String): Triple<String, CognitivePipeline, String> = runBlocking {
+        val email = "raised-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val dinner = structureStore.createItem(email, 0, ItemKind.EVENT, "Sister's birthday dinner", dueAt = System.currentTimeMillis() + 2 * dayMs)!!
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) opsResponse() else LlmResponse(text = reply(), latencyMs = 5, retryCount = 0)
+        }
+        Triple(email, buildPipeline(llmClient), dinner.uid)
+    }
+
+    private fun quiet(turn: CognitivePipeline.DebugChatResult) = promptOf(turn.trace.horizonCycle!!).contains("already reminded them of this recently")
+
+    @Test
+    fun `a deadline the reply brought up is not raised again for a while, and comes back after that`() = runBlocking {
+        var reply = "Don't forget your sister's birthday dinner is in two days."
+        val (email, pipeline, _) = deadlineScenario { reply }
+
+        val first = pipeline.processForDebug("What should I cook tonight?", "s1", email, requestId = "req-1")
+        assertFalse(quiet(first), "the first time it is in view, it may be raised")
+        assertTrue(first.trace.horizonCycle!!.quietDeadlines.isEmpty())
+
+        reply = "Something simple, like pasta."
+        val second = pipeline.processForDebug("Any other ideas?", "s1", email, requestId = "req-2")
+        assertTrue(quiet(second), "the reply just mentioned it, so the next prompt says not to again")
+        assertEquals(listOf("Sister's birthday dinner"), second.trace.horizonCycle!!.quietDeadlines)
+        assertTrue(promptOf(second.trace.horizonCycle!!).contains("Sister's birthday dinner"), "still in the prompt, so it stays answerable")
+
+        // Quiet for the cooldown, then it may be raised once more.
+        var last = second
+        repeat(7) { i -> last = pipeline.processForDebug("Tell me more $i", "s1", email, requestId = "req-c$i") }
+        assertTrue(quiet(last), "still within the cooldown")
+        val after = pipeline.processForDebug("And after all that?", "s1", email, requestId = "req-after")
+        assertFalse(quiet(after), "the cooldown is over")
+    }
+
+    @Test
+    fun `a reply that did not mention the deadline does not silence it`() = runBlocking {
+        val (email, pipeline, _) = deadlineScenario { "Something simple, like pasta." }
+
+        pipeline.processForDebug("What should I cook tonight?", "s1", email, requestId = "req-1")
+        val second = pipeline.processForDebug("Any other ideas?", "s1", email, requestId = "req-2")
+
+        assertFalse(quiet(second), "it was never raised, so nothing says it was")
+    }
+
+    @Test
+    fun `a deadline that is now worded differently is news again, even inside the cooldown`() = runBlocking {
+        val (email, pipeline, dinnerUid) = deadlineScenario { "Don't forget your sister's birthday dinner." }
+        pipeline.processForDebug("What should I cook tonight?", "s1", email, requestId = "req-1")
+        assertTrue(quiet(pipeline.processForDebug("Any other ideas?", "s1", email, requestId = "req-2")))
+
+        structureStore.setDue(email, 50, dinnerUid, System.currentTimeMillis() + dayMs) // two days away became one
+
+        assertFalse(quiet(pipeline.processForDebug("Still thinking.", "s1", email, requestId = "req-3")), "'in 2 days' became 'tomorrow'")
+    }
 }
