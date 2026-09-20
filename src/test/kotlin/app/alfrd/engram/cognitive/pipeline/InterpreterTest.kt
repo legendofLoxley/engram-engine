@@ -98,6 +98,10 @@ class InterpreterTest {
         assertEquals(listOf("verb", "item", "attention", "quote"), required("set_attention"))
         assertEquals(listOf("verb", "quote"), required("hold_for_choice"))
         byVerb.values.forEach { assertEquals(JsonPrimitive(false), it["additionalProperties"], "no stray fields on any operation") }
+        val withTitle = byVerb.filterValues { (it["properties"] as JsonObject).containsKey("title") }.keys
+        assertEquals(setOf("record_item", "correct_item"), withTitle, "a title is offered where an item is created, and nowhere it can't apply")
+        assertTrue("title" !in required("record_item"), "a title is optional when recording")
+        assertTrue("title" in required("correct_item"), "but required on a correction, where the quote makes a poor label")
     }
 
     // ── How the answer is read ───────────────────────────────────────────────

@@ -152,6 +152,18 @@ class HorizonStructureStoreTest {
     }
 
     @Test
+    fun `sourceQuote is kept when the text is a label, and not stored when it would just repeat the text`() = runBlocking {
+        val user = newUser()
+        val labelled = store.createItem(user, 1, ItemKind.TASK, "Order the soil", sourceQuote = "I never got around to ordering the soil")!!
+        val plain = store.createItem(user, 1, ItemKind.TASK, "book the room", sourceQuote = "book the room")!!
+        val none = store.createItem(user, 1, ItemKind.FACT, "a fact")!!
+
+        assertEquals("I never got around to ordering the soil", store.getItem(user, labelled.uid)!!.sourceQuote)
+        assertNull(store.getItem(user, plain.uid)!!.sourceQuote)
+        assertNull(store.getItem(user, none.uid)!!.sourceQuote)
+    }
+
+    @Test
     fun `an item is stamped with the cycle it was created in and shares the conversational Source`() = runBlocking {
         val user = newUser()
         val a = store.createItem(user, 7, ItemKind.FACT, "First claim")!!

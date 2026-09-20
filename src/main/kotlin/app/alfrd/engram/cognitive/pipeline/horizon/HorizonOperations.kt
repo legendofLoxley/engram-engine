@@ -42,6 +42,8 @@ data class RecordItem(
     val about: List<String> = emptyList(),
     /** True when it clearly belongs to some project but the model couldn't tell which: saved unfiled, and the user is asked. */
     val askWhichProject: Boolean = false,
+    /** A short label for a task or event (see [OperationParser.acceptableTitle]); the item's text when present, with [quote] kept as its source. */
+    val title: String? = null,
 ) : HorizonOperation { override val verb get() = "record_item" }
 
 @Serializable
@@ -51,7 +53,7 @@ data class ResolveItem(val targetUid: String, override val quote: String) : Hori
 data class ReopenItem(val targetUid: String, override val quote: String) : HorizonOperation { override val verb get() = "reopen_item" }
 
 @Serializable
-data class CorrectItem(val targetUid: String, override val quote: String, val dueAt: Long? = null) : HorizonOperation { override val verb get() = "correct_item" }
+data class CorrectItem(val targetUid: String, override val quote: String, val dueAt: Long? = null, val title: String? = null) : HorizonOperation { override val verb get() = "correct_item" }
 
 @Serializable
 data class FileItem(val targetUid: String, val intoUid: String, override val quote: String = "") : HorizonOperation { override val verb get() = "file_item" }
@@ -203,6 +205,7 @@ object OperationParser {
     const val MAX_OPERATIONS = 8
     private const val MAX_ABOUT = 5
     private const val MAX_NAME_LENGTH = 80
+    private const val MAX_TITLE_LENGTH = 80
 
     private val NEGATION_REGEX = Regex(
         """\b(not|never|no longer|isn't|wasn't|don't|doesn't|didn't|won't|can't|cannot|haven't|hasn't|hadn't|without)\b|n't\b""",
@@ -291,6 +294,7 @@ object OperationParser {
                     RecordItem(
                         kind = kind,
                         quote = quote,
+                        title = if (kind == ItemKind.TASK || kind == ItemKind.EVENT) acceptableTitle(obj.str("title"), quote) else null,
                         projectUid = projectUid,
                         projectName = projectName,
                         dueAt = parseWhen(obj.str("due"), zone, endOfDayForDateOnly = kind != ItemKind.EVENT),
@@ -315,7 +319,8 @@ object OperationParser {
                 val ref = obj.str("item")
                 val item = snapshot.item(ref) ?: return One.Rejected("unknown_or_unsupported_ref")
                 if (quote.endsWith("?")) return One.Rejected("question_detected")
-                One.Ok(CorrectItem(item.uid, quote, parseWhen(obj.str("due"), zone, endOfDayForDateOnly = item.kind != ItemKind.EVENT)))
+                val title = if (item.kind == ItemKind.TASK || item.kind == ItemKind.EVENT) acceptableTitle(obj.str("title"), quote, item.text) else null
+                One.Ok(CorrectItem(item.uid, quote, parseWhen(obj.str("due"), zone, endOfDayForDateOnly = item.kind != ItemKind.EVENT), title))
             }
             "file_item" -> {
                 val childRef = obj.str("item")
@@ -367,6 +372,23 @@ object OperationParser {
             }
             else -> One.Rejected("unknown_verb")
         }
+    }
+
+    /**
+     * A label the model wrote for a task or event, if it can be trusted — otherwise null, and the item's
+     * text stays the user's own words. A label isn't verbatim by nature ("Order the soil" for "I never got
+     * around to ordering the soil"), so what is checked is that it isn't inventing: it must be short, and at
+     * least half of its content words (four letters or more) must come from what the user said, matching
+     * on the first four letters so "order" meets "ordering". [alsoFrom] adds text a correction may reuse
+     * (the item's old label). A label that fails is dropped, never repaired.
+     */
+    internal fun acceptableTitle(raw: String?, quote: String, vararg alsoFrom: String): String? {
+        val title = raw?.trim()?.trim('"', '\'')?.trim()?.takeIf { it.isNotBlank() && it.length <= MAX_TITLE_LENGTH && '\n' !in it } ?: return null
+        val content = title.split(Regex("[^A-Za-z0-9]+")).filter { it.length >= 4 }.map { it.lowercase().take(4) }
+        if (content.isEmpty()) return title
+        val known = (listOf(quote) + alsoFrom).flatMap { it.split(Regex("[^A-Za-z0-9]+")) }.filter { it.length >= 4 }.map { it.lowercase().take(4) }.toSet()
+        val matched = content.count { it in known }
+        return if (matched * 2 >= content.size) title else null
     }
 
     /** A task, event, question or project can be finished; a plain fact or a domain can't. */

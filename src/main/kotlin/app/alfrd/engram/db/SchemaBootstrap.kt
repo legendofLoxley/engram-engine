@@ -300,6 +300,10 @@ object SchemaBootstrap {
             // The user's explicit "keep this in front of me" / "stop bringing this up" — pinned |
             // suppressed, absent = normal. Persisted here; the selector (not built yet) is what acts on it.
             ensureProperty(schema, "Phrase",  "attention",           Type.STRING)
+            // The user's own words, kept when `text` is a short label the interpretation model wrote for a
+            // task or event ("Order the soil" for "I never got around to ordering the soil"). Absent when
+            // `text` already is the user's words.
+            ensureProperty(schema, "Phrase",  "sourceQuote",         Type.STRING)
             // Same properties as the ensureVertex blocks above, repeated so a database that already ran
             // an earlier revision of those blocks picks them up.
             ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)

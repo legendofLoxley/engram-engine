@@ -452,7 +452,7 @@ class ContextHorizonConversationalCycleTest {
                 when {
                     request.interpretedMessage.contains(feeling) -> opsResponse(op("hold_for_choice", "quote" to feeling))
                     request.prompt.contains("Pending: the user said") && request.interpretedMessage.contains("make a task") ->
-                        opsResponse(op("record_item", "kind" to "task", "quote" to feeling))
+                        opsResponse(op("record_item", "kind" to "task", "quote" to feeling, "title" to "Sort out the demo"))
                     else -> opsResponse()
                 }
             } else {
@@ -470,7 +470,8 @@ class ContextHorizonConversationalCycleTest {
         val turn2 = pipeline.processForDebug("yes, please make a task for that", "s1", email, requestId = "req-f2")
         assertTrue(seenSnapshots.last().contains("Pending: the user said \"$feeling\""), "the model reads turn 2 as the answer to the question")
         val saved = structureStore.listRecentItems(email, 10).single()
-        assertEquals(feeling, saved.text)
+        assertEquals("Sort out the demo", saved.text, "a task made from a feeling reads as a task, not as the feeling")
+        assertEquals(feeling, saved.sourceQuote, "and what they actually said is kept")
         assertEquals(ItemKind.TASK, saved.kind)
         assertTrue(turn2.trace.horizonCycle!!.mutationOutcomes.any { it.kind == "record_item" && it.applied })
 

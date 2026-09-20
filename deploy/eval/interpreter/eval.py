@@ -56,6 +56,17 @@ def call_model(url, shipped, snapshot_text, utterance):
     return calls, elapsed_ms
 
 
+def unrelated_call(url, n):
+    """A different chat completion, as the live pipeline makes between interpretations (the reply, comprehension).
+    It changes the server's prompt-cache state, which is enough to change a "deterministic" temperature-0 answer."""
+    body = {"model": "local", "max_tokens": 48,
+            "messages": [{"role": "system", "content": "You are a friendly assistant named Alfrd. Reply in one short sentence."},
+                         {"role": "user", "content": f"Say something brief and friendly about topic number {n}."}],
+            "chat_template_kwargs": {"enable_thinking": False}}
+    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=180).read()
+
+
 def guard(calls, utterance):
     """Emulates OperationParser refusing a resolve whose clause is negated or a question."""
     kept = []
@@ -92,6 +103,7 @@ def main():
     parser.add_argument("--sets", default="set1,set2,set3")
     parser.add_argument("--only", default="", help="substring of a case id")
     parser.add_argument("--verbose", action="store_true", help="print passing cases too")
+    parser.add_argument("--interleave", action="store_true", help="send an unrelated chat call before each case, as the live pipeline does; scores are lower and more realistic")
     ns = parser.parse_args()
 
     shipped = json.loads(Path(ns.shipped).read_text())
@@ -107,6 +119,8 @@ def main():
                 continue
             snapshot_text = placeholders.get(case["snapshot"], case["snapshot"])
             try:
+                if ns.interleave:
+                    unrelated_call(ns.url, len(latencies))
                 calls, ms = call_model(ns.url, shipped, snapshot_text, case["utterance"])
             except Exception as error:
                 calls, ms = [], 0

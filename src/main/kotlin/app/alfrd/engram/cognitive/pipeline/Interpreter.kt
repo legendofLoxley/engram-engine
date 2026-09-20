@@ -148,6 +148,7 @@ Operations (each is one entry in ops, chosen by "verb"):
 - set_attention: item, attention pinned|suppressed|normal - keep it up front / stop bringing it up.
 - link_items: item, other_item - the user says two existing items go together.
 - hold_for_choice: the user states a strong negative feeling (stressed, worried, panicking, sad, down, overwhelmed). Writes nothing yet. Not for greetings or excitement.
+For a task or event, add a short title when your quote reads badly as a list item ("I never got around to ordering the soil" -> title "Order the soil").
 Return ops: [] when the message needs nothing.
 
 Examples (each shows a message and the ops to return; refs here belong to an imaginary snapshot with c4 "Kitchen remodel", i7 task "Call the plumber" and i8 task "Buy paint"):
@@ -200,6 +201,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         put("description", "true when it clearly belongs to one of the projects but you cannot tell which.")
                     },
                     "due" to str("ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."),
+                    "title" to str("Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions."),
                     "about" to buildJsonObject {
                         put("type", "array")
                         putJsonObject("items") { put("type", "string") }
@@ -209,8 +211,16 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             },
             variant("resolve_item", listOf("item", "quote")) { mapOf("item" to str("Ref of a task, event, question or project."), "quote" to QUOTE) },
             variant("reopen_item", listOf("item", "quote")) { mapOf("item" to str("Ref of the item."), "quote" to QUOTE) },
-            variant("correct_item", listOf("item", "quote")) {
-                mapOf("item" to str("Ref of the item being corrected."), "quote" to QUOTE, "due" to str("New ISO date, if the correction changes the date."))
+            // title is required here (unlike record_item): asked to, the model wrote one only rarely, and a
+            // correction's quote ("Actually it's the 25th, not the 24th") is the worst text to keep as a label.
+            // The parser drops it again for a fact, so requiring it costs nothing there.
+            variant("correct_item", listOf("item", "quote", "title")) {
+                mapOf(
+                    "item" to str("Ref of the item being corrected."),
+                    "quote" to QUOTE,
+                    "due" to str("New ISO date, if the correction changes the date."),
+                    "title" to str("The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement."),
+                )
             },
             variant("file_item", listOf("item", "into", "quote")) {
                 mapOf("item" to str("Ref of the item or project to move."), "into" to str("c-ref of the destination project or domain."), "quote" to QUOTE)

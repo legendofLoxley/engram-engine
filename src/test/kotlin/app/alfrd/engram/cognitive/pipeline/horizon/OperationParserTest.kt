@@ -127,6 +127,50 @@ class OperationParserTest {
         assertEquals((1..5).map { "person $it" }, op.about)
     }
 
+    // ── Titles: a label is allowed, an invention is not ─────────────────────
+
+    @Test
+    fun `a title is kept for a task or event when its words come from what the user said`() {
+        val task = single("I never got around to ordering the soil.", op("record_item", "kind" to "task", "quote" to "I never got around to ordering the soil", "title" to "Order the soil")) as RecordItem
+        assertEquals("Order the soil", task.title)
+        assertEquals("I never got around to ordering the soil", task.quote, "the user's words stay on the operation as its source")
+        val event = single("I have lunch with Jordan tomorrow at noon.", op("record_item", "kind" to "event", "quote" to "I have lunch with Jordan tomorrow at noon", "title" to "Lunch with Jordan")) as RecordItem
+        assertEquals("Lunch with Jordan", event.title)
+    }
+
+    @Test
+    fun `a title may add a few new words as long as most of its content comes from the quote`() {
+        val held = "I'm really stressed about the firewall rules for the demo"
+        val op = single("yes, make a task", op("record_item", "kind" to "task", "quote" to held, "title" to "Sort out the firewall rules for the demo"), snapshot(pendingEmotionQuote = held)) as RecordItem
+        assertEquals("Sort out the firewall rules for the demo", op.title)
+    }
+
+    @Test
+    fun `a title that invents content is dropped, and the item keeps the user's words`() {
+        val invented = single("I need to send the invoice.", op("record_item", "kind" to "task", "quote" to "I need to send the invoice", "title" to "Call Sam about the contract renewal")) as RecordItem
+        assertNull(invented.title)
+        assertEquals("I need to send the invoice", invented.quote)
+    }
+
+    @Test
+    fun `titles are only for tasks and events, and are bounded`() {
+        assertNull((single("My sister is allergic to peanuts", op("record_item", "kind" to "fact", "quote" to "My sister is allergic to peanuts", "title" to "Sister allergy")) as RecordItem).title)
+        assertNull((single("Should I take the job?", op("record_item", "kind" to "question", "quote" to "Should I take the job?", "title" to "Take the job")) as RecordItem).title)
+        val long = "Send the invoice " + "now ".repeat(30)
+        assertNull((single("I need to send the invoice", op("record_item", "kind" to "task", "quote" to "I need to send the invoice", "title" to long)) as RecordItem).title, "too long")
+        assertNull((single("I need to send the invoice", op("record_item", "kind" to "task", "quote" to "I need to send the invoice", "title" to "Send\nthe invoice")) as RecordItem).title, "no line breaks")
+        assertNull((single("I need to send the invoice", op("record_item", "kind" to "task", "quote" to "I need to send the invoice", "title" to "   ")) as RecordItem).title)
+        assertEquals("Send the invoice", (single("I need to send the invoice", op("record_item", "kind" to "task", "quote" to "I need to send the invoice", "title" to "\"Send the invoice\"")) as RecordItem).title, "stray quote marks are trimmed")
+    }
+
+    @Test
+    fun `a correction's title may reuse the old item's own words`() {
+        val corrected = single("Actually it goes to Sam.", op("correct_item", "item" to "i1", "quote" to "it goes to Sam", "title" to "Send the invoice to Sam")) as CorrectItem
+        assertEquals("Send the invoice to Sam", corrected.title, "invoice comes from the item being corrected, Sam from the quote")
+        val forFact = single("Actually she is allergic to walnuts.", op("correct_item", "item" to "i3", "quote" to "she is allergic to walnuts", "title" to "Walnut allergy")) as CorrectItem
+        assertNull(forFact.title, "a fact's text stays the user's words")
+    }
+
     // ── Which project ────────────────────────────────────────────────────────
 
     @Test
@@ -373,8 +417,8 @@ class OperationParserTest {
     @Test
     fun `every operation survives the stored-plan round trip`() {
         val plan = listOf(
-            RecordItem(ItemKind.TASK, "send it", projectUid = "p", projectName = "n", dueAt = 5L, about = listOf("a"), askWhichProject = true),
-            ResolveItem("x", "done"), ReopenItem("x", "not done"), CorrectItem("x", "fixed", 9L), FileItem("x", "y", "move"),
+            RecordItem(ItemKind.TASK, "send it", projectUid = "p", projectName = "n", dueAt = 5L, about = listOf("a"), askWhichProject = true, title = "Send it"),
+            ResolveItem("x", "done"), ReopenItem("x", "not done"), CorrectItem("x", "fixed", 9L, title = "Fixed"), FileItem("x", "y", "move"),
             CreateContainer(ContainerKind.DOMAIN, "Home", namedByUser = false, parentUid = null, quote = "q"),
             SetFocus("x", "focus"), ReleaseFocus("out"), SetAttention("x", AttentionDirective.PINNED, "pin"), SetAttention("x", null, "normal"),
             LinkItems("x", "y", "together"), HoldForChoice("I feel it"),

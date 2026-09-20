@@ -30,16 +30,30 @@ Standard library only. `--url` points it at any OpenAI-compatible `/v1/chat/comp
 
 | | first run, before tuning on it | final shipped prompt |
 |---|---|---|
-| set1 | (developed on) | 40/41 |
-| set2 | 31/33 | 29/33 |
-| set3 | 28/32 | 33/33 (after tuning on it, so not independent) |
+| set1 | (developed on) | 39/41 |
+| set2 | 31/33 | 31/33 |
+| set3 | 28/32 | 32/33 (after tuning on it, so not independent) |
 
-Median latency about 1.3 s, p90 about 1.6 s, roughly 3.5k prompt tokens. Expect roughly 88-95% on
-turns the prompt was not tuned against, with misses that move from run to run.
+Total 102/107 (95%). Median latency about 1.3 s, p90 about 1.6 s, roughly 3.5k prompt tokens. With
+`--interleave` (an unrelated chat call before each case, as the live pipeline makes) the score is the same
+but the median is about 2 s, because the prompt cache is cold. Expect roughly 88-95% on turns the prompt
+was not tuned against.
 
-Two findings worth knowing when changing the prompt:
+**Known limitation: identical input can give different answers live.** In the harness, repeated runs of
+the same prompt return identical results. In the running pipeline, the same five turns at temperature 0
+produced different operations on two attempts (a stressed message was held once and missed once). It was
+not reproducible here, even with interleaved calls, so treat live accuracy as about 90% with run-to-run
+variation, and rely on the code-side guards and on the reply reporting what changed.
+
+Things worth knowing when changing the prompt:
 
 - A flat tool schema (every field optional but `verb` and `quote`) let the model emit a record with no
   `kind`, or spray unrelated fields onto a correction. One strict variant per verb fixed that.
 - Prose rules were a weak lever for date arithmetic ("the 24th" came back as October's, even with an
   explicit rule). Tagging each calendar row with its day number turned it into a lookup and fixed it.
+- The score moves by about 3 cases with almost any wording edit, and adding or removing an example
+  (especially one whose answer is `[]`) can flip simple cases to `[]`. Change one thing at a time, and
+  don't read a 1-3 case difference as a real improvement.
+- Asking for a `title` was optional and often ignored on corrections; making it required on
+  `correct_item` (where the quote is the worst possible label) is what made it reliable. It cost about
+  17 ms median.

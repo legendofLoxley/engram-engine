@@ -152,6 +152,7 @@ class SchemaBootstrapMigrationTest {
             assertTrue(schema.getType(name).instanceOf("Phrase"), "$name must extend Phrase")
             assertTrue(schema.getType(name).getPolymorphicProperty("text") != null, "$name must inherit Phrase.text")
             assertTrue(schema.getType(name).getPolymorphicProperty("opKey") != null, "$name must inherit Phrase.opKey")
+            assertTrue(schema.getType(name).getPolymorphicProperty("sourceQuote") != null, "$name must inherit Phrase.sourceQuote")
         }
         assertTrue(!schema.getType("Domain").instanceOf("Phrase") && !schema.getType("Project").instanceOf("Phrase"), "containers are not Phrases")
 

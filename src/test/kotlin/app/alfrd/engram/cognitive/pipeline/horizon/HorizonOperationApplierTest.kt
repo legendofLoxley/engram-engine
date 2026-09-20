@@ -93,6 +93,40 @@ class HorizonOperationApplierTest {
     }
 
     @Test
+    fun `a title becomes the item's text and the user's own words are kept as its source`() = runBlocking {
+        val user = newUser()
+
+        val result = apply(user, RecordItem(ItemKind.TASK, "I never got around to ordering the soil", title = "Order the soil")).single()
+
+        assertEquals("Order the soil", result.resultText, "propagation and the reply see the label")
+        assertEquals("Recorded task: \"Order the soil\"", result.summary)
+        val item = structure.getItem(user, result.resultUid!!)!!
+        assertEquals("Order the soil", item.text)
+        assertEquals("I never got around to ordering the soil", item.sourceQuote)
+    }
+
+    @Test
+    fun `without a title the text is the user's words and no separate source is stored`() = runBlocking {
+        val user = newUser()
+        val item = structure.getItem(user, apply(user, RecordItem(ItemKind.TASK, "book the room")).single().resultUid!!)!!
+        assertEquals("book the room", item.text)
+        assertNull(item.sourceQuote)
+    }
+
+    @Test
+    fun `a corrected item takes the correction's title and keeps the words that corrected it`() = runBlocking {
+        val user = newUser()
+        val old = structure.createItem(user, 1, ItemKind.EVENT, "Sister's birthday", dueAt = 1_000L)!!
+
+        val result = apply(user, CorrectItem(old.uid, "Actually the birthday is the 25th, not the 24th", dueAt = 2_000L, title = "Sister's birthday")).single()
+
+        val corrected = structure.getItem(user, result.resultUid!!)!!
+        assertEquals("Sister's birthday", corrected.text)
+        assertEquals("Actually the birthday is the 25th, not the 24th", corrected.sourceQuote)
+        assertEquals("Corrected \"Sister's birthday\" to \"Sister's birthday\"", result.summary)
+    }
+
+    @Test
     fun `a project created earlier in the same response can be filed under by name`() = runBlocking {
         val user = newUser()
         val results = apply(

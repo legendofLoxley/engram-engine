@@ -77,6 +77,8 @@ data class ItemRecord(
     /** Short names of the entities this item is tied to (its `ABOUT` links), e.g. "sister". */
     val about: List<String> = emptyList(),
     val attention: AttentionDirective? = null,
+    /** The user's own words, when [text] is a label written for a task or event rather than their words. */
+    val sourceQuote: String? = null,
 )
 
 data class FocusRecord(
@@ -147,6 +149,8 @@ interface HorizonStructureStore {
      * in the same transaction. [opKey], when given, makes the call idempotent: a second call with
      * the same key for the same user returns the item the first one created instead of a duplicate.
      * Null on an unknown user, blank text, or a [projectUid] that isn't one of the user's projects.
+     * [sourceQuote] is the user's own words when [text] is a label written for them — kept so nothing
+     * they said is lost behind a paraphrase.
      */
     suspend fun createItem(
         userEmail: String,
@@ -157,6 +161,7 @@ interface HorizonStructureStore {
         projectUid: String? = null,
         askedBy: String = "alfrd",
         opKey: String? = null,
+        sourceQuote: String? = null,
     ): ItemRecord?
 
     /**
@@ -293,6 +298,7 @@ class ArcadeHorizonStructureStore(
         projectUid: String?,
         askedBy: String,
         opKey: String?,
+        sourceQuote: String?,
     ): ItemRecord? {
         if (userEmail.isBlank() || text.isBlank()) return null
         return mutate("createItem", null) {
@@ -320,6 +326,7 @@ class ArcadeHorizonStructureStore(
                 set("createdAt", now)
                 set("updatedAt", now)
                 if (namespacedKey != null) set("opKey", namespacedKey)
+                if (!sourceQuote.isNullOrBlank() && sourceQuote.trim() != text.trim()) set("sourceQuote", sourceQuote.trim())
                 when (kind) {
                     ItemKind.TASK -> {
                         set("status", "open")
@@ -758,6 +765,7 @@ class ArcadeHorizonStructureStore(
             createdAt = (get("createdAt") as? Number)?.toLong() ?: 0L,
             about = getVertices(Vertex.DIRECTION.OUT, "ABOUT").mapNotNull { it.get("name") as? String },
             attention = attentionOf(),
+            sourceQuote = get("sourceQuote") as? String,
         )
     }
 

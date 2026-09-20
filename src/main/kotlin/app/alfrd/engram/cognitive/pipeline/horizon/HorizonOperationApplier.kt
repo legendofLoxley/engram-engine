@@ -142,7 +142,7 @@ class HorizonOperationApplier(
         is RecordItem -> {
             val projectUid = op.projectUid
                 ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
-            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey)
+            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
             if (record == null) {
                 AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
             } else {
@@ -201,7 +201,7 @@ class HorizonOperationApplier(
     private suspend fun applyCorrection(userEmail: String, cycleSeq: Long, opKey: String, op: CorrectItem): AppliedOperation {
         val old = structure.getItem(userEmail, op.targetUid)
             ?: return AppliedOperation(op, false, "Could not find the item to correct")
-        val created = structure.createItem(userEmail, cycleSeq, old.kind, op.quote, op.dueAt ?: old.dueAt, old.projectUid, askedBy = "user", opKey = opKey)
+        val created = structure.createItem(userEmail, cycleSeq, old.kind, op.title ?: op.quote, op.dueAt ?: old.dueAt, old.projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
             ?: return AppliedOperation(op, false, "Could not record the correction of \"${old.text}\"")
         old.about.forEach { structure.linkAbout(userEmail, cycleSeq, created.uid, it) }
         val linked = graph.markSuperseded(userEmail, cycleSeq, created.uid, old.uid)
