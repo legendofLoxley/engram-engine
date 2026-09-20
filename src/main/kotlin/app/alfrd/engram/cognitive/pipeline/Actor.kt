@@ -62,9 +62,10 @@ data class HorizonPromptItem(val renderedLine: String, val essential: Boolean)
 /** Pure functions turning graph-level Horizon/cycle results into what [Actor] renders — kept separate from [Actor] itself so its dependency on [app.alfrd.engram.cognitive.pipeline.horizon] types is contained to one small surface. */
 object HorizonItemsRenderer {
     /** [ContextHorizon.items] is already priority-ordered (active reactivations, then just-asserted, then dormant open, per [app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler]) — preserved here, not re-sorted. */
-    fun render(horizon: ContextHorizon): List<HorizonPromptItem> = horizon.items.map { item ->
+    fun render(horizon: ContextHorizon, zone: java.time.ZoneId = java.time.ZoneOffset.UTC): List<HorizonPromptItem> = horizon.items.map { item ->
         val surfacing = item.surfacing
-        val essential = surfacing is SurfacingReason.ActiveReactivation || surfacing is SurfacingReason.JustAsserted
+        val essential = surfacing is SurfacingReason.ActiveReactivation || surfacing is SurfacingReason.JustAsserted ||
+            surfacing is SurfacingReason.Pinned || surfacing is SurfacingReason.Urgent
         val framing = when (surfacing) {
             // Deliberately does NOT say "new evidence just made this relevant again": a live check
             // showed that phrasing let a reactivation triggered by a Hermes tool-result phrase read
@@ -77,14 +78,39 @@ object HorizonItemsRenderer {
             is SurfacingReason.JustAsserted -> "just noted"
             is SurfacingReason.RecentActorEvidence -> "reported recently, independent of this conversation"
             is SurfacingReason.DormantOpen -> "noted earlier, still open"
+            is SurfacingReason.Pinned -> "they asked you to keep this in front of them"
+            is SurfacingReason.InFocus -> "part of what they are focused on" + (surfacing.container?.let { " (\"$it\")" } ?: "")
+            is SurfacingReason.Activated -> "connected to what they have been talking about (${surfacing.via})"
+            is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone)
+            is SurfacingReason.Peripheral -> "reported recently by the environment, independent of this conversation"
         }
+        // A question Alfrd itself is waiting on: say so, so it is asked rather than assumed answered.
+        val askNote = if (item.kind == "question" && item.askedBy == "alfrd") " — a question you want to ask them; ask it naturally, and do not assume an answer" else ""
         val statusNote = item.status?.let { " [${it.name.lowercase()}]" } ?: ""
         // Provenance is orthogonal to WHY an item surfaced this cycle (framing, above) — an
         // observation/interpretation/tool-result distinction must survive regardless of which
         // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
         // `when (surfacing)` above.
         val provenanceNote = provenanceAnnotation(item.provenance, item.actorMetadata)?.let { " [$it]" } ?: ""
-        HorizonPromptItem(renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing", essential = essential)
+        HorizonPromptItem(renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$askNote", essential = essential)
+    }
+
+    /**
+     * "overdue by 2 days", "due today", "due in 3 days (2026-09-23)" — counted in calendar days in [zone]
+     * (the user's), not in 24-hour blocks: on the 20th at 3am, something due at midnight on the 22nd is
+     * two days away, not "tomorrow".
+     */
+    private fun describeDeadline(reason: SurfacingReason.Urgent, asOf: Long, zone: java.time.ZoneId): String {
+        val today = java.time.Instant.ofEpochMilli(asOf).atZone(zone).toLocalDate()
+        val due = java.time.Instant.ofEpochMilli(reason.dueAt).atZone(zone).toLocalDate()
+        val days = java.time.temporal.ChronoUnit.DAYS.between(today, due)
+        return when {
+            reason.overdue && days < 0 -> "overdue by ${-days} day${if (days == -1L) "" else "s"} ($due)"
+            reason.overdue -> "overdue"
+            days <= 0 -> "due today ($due)"
+            days == 1L -> "due tomorrow ($due)"
+            else -> "due in $days days ($due)"
+        }
     }
 
     /**

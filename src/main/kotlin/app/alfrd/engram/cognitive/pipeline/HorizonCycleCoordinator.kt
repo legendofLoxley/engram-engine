@@ -9,6 +9,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperation
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPropagator
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder
 import app.alfrd.engram.cognitive.pipeline.horizon.HoldForChoice
 import app.alfrd.engram.cognitive.pipeline.horizon.OperationPlanCodec
 import app.alfrd.engram.cognitive.pipeline.horizon.ProcessedRequestRecord
@@ -67,6 +68,10 @@ data class HorizonCycleResult(
     val followUp: CycleFollowUp? = null,
     /** The user's live projects at the time — for a "which project?" question. Empty when the cycle was resumed. */
     val projectNames: List<String> = emptyList(),
+    /** True when this turn opened the "what have you been up to?" question after a long silence. */
+    val silenceQuestionAsked: Boolean = false,
+    /** How many nudges this turn set, and from what — for tracing. Null when seeding didn't run or failed. */
+    val seeded: HorizonSeeder.Seeded? = null,
 ) {
     companion object {
         fun allocationFailed(): HorizonCycleResult = HorizonCycleResult(
@@ -110,6 +115,7 @@ open class HorizonCycleCoordinator(
     private val horizonAssembler: HorizonAssembler,
     private val viewSnapshotBuilder: ViewSnapshotBuilder,
     private val operationApplier: HorizonOperationApplier,
+    private val horizonSeeder: HorizonSeeder,
 ) {
 
     private val logger = LoggerFactory.getLogger(HorizonCycleCoordinator::class.java)
@@ -133,15 +139,25 @@ open class HorizonCycleCoordinator(
         requestLedger.find(userEmail, requestId)?.let { existing ->
             when (existing.checkpoint) {
                 "completed" -> return resultFromCompleted(userEmail, existing)
-                "writes_committed" -> return resumeFromWritesCommitted(userEmail, requestId, existing)
-                "ops_planned" -> resumeFromOpsPlanned(userEmail, requestId, existing)?.let { return it }
-                "facts_ingested" -> return resumeFromFactsIngested(userEmail, requestId, existing)
+                "writes_committed" -> return resumeFromWritesCommitted(userEmail, requestId, existing, utterance)
+                "ops_planned" -> resumeFromOpsPlanned(userEmail, requestId, existing, utterance)?.let { return it }
+                "facts_ingested" -> return resumeFromFactsIngested(userEmail, requestId, existing, utterance)
                 else -> { /* cycle_allocated-only, failed, or unrecognized — proceed fresh below */ }
             }
         }
 
         val cycleSeq = cycleSequencer.allocateCycle(userEmail) ?: return HorizonCycleResult.allocationFailed()
         requestLedger.checkpoint(userEmail, requestId, cycleSeq, "cycle_allocated")
+
+        // After a long silence, open a question about what they have been up to (and close the last one:
+        // this turn is the answer). Never fails the cycle; a retry of this same request neither asks twice nor
+        // closes what it opened.
+        val silenceAsked = try {
+            horizonSeeder.checkSilence(userEmail, cycleSeq, requestId).asked
+        } catch (e: Exception) {
+            logger.warn("runCycle: silence check failed for userEmail=$userEmail: ${e.message}")
+            false
+        }
 
         testInterpretationBarrier?.invoke()
         val snapshot = try {
@@ -156,14 +172,15 @@ open class HorizonCycleCoordinator(
         val interpretLatencyMs = System.currentTimeMillis() - interpretStartMs
 
         if (interpretOutcome is InterpretOutcome.LlmFailure) {
-            return fallbackCaptureFacts(userEmail, requestId, cycleSeq, utterance, interpretOutcome, interpretLatencyMs)
+            return fallbackCaptureFacts(userEmail, requestId, cycleSeq, utterance, interpretOutcome, interpretLatencyMs, silenceAsked)
         }
 
         val plan = (interpretOutcome as? InterpretOutcome.Operations)?.operations ?: emptyList()
         requestLedger.checkpoint(userEmail, requestId, cycleSeq, "ops_planned", opsPlan = OperationPlanCodec.encode(plan))
         return applyPropagateAssemble(
-            userEmail, requestId, cycleSeq, plan, interpretOutcome, interpretLatencyMs,
+            userEmail, requestId, cycleSeq, utterance, plan, interpretOutcome, interpretLatencyMs,
             projectNames = snapshot.containers.filter { it.kind == app.alfrd.engram.cognitive.pipeline.horizon.ContainerKind.PROJECT }.map { it.name },
+            silenceAsked = silenceAsked,
         )
     }
 
@@ -171,10 +188,12 @@ open class HorizonCycleCoordinator(
         userEmail: String,
         requestId: String,
         cycleSeq: Long,
+        utterance: String,
         plan: List<HorizonOperation>,
         interpretOutcome: InterpretOutcome,
         interpretLatencyMs: Long,
         projectNames: List<String>,
+        silenceAsked: Boolean = false,
     ): HorizonCycleResult {
         val applied = operationApplier.apply(userEmail, cycleSeq, requestId, plan)
         val created = applied.filter { it.applied && it.resultUid != null }
@@ -185,6 +204,8 @@ open class HorizonCycleCoordinator(
         }
 
         val newPhrases = created.map { it.resultUid!! to (it.resultText ?: "") }
+        // Nudge what was touched or mentioned, so the assembly below can see it.
+        val seeded = seedSafely(userEmail, cycleSeq, utterance, applied)
         val propagateStartMs = System.currentTimeMillis()
         val propagationOutcome = horizonPropagator.propagate(userEmail, cycleSeq, newPhrases)
         val propagateLatencyMs = System.currentTimeMillis() - propagateStartMs
@@ -193,6 +214,7 @@ open class HorizonCycleCoordinator(
         val assembleOutcome = horizonAssembler.assemble(userEmail, cycleSeq)
         val assembleLatencyMs = System.currentTimeMillis() - assembleStartMs
 
+        horizonSeeder.recordActivity(userEmail)
         if (applied.all { it.applied }) requestLedger.checkpoint(userEmail, requestId, cycleSeq, "completed")
 
         return HorizonCycleResult(
@@ -206,8 +228,19 @@ open class HorizonCycleCoordinator(
             assembleLatencyMs = assembleLatencyMs,
             followUp = followUpFor(applied, projectNames),
             projectNames = projectNames,
+            silenceQuestionAsked = silenceAsked,
+            seeded = seeded,
         )
     }
+
+    /** Seeding is an aid to selection, never a reason to lose the turn: a failure is logged and the cycle goes on. */
+    private suspend fun seedSafely(userEmail: String, cycleSeq: Long, utterance: String, applied: List<AppliedOperation>): HorizonSeeder.Seeded? =
+        try {
+            horizonSeeder.seedTurn(userEmail, cycleSeq, utterance, applied)
+        } catch (e: Exception) {
+            logger.warn("runCycle: seeding failed for userEmail=$userEmail: ${e.message}")
+            null
+        }
 
     private fun followUpFor(applied: List<AppliedOperation>, projectNames: List<String>): CycleFollowUp? {
         applied.firstOrNull { it.applied && it.operation is HoldForChoice }
@@ -225,6 +258,7 @@ open class HorizonCycleCoordinator(
         utterance: String,
         interpretOutcome: InterpretOutcome,
         interpretLatencyMs: Long,
+        silenceAsked: Boolean = false,
     ): HorizonCycleResult {
         var decomposeFailed = false
         val factCandidates = try {
@@ -255,18 +289,20 @@ open class HorizonCycleCoordinator(
         // attach a MutationOutcome to, so without this it would silently vanish from mutationOutcomes.
         val lostFactCount = if (decomposeFailed) 1 else (factCandidates.size - factUids.size).coerceAtLeast(0)
         val lostFactOutcomes = List(lostFactCount) { MutationOutcome.Fact(phraseUid = null, applied = false) }
-        return stampPropagateAssemble(userEmail, requestId, cycleSeq, interpretOutcome, interpretLatencyMs, factUids, newPhrases, lostFactOutcomes)
+        return stampPropagateAssemble(userEmail, requestId, cycleSeq, utterance, interpretOutcome, interpretLatencyMs, factUids, newPhrases, lostFactOutcomes, silenceAsked)
     }
 
     private suspend fun stampPropagateAssemble(
         userEmail: String,
         requestId: String,
         cycleSeq: Long,
+        utterance: String,
         interpretOutcome: InterpretOutcome?,
         interpretLatencyMs: Long,
         factUids: List<String>,
         newPhrases: List<Pair<String, String>>,
         initialMutationOutcomes: List<MutationOutcome> = emptyList(),
+        silenceAsked: Boolean = false,
     ): HorizonCycleResult {
         val mutationOutcomes = initialMutationOutcomes.toMutableList()
         for (uid in factUids) {
@@ -275,6 +311,7 @@ open class HorizonCycleCoordinator(
         }
         requestLedger.checkpoint(userEmail, requestId, cycleSeq, "writes_committed", phraseUids = factUids)
 
+        val seeded = seedSafely(userEmail, cycleSeq, utterance, emptyList())
         val propagateStartMs = System.currentTimeMillis()
         val propagationOutcome = horizonPropagator.propagate(userEmail, cycleSeq, newPhrases)
         val propagateLatencyMs = System.currentTimeMillis() - propagateStartMs
@@ -283,6 +320,7 @@ open class HorizonCycleCoordinator(
         val assembleOutcome = horizonAssembler.assemble(userEmail, cycleSeq)
         val assembleLatencyMs = System.currentTimeMillis() - assembleStartMs
 
+        horizonSeeder.recordActivity(userEmail)
         requestLedger.checkpoint(userEmail, requestId, cycleSeq, "completed")
 
         return HorizonCycleResult(
@@ -294,17 +332,19 @@ open class HorizonCycleCoordinator(
             interpretLatencyMs = interpretLatencyMs,
             propagateLatencyMs = propagateLatencyMs,
             assembleLatencyMs = assembleLatencyMs,
+            silenceQuestionAsked = silenceAsked,
+            seeded = seeded,
         )
     }
 
     /** The stored plan replayed — never a second model call. Null if the stored plan is missing or unreadable, so the caller proceeds as a fresh cycle. */
-    private suspend fun resumeFromOpsPlanned(userEmail: String, requestId: String, existing: ProcessedRequestRecord): HorizonCycleResult? {
+    private suspend fun resumeFromOpsPlanned(userEmail: String, requestId: String, existing: ProcessedRequestRecord, utterance: String): HorizonCycleResult? {
         val plan = OperationPlanCodec.decode(existing.opsPlan) ?: run {
             logger.warn("runCycle: ops_planned row for requestId=$requestId has no readable plan — treating as a fresh cycle")
             return null
         }
         return applyPropagateAssemble(
-            userEmail, requestId, existing.cycleSeq, plan,
+            userEmail, requestId, existing.cycleSeq, utterance, plan,
             InterpretOutcome.Operations(plan, emptyList(), 0), 0, projectNames = emptyList(),
         )
     }
@@ -313,16 +353,18 @@ open class HorizonCycleCoordinator(
         userEmail: String,
         requestId: String,
         existing: ProcessedRequestRecord,
+        utterance: String,
     ): HorizonCycleResult {
         val factUids = existing.phraseUids
         val factTexts = factUids.map { horizonGraphStore.phraseText(userEmail, it) ?: "" }
-        return stampPropagateAssemble(userEmail, requestId, existing.cycleSeq, null, 0, factUids, factUids.zip(factTexts))
+        return stampPropagateAssemble(userEmail, requestId, existing.cycleSeq, utterance, null, 0, factUids, factUids.zip(factTexts))
     }
 
     private suspend fun resumeFromWritesCommitted(
         userEmail: String,
         requestId: String,
         existing: ProcessedRequestRecord,
+        utterance: String,
     ): HorizonCycleResult {
         val uids = existing.phraseUids
         val newPhrases = uids.zip(uids.map { horizonGraphStore.phraseText(userEmail, it) ?: "" })
@@ -332,6 +374,7 @@ open class HorizonCycleCoordinator(
         val mutationOutcomes = plan?.map { MutationOutcome.Operation(AppliedOperation(it, applied = true, summary = "Applied ${it.verb}")) }
             ?: uids.map { MutationOutcome.Fact(it, applied = true) }
 
+        seedSafely(userEmail, existing.cycleSeq, utterance, emptyList())
         val propagateStartMs = System.currentTimeMillis()
         val propagationOutcome = horizonPropagator.propagate(userEmail, existing.cycleSeq, newPhrases)
         val propagateLatencyMs = System.currentTimeMillis() - propagateStartMs
@@ -340,6 +383,7 @@ open class HorizonCycleCoordinator(
         val assembleOutcome = horizonAssembler.assemble(userEmail, existing.cycleSeq)
         val assembleLatencyMs = System.currentTimeMillis() - assembleStartMs
 
+        horizonSeeder.recordActivity(userEmail)
         requestLedger.checkpoint(userEmail, requestId, existing.cycleSeq, "completed")
 
         return HorizonCycleResult(

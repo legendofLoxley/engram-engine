@@ -15,6 +15,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder
 import app.alfrd.engram.cognitive.pipeline.horizon.ViewSnapshotBuilder
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeRequestLedger
 import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
@@ -105,6 +106,7 @@ object CognitivePipelineFactory {
                 horizonAssembler  = horizonAssembler,
                 viewSnapshotBuilder = ViewSnapshotBuilder(structureStore),
                 operationApplier  = HorizonOperationApplier(structureStore, horizonGraphStore),
+                horizonSeeder     = HorizonSeeder(structureStore),
             )
         }
 

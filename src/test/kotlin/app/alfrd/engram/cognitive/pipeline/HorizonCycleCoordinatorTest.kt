@@ -18,6 +18,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperation
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPropagator
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonStructureStore
 import app.alfrd.engram.cognitive.pipeline.horizon.ItemKind
 import app.alfrd.engram.cognitive.pipeline.horizon.OperationPlanCodec
@@ -66,6 +67,7 @@ class HorizonCycleCoordinatorTest {
     private lateinit var requestLedger: RequestLedger
     private lateinit var applier: HorizonOperationApplier
     private lateinit var testDbPath: String
+    private var clockNow = System.currentTimeMillis()
 
     @BeforeEach
     fun setUp() {
@@ -114,6 +116,7 @@ class HorizonCycleCoordinatorTest {
         horizonAssembler = horizonAssembler,
         viewSnapshotBuilder = ViewSnapshotBuilder(structureStore),
         operationApplier = applier,
+        horizonSeeder = HorizonSeeder(structureStore, clock = { clockNow }),
     )
 
     /** An interpreter that always returns [outcome] and records what it was shown. */
@@ -228,6 +231,90 @@ class HorizonCycleCoordinatorTest {
         assertEquals(listOf("Demo"), shown.containers.map { it.name })
         assertEquals("c1", shown.containers.single().ref)
         assertTrue(shown.focusLines.single().contains("Demo"))
+    }
+
+    // ── What a turn leaves for the selector ──────────────────────────────────
+
+    @Test
+    fun `a turn records that the user was here, and mentions in it are nudged before the Horizon is assembled`() = runBlocking {
+        val email = "coord-seed-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val demo = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")!!
+        structureStore.createItem(email, 0, ItemKind.TASK, "Book the room", projectUid = demo.uid) // an earlier cycle: not "just said"
+        // Nothing else is drawing "Book the room" in: it is in an undated task inside a project, and there is no focus.
+        assertNull(assembled(coordinator(noOperation()).runCycle(email, "req-before", "Hello there")).items.firstOrNull { it.text.text == "Book the room" })
+
+        val result = coordinator(noOperation()).runCycle(email, requestId = "req-mention", utterance = "How is the demo going?")
+
+        assertEquals(1, result.seeded!!.mentionedContainers)
+        val item = assembled(result).items.first { it.text.text == "Book the room" }
+        assertTrue(item.surfacing is app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason.Activated, "brought in by the mention, this same turn: ${item.surfacing}")
+        assertNotNull(structureStore.lastActiveAt(email), "and the turn is what the next silence is measured from")
+    }
+
+    @Test
+    fun `what the interpreter touched this turn is nudged`() = runBlocking {
+        val email = "coord-touch-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val task = structureStore.createItem(email, 1, ItemKind.TASK, "Send the invoice")!!
+
+        val result = coordinator(proposes(ResolveItem(task.uid, "I sent it"))).runCycle(email, requestId = "req-touch", utterance = "I sent it")
+
+        assertEquals(1, result.seeded!!.touched)
+        assertTrue(structureStore.getFocus(email).any { it.targetUid == task.uid && it.mode == FocusMode.NUDGE })
+    }
+
+    @Test
+    fun `after a long silence the turn opens a question, and the next turn closes it`() = runBlocking {
+        val email = "coord-silence-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        structureStore.touchLastActive(email, clockNow)
+        clockNow += 9 * 86_400_000L
+
+        val back = coordinator(noOperation()).runCycle(email, requestId = "req-back", utterance = "morning")
+
+        assertTrue(back.silenceQuestionAsked)
+        val question = assembled(back).items.single { it.text.text == "What have you been up to?" }
+        assertEquals("alfrd", question.askedBy)
+        assertTrue(HorizonItemsRenderer.render(assembled(back)).any { it.renderedLine.contains("a question you want to ask them") })
+
+        clockNow += 60_000
+        val answered = coordinator(noOperation()).runCycle(email, requestId = "req-answer", utterance = "I was travelling")
+
+        assertTrue(!answered.silenceQuestionAsked)
+        assertTrue(assembled(answered).items.none { it.text.text == "What have you been up to?" }, "answered, it goes")
+    }
+
+    @Test
+    fun `retrying a request after a long silence asks the question once`() = runBlocking {
+        val email = "coord-silence-retry-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        structureStore.touchLastActive(email, clockNow)
+        clockNow += 9 * 86_400_000L
+        val c = coordinator(noOperation())
+
+        c.runCycle(email, requestId = "req-once", utterance = "morning")
+        c.runCycle(email, requestId = "req-once", utterance = "morning")
+
+        assertEquals(1, structureStore.listRecentItems(email, 20).count { it.text == "What have you been up to?" })
+    }
+
+    @Test
+    fun `a failure in seeding never costs the turn`() = runBlocking {
+        val email = "coord-seed-fail-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val exploding = object : HorizonStructureStore by structureStore {
+            override suspend fun listContainers(userEmail: String, kind: ContainerKind?) = throw IllegalStateException("boom")
+        }
+        val c = HorizonCycleCoordinator(
+            cycleSequencer, requestLedger, noOperation(), engramClient, horizonGraphStore, propagator, horizonAssembler,
+            ViewSnapshotBuilder(structureStore), applier, HorizonSeeder(exploding),
+        )
+
+        val result = c.runCycle(email, requestId = "req-boom", utterance = "How is the demo going?")
+
+        assertNotNull(result.assembleOutcome)
+        assertNull(result.seeded)
     }
 
     // ── Follow-ups the reply owes the user ───────────────────────────────────

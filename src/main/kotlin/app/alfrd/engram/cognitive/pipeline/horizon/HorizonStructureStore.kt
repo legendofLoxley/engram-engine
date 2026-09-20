@@ -79,6 +79,8 @@ data class ItemRecord(
     val attention: AttentionDirective? = null,
     /** The user's own words, when [text] is a label written for a task or event rather than their words. */
     val sourceQuote: String? = null,
+    /** For a question: who is waiting on the answer (`alfrd` when Alfrd asked it). Null for anything else. */
+    val askedBy: String? = null,
 )
 
 data class FocusRecord(
@@ -87,6 +89,8 @@ data class FocusRecord(
     val zoom: FocusZoom,
     val mode: FocusMode,
     val setCycleSeq: Long,
+    /** A nudge's strength (0 to 1) when it was set, before it fades. 1.0 for a pin. */
+    val weight: Double = 1.0,
 )
 
 /**
@@ -201,15 +205,19 @@ interface HorizonStructureStore {
      * Sets a focus on [targetUid]. A [FocusMode.PINNED] focus replaces any other pinned focus (at
      * most one per user) and leaves nudges alone. A [FocusMode.NUDGE] refreshes an existing edge
      * to the same target, but never downgrades a pinned focus. Null [zoom] uses [defaultZoomFor]
-     * the target's kind. False for a target the user doesn't own.
+     * the target's kind. [weight] is a nudge's strength (0 to 1): refreshing keeps the stronger of the
+     * old and new. False for a target the user doesn't own.
      */
-    suspend fun setFocus(userEmail: String, cycleSeq: Long, targetUid: String, mode: FocusMode, zoom: FocusZoom? = null): Boolean
+    suspend fun setFocus(userEmail: String, cycleSeq: Long, targetUid: String, mode: FocusMode, zoom: FocusZoom? = null, weight: Double = 1.0): Boolean
 
     /**
      * Removes focus edges: those to [targetUid] when given, otherwise every pinned focus — and
      * every nudge too when [includeNudges]. Returns how many were removed.
      */
     suspend fun releaseFocus(userEmail: String, targetUid: String? = null, includeNudges: Boolean = true): Int
+
+    /** Deletes this user's nudges set before [olderThanCycle], returning how many — nudges fade to nothing well before then, so this only keeps the graph from accumulating them. Pins are never touched. */
+    suspend fun pruneNudges(userEmail: String, olderThanCycle: Long): Int
 
     /** Records the wall-clock time of the user's latest turn, only ever moving it forward. False for an unknown user. */
     suspend fun touchLastActive(userEmail: String, atMillis: Long): Boolean
@@ -233,6 +241,9 @@ interface HorizonStructureStore {
 
     /** The projects filed directly under domain [domainUid], oldest first. Empty for a domain the user doesn't own. */
     suspend fun projectsIn(userEmail: String, domainUid: String): List<ContainerRecord>
+
+    /** The user's items tied to the entity named [conceptName] (matched by normalized name), newest first, bounded by [limit]. Only the caller's own items, though the entity itself is shared. */
+    suspend fun itemsAbout(userEmail: String, conceptName: String, limit: Int = 20): List<ItemRecord>
 
     /**
      * The user's most recently asserted conversational items, newest first, capped at [limit] —
@@ -325,6 +336,7 @@ class ArcadeHorizonStructureStore(
                 set("visibility", "private")
                 set("createdAt", now)
                 set("updatedAt", now)
+                set("ownerEmail", userEmail)
                 if (namespacedKey != null) set("opKey", namespacedKey)
                 if (!sourceQuote.isNullOrBlank() && sourceQuote.trim() != text.trim()) set("sourceQuote", sourceQuote.trim())
                 when (kind) {
@@ -464,6 +476,7 @@ class ArcadeHorizonStructureStore(
         targetUid: String,
         mode: FocusMode,
         zoom: FocusZoom?,
+        weight: Double,
     ): Boolean = mutate("setFocus", false) {
         val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@mutate false
         val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
@@ -480,11 +493,15 @@ class ArcadeHorizonStructureStore(
             return@mutate true
         }
 
+        val clamped = weight.coerceIn(0.0, 1.0)
         if (existing != null) {
+            // A refreshed nudge keeps the stronger of what it had and what it is now; a pin is always full weight.
+            val kept = if (mode == FocusMode.PINNED) 1.0 else maxOf((existing.get("weight") as? Number)?.toDouble() ?: 0.0, clamped)
             existing.modify().apply {
                 set("zoom", resolvedZoom.wire())
                 set("mode", mode.wire())
                 set("setCycleSeq", cycleSeq)
+                set("weight", kept)
                 set("updatedAt", now)
                 save()
             }
@@ -493,11 +510,21 @@ class ArcadeHorizonStructureStore(
                 set("zoom", resolvedZoom.wire())
                 set("mode", mode.wire())
                 set("setCycleSeq", cycleSeq)
+                set("weight", if (mode == FocusMode.PINNED) 1.0 else clamped)
                 set("updatedAt", now)
                 save()
             }
         }
         true
+    }
+
+    override suspend fun pruneNudges(userEmail: String, olderThanCycle: Long): Int = mutate("pruneNudges", 0) {
+        val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@mutate 0
+        val stale = userVertex.getEdges(Vertex.DIRECTION.OUT, "FOCUSES_ON").filter { edge ->
+            edge.get("mode") == FocusMode.NUDGE.wire() && ((edge.get("setCycleSeq") as? Number)?.toLong() ?: 0L) < olderThanCycle
+        }
+        stale.forEach { it.delete() }
+        stale.size
     }
 
     override suspend fun releaseFocus(userEmail: String, targetUid: String?, includeNudges: Boolean): Int =
@@ -540,6 +567,7 @@ class ArcadeHorizonStructureStore(
                 zoom = FocusZoom.fromWire(edge.get("zoom") as? String),
                 mode = FocusMode.fromWire(edge.get("mode") as? String),
                 setCycleSeq = (edge.get("setCycleSeq") as? Number)?.toLong() ?: 0L,
+                weight = (edge.get("weight") as? Number)?.toDouble() ?: 1.0,
             )
         }.sortedWith(compareBy<FocusRecord> { it.mode != FocusMode.PINNED }.thenBy { it.setCycleSeq })
     }
@@ -555,6 +583,7 @@ class ArcadeHorizonStructureStore(
                     }
                 }
                 .map { it.toContainerRecord() }
+                .distinctBy { it.uid } // belt and braces: an index lookup has returned one row several times in this ArcadeDB version
                 .sortedBy { it.createdAt }
         }
 
@@ -588,6 +617,23 @@ class ArcadeHorizonStructureStore(
                 .filter { it.typeName == ContainerKind.PROJECT.typeName && it.get("ownerEmail") == userEmail }
                 .map { it.toContainerRecord() }
                 .sortedBy { it.createdAt }
+        }
+
+    override suspend fun itemsAbout(userEmail: String, conceptName: String, limit: Int): List<ItemRecord> =
+        read("itemsAbout", emptyList()) {
+            if (limit <= 0 || conceptName.isBlank()) return@read emptyList()
+            // Concepts are shared between users, so the edge's own ownerEmail scopes this to the caller before any LIMIT,
+            // and each item is still checked to be reachable through the caller's own Sources before it is returned.
+            val uids = db.query(
+                "sql", "SELECT @out.uid AS uid FROM ABOUT WHERE ownerEmail = :e AND @in.normalizedName = :n LIMIT :l",
+                mapOf("e" to userEmail, "n" to normalizeName(conceptName), "l" to limit * 2),
+            ).use { rs ->
+                val out = mutableListOf<String>()
+                while (rs.hasNext()) (rs.next().toMap()["uid"] as? String)?.let { out += it }
+                out
+            }
+            uids.distinct().mapNotNull { uid -> HorizonOwnership.findPhraseOwnedByUser(db, userEmail, uid)?.toItemRecord() }
+                .sortedByDescending { it.createdAt }.take(limit)
         }
 
     override suspend fun listRecentItems(userEmail: String, limit: Int, openOnly: Boolean): List<ItemRecord> =
@@ -766,6 +812,7 @@ class ArcadeHorizonStructureStore(
             about = getVertices(Vertex.DIRECTION.OUT, "ABOUT").mapNotNull { it.get("name") as? String },
             attention = attentionOf(),
             sourceQuote = get("sourceQuote") as? String,
+            askedBy = if (kind == ItemKind.QUESTION) get("askedBy") as? String else null,
         )
     }
 

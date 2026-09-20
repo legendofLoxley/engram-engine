@@ -84,7 +84,9 @@ object HorizonLimits {
     const val OMITTED_SAMPLE_CAP = 5
     const val DEFAULT_RELEVANCE_CYCLES = 3
     const val CANDIDATE_POOL_OVERFETCH = 3 // per-bucket over-fetch multiplier vs. budget.maxItems
-    const val SCHEMA_VERSION = 1
+    const val MAX_SCORE_COMPONENTS = 4
+    const val MAX_CONTAINER_NAME_LENGTH = 80
+    const val SCHEMA_VERSION = 2
 
     /**
      * The total budget on a [ContextHorizon]'s serialized (JSON, `kotlinx.serialization` — the
@@ -106,8 +108,12 @@ object HorizonLimits {
      */
     private const val BYTES_PER_UTF16_UNIT_WORST_CASE = 3
     private const val REF_FIELD_CEILING_BYTES = 200
-    private const val PER_ITEM_STRUCTURAL_CEILING_BYTES = 300
-    private const val TOP_LEVEL_STRUCTURAL_CEILING_BYTES = 1_000
+    // Per item: field names and punctuation, plus the score breakdown (MAX_SCORE_COMPONENTS entries with a
+    // short kind and a short detail) and the container reference (a name of up to MAX_CONTAINER_NAME_LENGTH).
+    private const val PER_ITEM_STRUCTURAL_CEILING_BYTES = 1_500
+    // Top level: field names, the focus reference, and a bounded list of container views (each with a name
+    // of up to MAX_CONTAINER_NAME_LENGTH units at worst-case width, a uid and its counts).
+    private const val TOP_LEVEL_STRUCTURAL_CEILING_BYTES = 9_000
     fun serializedByteBudget(maxItems: Int): Int {
         val perItemTextBytes = 2 * (MAX_ITEM_TEXT_LENGTH + 1) * BYTES_PER_UTF16_UNIT_WORST_CASE // item text + reactivation triggering text
         val perItemBytes = perItemTextBytes + MAX_SOURCE_REFS_PER_ITEM * REF_FIELD_CEILING_BYTES + PER_ITEM_STRUCTURAL_CEILING_BYTES
@@ -231,7 +237,53 @@ sealed interface SurfacingReason {
      */
     @Serializable
     data class RecentActorEvidence(val assertedCycleSeq: Long) : SurfacingReason
+
+    /** The user asked for this to be kept in front of them ([AttentionDirective.PINNED]) and hasn't taken it back. */
+    @Serializable
+    data object Pinned : SurfacingReason
+
+    /** Inside the user's current focus: the project, domain or item they asked to work on, at [zoom], [hops] steps from it. [container] names the focus it sits in. */
+    @Serializable
+    data class InFocus(val container: String?, val zoom: FocusZoom, val hops: Int) : SurfacingReason
+
+    /** Drawn in by something other than the pinned focus: [via] says what (a message that mentioned it, an entity it shares with something in view, a project that is in view), [hops] steps away. */
+    @Serializable
+    data class Activated(val via: String, val hops: Int) : SurfacingReason
+
+    /** A deadline is close (or passed): shown whatever the focus, because it is owed or about to be. */
+    @Serializable
+    data class Urgent(val dueAt: Long, val overdue: Boolean) : SurfacingReason
+
+    /** Something the environment reported recently, outside anything the user said — allowed into view from outside the focus, in a capped number of slots. */
+    @Serializable
+    data class Peripheral(val assertedCycleSeq: Long) : SurfacingReason
 }
+
+/** One thing that added to an item's score, so "why is this in view" has a concrete answer. [kind] is `focus`, `nudge`, `spread`, `urgency`, `pinned`, `justAsserted`, `reactivation`, `peripheral` or `baseline`. */
+@Serializable
+data class ScoreComponent(val kind: String, val value: Double, val detail: String? = null)
+
+/** Which project (or domain) an item is filed under. */
+@Serializable
+data class HorizonContainerRef(val uid: String, val name: String, val kind: String)
+
+/** The user's current pinned focus, if any — what "zoomed in" means right now. */
+@Serializable
+data class HorizonFocusRef(val uid: String, val name: String, val kind: String, val zoom: FocusZoom)
+
+/** A project or domain, as it appears in the overview: how much is open in it and whether something in it is pressing. */
+@Serializable
+data class HorizonContainerView(
+    val uid: String,
+    val name: String,
+    val kind: String,
+    val openItems: Int,
+    val itemsInView: Int,
+    /** The nearest deadline among its open items, if any. */
+    val nextDueAt: Long? = null,
+    val score: Double = 0.0,
+    val inFocus: Boolean = false,
+)
 
 /** One bounded candidate in a [ContextHorizon]. [actorMetadata] is non-null exactly when [provenance] is one of the three Actor-attributed [ProvenanceKind]s — see [ActorEventMetadata]. */
 @Serializable
@@ -245,6 +297,17 @@ data class HorizonItem(
     val sourceRefs: List<SourceRef>,
     val sourceCount: Int,
     val actorMetadata: ActorEventMetadata? = null,
+    /** 0 to 1: how strongly this deserves a place, from [why]. Items are ranked by it. */
+    val score: Double = 0.0,
+    /** What contributed to [score], strongest first, at most [HorizonLimits.MAX_SCORE_COMPONENTS]. */
+    val why: List<ScoreComponent> = emptyList(),
+    /** `task`, `event`, `fact` or `question`; null for anything that isn't a structured item (an environment or Hermes report). */
+    val kind: String? = null,
+    /** The deadline a task or event is bound to, if any. */
+    val dueAt: Long? = null,
+    /** For a question: who asked it (`alfrd` when Alfrd is the one waiting on the answer). */
+    val askedBy: String? = null,
+    val container: HorizonContainerRef? = null,
 )
 
 /** A candidate excluded from `items` by the budget. Reference-only — no inlined text, nothing to truncate. */
@@ -277,6 +340,12 @@ data class ContextHorizon(
     val omittedAtLeast: Int,
     /** True if a bounded sub-query itself hit its own pool cap — candidates may exist beyond what was inspected at all. */
     val moreCandidatesAvailable: Boolean,
+    /** How far in the user is looking: [FocusZoom.OVERVIEW] when nothing is pinned. */
+    val zoom: FocusZoom = FocusZoom.OVERVIEW,
+    /** The pinned focus, if any. */
+    val focus: HorizonFocusRef? = null,
+    /** The user's projects and domains, most relevant first, bounded — the shape of what they have going on, even where none of a container's items is in view. */
+    val containers: List<HorizonContainerView> = emptyList(),
 )
 
 /** One page of a full, explicitly paginated candidate enumeration — see [HorizonAssembler.listCandidates]. */

@@ -9,6 +9,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.AssertionStatus
 import app.alfrd.engram.cognitive.pipeline.horizon.AttentionDirective
 import app.alfrd.engram.cognitive.pipeline.horizon.BoundedText
 import app.alfrd.engram.cognitive.pipeline.horizon.ContextHorizon
+import app.alfrd.engram.cognitive.pipeline.horizon.FocusZoom
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonBudget
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItemCategory
@@ -51,6 +52,92 @@ class ActorTest {
         horizonItems = horizonItems,
         integrityCaveat = integrityCaveat,
     )
+
+    // ---- HorizonItemsRenderer.render: what the structured selection adds ----
+
+    private val dayMs = 86_400_000L
+
+    private fun selectedItem(text: String, surfacing: SurfacingReason, kind: String? = null, askedBy: String? = null) = HorizonItem(
+        category = HorizonItemCategory.INTENTION,
+        text = BoundedText(text, truncated = false),
+        status = AssertionStatus.OPEN,
+        attentionDirective = null as AttentionDirective?,
+        provenance = ProvenanceKind.EXPLICIT_USER_STATEMENT,
+        surfacing = surfacing,
+        sourceRefs = emptyList(),
+        sourceCount = 1,
+        kind = kind,
+        askedBy = askedBy,
+    )
+
+    private fun renderedAt(asOf: Long, vararg items: HorizonItem) = HorizonItemsRenderer.render(
+        ContextHorizon("u@test.alfrd.internal", asOf, 2, items.toList(), HorizonBudget(12, items.size, false), emptyList(), 0, false),
+    )
+
+    @Test
+    fun `a pinned item says they asked for it, and cannot be dropped under budget pressure`() {
+        val rendered = renderedAt(0L, selectedItem("Send the invoice", SurfacingReason.Pinned)).single()
+        assertTrue(rendered.renderedLine.contains("they asked you to keep this in front of them"))
+        assertTrue(rendered.essential)
+    }
+
+    @Test
+    fun `an item in the focus names the focus, and is droppable`() {
+        val rendered = renderedAt(0L, selectedItem("Book the room", SurfacingReason.InFocus("Demo", FocusZoom.BINOCULARS, 1))).single()
+        assertTrue(rendered.renderedLine.contains("part of what they are focused on (\"Demo\")"), rendered.renderedLine)
+        assertTrue(!rendered.essential)
+    }
+
+    @Test
+    fun `an activated item says what brought it in`() {
+        val rendered = renderedAt(0L, selectedItem("My sister is allergic to peanuts", SurfacingReason.Activated("about sister", 2))).single()
+        assertTrue(rendered.renderedLine.contains("connected to what they have been talking about (about sister)"), rendered.renderedLine)
+    }
+
+    @Test
+    fun `a deadline reads in days from when the Horizon was assembled, and is never droppable`() {
+        val now = 10 * dayMs
+        val lines = renderedAt(
+            now,
+            selectedItem("Overdue thing", SurfacingReason.Urgent(now - 2 * dayMs - 1_000, overdue = true)),
+            selectedItem("Due today", SurfacingReason.Urgent(now + 2 * 3_600_000L, overdue = false)),
+            selectedItem("Due tomorrow", SurfacingReason.Urgent(now + dayMs + 3_600_000L, overdue = false)),
+            selectedItem("Due Friday", SurfacingReason.Urgent(now + 3 * dayMs + 3_600_000L, overdue = false)),
+        ).map { it.renderedLine }
+
+        assertTrue(lines[0].contains("overdue by 3 days"), lines[0])
+        assertTrue(lines[1].contains("due today"), lines[1])
+        assertTrue(lines[2].contains("due tomorrow"), lines[2])
+        assertTrue(lines[3].contains("due in 3 days"), lines[3])
+        assertTrue(renderedAt(now, selectedItem("x", SurfacingReason.Urgent(now + dayMs, false))).single().essential)
+    }
+
+    @Test
+    fun `days are counted on the calendar in the user's zone, not in 24-hour blocks`() {
+        val tokyo = java.time.ZoneId.of("Asia/Tokyo")
+        // 3 a.m. on the 20th, and something due at midnight starting the 22nd: two calendar days away, though only 45 hours.
+        val asOf = java.time.ZonedDateTime.of(2026, 9, 20, 3, 0, 0, 0, tokyo).toInstant().toEpochMilli()
+        val dueAt = java.time.ZonedDateTime.of(2026, 9, 22, 0, 0, 0, 0, tokyo).toInstant().toEpochMilli()
+        val horizon = ContextHorizon("u@test.alfrd.internal", asOf, 2, listOf(selectedItem("Birthday", SurfacingReason.Urgent(dueAt, false))), HorizonBudget(12, 1, false), emptyList(), 0, false)
+
+        val line = HorizonItemsRenderer.render(horizon, tokyo).single().renderedLine
+
+        assertTrue(line.contains("due in 2 days (2026-09-22)"), line)
+    }
+
+    @Test
+    fun `an environment report is labeled as outside the conversation`() {
+        val rendered = renderedAt(0L, selectedItem("Build finished", SurfacingReason.Peripheral(4))).single()
+        assertTrue(rendered.renderedLine.contains("reported recently by the environment, independent of this conversation"))
+    }
+
+    @Test
+    fun `a question Alfrd is waiting on is marked to be asked, not assumed answered`() {
+        val asked = renderedAt(0L, selectedItem("What have you been up to?", SurfacingReason.JustAsserted(1), kind = "question", askedBy = "alfrd")).single()
+        val theirs = renderedAt(0L, selectedItem("Should I take the job?", SurfacingReason.JustAsserted(1), kind = "question", askedBy = "user")).single()
+        assertTrue(asked.renderedLine.contains("a question you want to ask them; ask it naturally, and do not assume an answer"))
+        assertTrue(!theirs.renderedLine.contains("ask it naturally"), "their own open question is not Alfrd's to ask")
+    }
 
     // ---- HorizonItemsRenderer.render ----
 

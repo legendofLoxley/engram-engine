@@ -140,14 +140,21 @@ class HorizonOperationApplier(
             AppliedOperation(op, record != null, if (record != null) "Created ${op.kind.name.lowercase()} \"${record.name}\"" else "Could not create ${op.kind.name.lowercase()} \"${op.name}\"")
         }
         is RecordItem -> {
-            val projectUid = op.projectUid
-                ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
+            val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
+            // The model rarely files an item even when the message plainly names its project, and an unfiled
+            // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
+            // words say it belongs — only when that is unambiguous. See [ProjectInference].
+            val inferred = if (stated == null && !op.askWhichProject) {
+                ProjectInference.infer("${op.quote} ${op.title ?: ""}", structure.listContainers(userEmail, ContainerKind.PROJECT))
+            } else null
+            val projectUid = stated ?: inferred?.uid
             val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
             if (record == null) {
                 AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
             } else {
                 op.about.forEach { structure.linkAbout(userEmail, cycleSeq, record.uid, it) }
-                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"", record.uid, record.text)
+                val filed = inferred?.let { " (filed under \"${it.name}\", from what you said)" } ?: ""
+                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed", record.uid, record.text)
             }
         }
         is ResolveItem -> {
@@ -220,4 +227,39 @@ class HorizonOperationApplier(
         structure.getItem(userEmail, uid)?.let { return "\"${it.text}\"" }
         return "that item"
     }
+}
+
+
+/**
+ * Decides, from an item's own words alone, which of the user's projects it belongs to — or none.
+ * Deliberately conservative: it files only when the answer is unambiguous, and never from the current
+ * focus (working on the demo does not make "call the plumber" a demo task).
+ * 1. A project whose full name appears in the words wins; if several appear, the longest, if it is
+ *    strictly the longest ("Demo prep" over "Demo").
+ * 2. Otherwise a project sharing distinctive words with the item — the most shared, if exactly one project
+ *    has the most, and only projects that are still active.
+ * Anything else is left unfiled.
+ */
+internal object ProjectInference {
+    fun infer(words: String, projects: List<ContainerRecord>): ContainerRecord? {
+        val live = projects.filter { it.status == "active" }
+        if (live.isEmpty() || words.isBlank()) return null
+        val padded = " ${normalize(words)} "
+
+        val named = live.filter { it.normalizedName.length >= 3 && padded.contains(" ${normalize(it.name)} ") }
+        if (named.isNotEmpty()) {
+            val longest = named.maxOf { it.normalizedName.length }
+            val top = named.filter { it.normalizedName.length == longest }
+            return top.singleOrNull()
+        }
+
+        val said = SalientTokenPropagator.salientTokens(words)
+        if (said.isEmpty()) return null
+        val overlaps = live.associateWith { (said intersect SalientTokenPropagator.salientTokens(it.name)).size }.filterValues { it > 0 }
+        if (overlaps.isEmpty()) return null
+        val best = overlaps.values.max()
+        return overlaps.filterValues { it == best }.keys.singleOrNull()
+    }
+
+    private fun normalize(text: String): String = text.lowercase().replace(Regex("[^a-z0-9\\s]"), " ").replace(Regex("\\s+"), " ").trim()
 }

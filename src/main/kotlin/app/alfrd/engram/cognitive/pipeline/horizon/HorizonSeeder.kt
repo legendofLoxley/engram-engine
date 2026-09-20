@@ -1,0 +1,146 @@
+package app.alfrd.engram.cognitive.pipeline.horizon
+
+import org.slf4j.LoggerFactory
+
+/**
+ * What a turn leaves behind for the selector to pick up: fading nudges on what the user just
+ * touched or mentioned, and — after a long silence — a question about what they have been up to.
+ *
+ * **Mentions become nudges, mechanically.** The interpretation model is asked only for explicit
+ * focus changes; merely talking about something is handled here, in code, from what was said:
+ * - a message that names a project or domain nudges it;
+ * - a message that names an entity ("my sister") nudges the items tied to that entity — this is how
+ *   an ordinary fact comes back into view without a separate lookup;
+ * - a message that shares distinctive words with an item nudges that item;
+ * - anything the interpretation stage just created, resolved, corrected, filed or linked is nudged too.
+ * A nudge is an ordinary `FOCUSES_ON` edge with a weight; it fades by itself (see [HorizonPolicy.nudgeStrength]),
+ * so nothing here decides how long anything stays in view, and old ones are pruned so they can't pile up.
+ *
+ * Runs under [PerUserCycleLock] with the rest of the cycle. Everything is bounded by [HorizonPolicy]:
+ * a message is matched against a capped number of the user's recent items and a capped number of words,
+ * and at most [HorizonPolicy.maxMentionNudges] items are nudged per message.
+ */
+class HorizonSeeder(
+    private val structure: HorizonStructureStore,
+    private val policy: HorizonPolicy = HorizonPolicy(),
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val logger = LoggerFactory.getLogger(HorizonSeeder::class.java)
+
+    /** How many nudges one turn set, by where they came from — for tracing. */
+    data class Seeded(val touched: Int, val mentionedContainers: Int, val mentionedEntities: Int, val mentionedItems: Int, val pruned: Int)
+
+    suspend fun seedTurn(userEmail: String, cycleSeq: Long, utterance: String, applied: List<AppliedOperation>): Seeded {
+        val nudged = LinkedHashMap<String, Double>() // uid -> weight; strongest wins
+        fun nudge(uid: String?, weight: Double) { if (uid != null) nudged.merge(uid, weight.coerceIn(0.0, 1.0), ::maxOf) }
+
+        // What the interpretation stage just did to.
+        var touched = 0
+        for (result in applied.filter { it.applied }) {
+            val before = nudged.size
+            when (val op = result.operation) {
+                is RecordItem -> nudge(result.resultUid, 1.0)
+                is CorrectItem -> nudge(result.resultUid, 1.0)
+                is ResolveItem -> nudge(op.targetUid, 1.0)
+                is ReopenItem -> nudge(op.targetUid, 1.0)
+                is FileItem -> { nudge(op.targetUid, 1.0); nudge(op.intoUid, 1.0) }
+                is SetAttention -> nudge(op.targetUid, 1.0)
+                is LinkItems -> { nudge(op.fromUid, 1.0); nudge(op.toUid, 1.0) }
+                is CreateContainer, is SetFocus, is ReleaseFocus, is HoldForChoice -> Unit // a pin is not a nudge; a held feeling touches nothing
+            }
+            touched += nudged.size - before
+        }
+
+        val words = wordsOf(utterance)
+        val containers = mentionedContainers(userEmail, utterance)
+        containers.forEach { nudge(it, 1.0) }
+        val entityItems = mentionedEntities(userEmail, words)
+        entityItems.forEach { nudge(it, policy.entityMentionWeight) }
+        val textItems = mentionedItems(userEmail, utterance, cycleSeq)
+        textItems.forEach { (uid, weight) -> nudge(uid, weight) }
+
+        for ((uid, weight) in nudged) structure.setFocus(userEmail, cycleSeq, uid, FocusMode.NUDGE, weight = weight)
+        val pruned = structure.pruneNudges(userEmail, cycleSeq - policy.nudgePruneCycles)
+        return Seeded(touched, containers.size, entityItems.size, textItems.size, pruned)
+    }
+
+    private suspend fun mentionedContainers(userEmail: String, utterance: String): List<String> {
+        val padded = " ${normalize(utterance)} "
+        return structure.listContainers(userEmail).filter { it.status == "active" && it.normalizedName.length >= MIN_NAME_LENGTH }
+            .filter { padded.contains(" ${normalize(it.name)} ") }
+            .map { it.uid }
+    }
+
+    /** Items tied to an entity the message names — one word or two, matched to the entity's normalized name. */
+    private suspend fun mentionedEntities(userEmail: String, words: List<String>): List<String> {
+        val candidates = (words.filter { it !in STOP_WORDS && it.length >= MIN_NAME_LENGTH } + words.zipWithNext { a, b -> "$a $b" })
+            .distinct().take(MAX_ENTITY_CANDIDATES)
+        return candidates.flatMap { structure.itemsAbout(userEmail, it, ITEMS_PER_ENTITY).map { item -> item.uid } }
+            .distinct().take(policy.maxMentionNudges * 2)
+    }
+
+    /** Items whose own words overlap the message's distinctive words enough to count as being talked about. */
+    private suspend fun mentionedItems(userEmail: String, utterance: String, cycleSeq: Long): List<Pair<String, Double>> {
+        val said = SalientTokenPropagator.salientTokens(utterance)
+        if (said.isEmpty()) return emptyList()
+        return structure.listRecentItems(userEmail, policy.mentionScanItems).mapNotNull { item ->
+            val theirs = SalientTokenPropagator.salientTokens(item.text)
+            if (theirs.isEmpty()) return@mapNotNull null
+            val overlap = (said intersect theirs).size
+            if (overlap == 0) return@mapNotNull null
+            val weight = overlap.toDouble() / minOf(said.size, theirs.size)
+            if (weight < policy.mentionMinOverlap) null else item.uid to weight
+        }.sortedByDescending { it.second }.take(policy.maxMentionNudges)
+    }
+
+    // ── Silence ──────────────────────────────────────────────────────────────
+
+    /** Whether Alfrd is now waiting on the user after a long gap. */
+    data class SilenceOutcome(val asked: Boolean, val questionUid: String?)
+
+    /**
+     * Called first thing in a cycle. If the user has been away longer than [HorizonPolicy.silenceThreshold],
+     * opens a question about what they have been up to (an open `Question` item, so it shows in the overview
+     * and the reply asks it). Any *earlier* such question is closed either way: this turn is the user coming
+     * back, which is the answer. Idempotent per request, so a retry neither asks twice nor closes the one
+     * this request opened.
+     */
+    suspend fun checkSilence(userEmail: String, cycleSeq: Long, requestId: String): SilenceOutcome {
+        val last = structure.lastActiveAt(userEmail)
+        val gap = last?.let { clock() - it }
+        val shouldAsk = gap != null && gap >= policy.silenceThreshold.toMillis()
+        val opened = if (shouldAsk) structure.createItem(userEmail, cycleSeq, ItemKind.QUESTION, SILENCE_QUESTION, askedBy = "alfrd", opKey = "$requestId:silence") else null
+        structure.listRecentItems(userEmail, OPEN_QUESTION_SCAN, openOnly = true)
+            .filter { it.kind == ItemKind.QUESTION && it.askedBy == "alfrd" && it.text == SILENCE_QUESTION && it.uid != opened?.uid }
+            .forEach { structure.resolve(userEmail, cycleSeq, it.uid) }
+        return SilenceOutcome(opened != null, opened?.uid)
+    }
+
+    /** Records that the user has just been here — what the next long silence is measured from. */
+    suspend fun recordActivity(userEmail: String) {
+        try {
+            structure.touchLastActive(userEmail, clock())
+        } catch (e: Exception) {
+            logger.warn("recordActivity failed for userEmail=$userEmail: ${e.message}")
+        }
+    }
+
+    private fun wordsOf(text: String): List<String> = normalize(text).split(' ').filter { it.isNotBlank() }.take(MAX_WORDS)
+
+    private fun normalize(text: String): String = text.lowercase().replace(Regex("[^a-z0-9\\s]"), " ").replace(Regex("\\s+"), " ").trim()
+
+    companion object {
+        /** The question opened after a long silence. Matched by text to find and close it later. */
+        const val SILENCE_QUESTION = "What have you been up to?"
+        private const val MIN_NAME_LENGTH = 3
+        private const val MAX_WORDS = 60
+        private const val MAX_ENTITY_CANDIDATES = 24
+        private const val ITEMS_PER_ENTITY = 8
+        private const val OPEN_QUESTION_SCAN = 50
+        private val STOP_WORDS = setOf(
+            "the", "and", "for", "with", "that", "this", "what", "when", "where", "who", "how", "why", "was", "were", "are", "you",
+            "have", "has", "had", "did", "does", "can", "could", "would", "should", "about", "from", "into", "than", "then", "them",
+            "they", "their", "there", "here", "just", "like", "some", "any", "all", "not", "but", "his", "her", "its", "our", "your", "mine",
+        )
+    }
+}

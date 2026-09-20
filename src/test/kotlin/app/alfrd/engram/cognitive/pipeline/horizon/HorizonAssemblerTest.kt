@@ -1131,6 +1131,9 @@ class HorizonAssemblerTest {
             is SurfacingReason.JustAsserted -> s.cycleSeq
             is SurfacingReason.RecentActorEvidence -> s.assertedCycleSeq
             is SurfacingReason.DormantOpen -> s.lastStatusChangeCycleSeq
+            // Reasons the structured selection adds; none of these tests builds the structure that produces them.
+            is SurfacingReason.Pinned, is SurfacingReason.InFocus, is SurfacingReason.Activated,
+            is SurfacingReason.Urgent, is SurfacingReason.Peripheral -> item.sourceRefs.first().cycleSeq
         }
         listOf(item.sourceRefs.first().phraseUid, item.category, item.status, cycleSeq)
     }.toSet()
@@ -1281,7 +1284,9 @@ class HorizonAssemblerTest {
         val targetUid = seedActorEventPhraseWithCycle(email, "Target Actor evidence, oldest of the batch", cycleSeq = 97)
         repeat(12) { i -> seedActorEventPhraseWithCycle(email, "Competing Actor evidence #$i", cycleSeq = 98) }
 
-        val horizon = assembler.assemble(email, currentCycleSeq = 100, activeRelevanceCycles = 3).expectSuccess()
+        // This test is about the item budget, so the separate cap on outside-the-conversation slots is lifted out of the way.
+        val roomy = ArcadeHorizonAssembler(dbManager.getDatabase(), policy = HorizonPolicy(peripheralSlots = 50))
+        val horizon = roomy.assemble(email, currentCycleSeq = 100, activeRelevanceCycles = 3).expectSuccess()
 
         assertEquals(12, horizon.items.size, "budget.maxItems must still cap the result even though all 13 candidates were eligible")
         assertFalse(

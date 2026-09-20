@@ -115,6 +115,7 @@ class ContextHorizonConversationalCycleTest {
             horizonAssembler = horizonAssembler,
             viewSnapshotBuilder = ViewSnapshotBuilder(structureStore),
             operationApplier = HorizonOperationApplier(structureStore, horizonGraphStore),
+            horizonSeeder = HorizonSeeder(structureStore),
         )
         return CognitivePipeline(
             engramClient = engramClient,
@@ -555,5 +556,55 @@ class ContextHorizonConversationalCycleTest {
         assertEquals("resolved", structureStore.getItem(email, task.uid)!!.status)
         val prompt = promptOf(sent.trace.horizonCycle!!)
         assertTrue(prompt.contains("Changes you just made to memory") && prompt.contains("Marked done: \"Send the invoice to Acme\""), prompt)
+    }
+
+    // ── Focus and recall across turns ────────────────────────────────────────
+
+    @Test
+    fun `working on a project brings its items into view, switching takes them out, and a recall question brings back what it is about`() = runBlocking {
+        val email = "focus-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val demo = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")!!
+        val garden = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structureStore.createItem(email, 0, ItemKind.TASK, "Sort out the firewall rules", projectUid = demo.uid)
+        structureStore.createItem(email, 0, ItemKind.TASK, "Choose the plants", projectUid = garden.uid)
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                val demoRef = Regex("(c\\d+) Demo \\(project").find(request.prompt)?.groupValues?.get(1)
+                val gardenRef = Regex("(c\\d+) Garden redesign \\(project").find(request.prompt)?.groupValues?.get(1)
+                when {
+                    request.interpretedMessage.startsWith("Let's work on the demo") ->
+                        opsResponse(op("set_focus", "target" to demoRef, "quote" to "Let's work on the demo"))
+                    request.interpretedMessage.startsWith("Let's switch to the garden") ->
+                        opsResponse(op("set_focus", "target" to gardenRef, "quote" to "Let's switch to the garden"))
+                    else -> opsResponse()
+                }
+            } else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+        fun inView(turn: CognitivePipeline.DebugChatResult) = turn.trace.horizonCycle!!.horizonAfterPropagation.map { it.text }
+
+        val before = pipeline.processForDebug("Good morning", "s1", email, requestId = "req-a")
+        assertTrue(inView(before).none { it.contains("firewall") || it.contains("plants") }, "zoomed out: what is inside projects is not in view")
+        val shape = before.trace.horizonCycle!!.containers
+        assertTrue(shape.any { it == "Demo (1 open, 0 in view)" } && shape.any { it == "Garden redesign (1 open, 0 in view)" }, "the overview still shows the shape of what they have going on: $shape")
+
+        val demoTurn = pipeline.processForDebug("Let's work on the demo.", "s1", email, requestId = "req-b")
+        assertTrue(inView(demoTurn).contains("Sort out the firewall rules"))
+        assertTrue(inView(demoTurn).none { it.contains("plants") })
+        assertEquals("demo", demoTurn.trace.horizonCycle!!.focus!!.substringBefore(" (").lowercase())
+        assertEquals("BINOCULARS", demoTurn.trace.horizonCycle!!.zoom!!.uppercase())
+        val firewall = demoTurn.trace.horizonCycle!!.horizonAfterPropagation.first { it.text.contains("firewall") }
+        assertEquals("InFocus", firewall.surfacing)
+        assertTrue(firewall.why.any { it.startsWith("focus=") }, "the trace answers 'why is this in view': ${firewall.why}")
+
+        val gardenTurn = pipeline.processForDebug("Let's switch to the garden.", "s1", email, requestId = "req-c")
+        assertTrue(inView(gardenTurn).contains("Choose the plants"))
+        assertTrue(inView(gardenTurn).none { it.contains("firewall") })
+
+        val recall = pipeline.processForDebug("What was I doing about the firewall rules?", "s1", email, requestId = "req-d")
+        assertTrue(inView(recall).contains("Sort out the firewall rules"), "asking about it brings it back, though the focus is elsewhere")
+        assertEquals("Activated", recall.trace.horizonCycle!!.horizonAfterPropagation.first { it.text.contains("firewall") }.surfacing)
+        assertTrue(promptOf(recall.trace.horizonCycle!!).contains("Sort out the firewall rules"), "and it reaches the reply's prompt")
     }
 }

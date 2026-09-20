@@ -727,7 +727,7 @@ open class CognitivePipeline(
             script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
         }
         val horizonItems = (horizonCycleResult?.assembleOutcome as? AssembleOutcome.Assembled)
-            ?.horizon?.let { HorizonItemsRenderer.render(it) } ?: emptyList()
+            ?.horizon?.let { HorizonItemsRenderer.render(it, sessionZoneId ?: java.time.ZoneId.systemDefault()) } ?: emptyList()
         val integrityCaveat = HorizonItemsRenderer.composeIntegrityCaveat(horizonCycleResult)
         val persona = script.persona(ctx.modality)
         // Posture read as a natural-language directive — computed independent of which branch
@@ -958,6 +958,12 @@ open class CognitivePipeline(
                     interpretOutcome = hcr.interpretOutcome?.let { describeInterpretOutcome(it) },
                     interpretLatencyMs = hcr.interpretLatencyMs,
                     mutationOutcomes = hcr.mutationOutcomes.map { toMutationOutcomeTrace(it) },
+                    silenceQuestionAsked = hcr.silenceQuestionAsked,
+                    nudges = hcr.seeded?.let { NudgeTrace(it.touched, it.mentionedContainers, it.mentionedEntities, it.mentionedItems, it.pruned) },
+                    focus = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.focus?.let { "${it.name} (${it.kind})" },
+                    zoom = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.zoom?.name?.lowercase(),
+                    containers = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.containers
+                        ?.map { "${it.name} (${it.openItems} open, ${it.itemsInView} in view)" } ?: emptyList(),
                     propagationOutcome = hcr.propagationOutcome?.let { describePropagationOutcome(it) },
                     propagationEdges = (hcr.propagationOutcome as? PropagationOutcome.Propagated)?.edgesCreated?.map {
                         RelevanceEdgeTrace(it.fromPhraseUid, it.toPhraseUid, it.strength)
@@ -1110,7 +1116,16 @@ open class CognitivePipeline(
             is SurfacingReason.JustAsserted -> "JustAsserted"
             is SurfacingReason.RecentActorEvidence -> "RecentActorEvidence"
             is SurfacingReason.DormantOpen -> "DormantOpen"
+            is SurfacingReason.Pinned -> "Pinned"
+            is SurfacingReason.InFocus -> "InFocus"
+            is SurfacingReason.Activated -> "Activated"
+            is SurfacingReason.Urgent -> "Urgent"
+            is SurfacingReason.Peripheral -> "Peripheral"
         },
+        score = item.score,
+        why = item.why.map { "${it.kind}=${"%.2f".format(it.value)}" + (it.detail?.let { d -> " ($d)" } ?: "") },
+        kind = item.kind,
+        container = item.container?.name,
     )
 
     private fun tier2ModelName(): String? {

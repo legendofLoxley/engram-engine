@@ -120,6 +120,10 @@ interface HorizonAssembler {
 class ArcadeHorizonAssembler(
     private val db: Database,
     private val lockTimeoutMs: Long = HorizonConsistencyLock.DEFAULT_TIMEOUT_MS,
+    /** Every tunable behind what is in view. See [HorizonPolicy]. */
+    private val policy: HorizonPolicy = HorizonPolicy(),
+    /** Wall-clock milliseconds. Deadlines are judged against this at read time; injected so a test can move time. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : HorizonAssembler {
 
     private val logger = LoggerFactory.getLogger(ArcadeHorizonAssembler::class.java)
@@ -165,7 +169,7 @@ class ArcadeHorizonAssembler(
         activeRelevanceWallClock: Duration?,
         budget: HorizonBudget,
     ): AssembleOutcome = withContext(Dispatchers.IO) {
-        val now = System.currentTimeMillis()
+        val now = clock()
         val empty = ContextHorizon(
             userEmail = userEmail,
             asOf = now,
@@ -206,8 +210,17 @@ class ArcadeHorizonAssembler(
                     // behavior depending only on whether the user happened to have data.
                     var moreCandidatesAvailable = false
                     val prioritized: List<HorizonItem>
+                    var containerViews: List<HorizonContainerView> = emptyList()
+                    var focusRef: HorizonFocusRef? = null
+                    var zoomLevel = FocusZoom.OVERVIEW
                     if (sourceUids.isEmpty()) {
                         prioritized = emptyList()
+                        // No Source yet means no items, but the user may already have projects and a focus (Sources
+                        // are created with a first item, projects are not): their shape is still part of the view.
+                        val selection = HorizonSelector(db, policy).select(userEmail, currentCycleSeq, now, emptyList())
+                        containerViews = selection.containers
+                        focusRef = selection.focus
+                        zoomLevel = selection.zoom
                     } else {
                         // Bounded over-fetch pools — cost is a function of poolLimit and sourceUids
                         // (small, one per source type per user), not total graph size. The
@@ -230,10 +243,16 @@ class ArcadeHorizonAssembler(
                         val actorEvidencePool = queryAttributedEvidencePool(sourceUids, minCycleForActorPool, currentCycleSeq, poolLimit)
                         moreCandidatesAvailable = moreCandidatesAvailable || actorEvidencePool.size >= poolLimit
 
+                        // Environment reports get the same bounded-recency treatment: reports from outside the
+                        // conversation may break into view, in the same few peripheral slots (see rank / peripheralSlots).
+                        val environmentPool = queryEvidencePool(sourceUids, setOf(ENVIRONMENT_SOURCE_TYPE), minCycleForActorPool, currentCycleSeq, poolLimit)
+                        moreCandidatesAvailable = moreCandidatesAvailable || environmentPool.size >= poolLimit
+
                         val byUid = LinkedHashMap<String, RawCandidate>()
                         for (c in openPool) byUid[c.phraseUid] = c
                         for (c in freshPool) byUid.putIfAbsent(c.phraseUid, c)
                         for (c in actorEvidencePool) byUid.putIfAbsent(c.phraseUid, c)
+                        for (c in environmentPool) byUid.putIfAbsent(c.phraseUid, c)
 
                         testMidAssemblySync?.invoke()
 
@@ -261,10 +280,40 @@ class ArcadeHorizonAssembler(
                             c.cycleSeq > currentCycleSeq || (c.statusCycleSeq != null && c.statusCycleSeq > currentCycleSeq)
                         }
 
-                        val classified = byUid.values.map { c -> toHorizonItem(c, currentCycleSeq, reactivationResult.infoByTargetUid[c.phraseUid]) }
-                        prioritized = classified.sortedWith(
-                            compareBy<HorizonItem> { priorityRank(it.surfacing) }.thenByDescending { surfacingCycleSeq(it.surfacing) },
-                        )
+                        // ── Selection: what the graph and the clock say deserves a place ──
+                        // Focus, nudges, spreading, deadlines and explicit attention, from HorizonSelector;
+                        // the pools above keep contributing what they always did (just said, reactivated,
+                        // reported by Hermes, still open), now as components of one score.
+                        val selection = HorizonSelector(db, policy).select(userEmail, currentCycleSeq, now, freshPool.map { it.phraseUid })
+                        if (selection.truncated) moreCandidatesAvailable = true
+                        val selectorPicks = selection.activations.values.sortedByDescending { it.score }.take(poolLimit)
+                        for (pick in selectorPicks) {
+                            if (byUid.containsKey(pick.uid)) continue
+                            // Ownership is proved here: an item is admitted only if one of the user's own Sources asserts it.
+                            queryAssertsForPhrase(sourceUids, pick.uid)?.let { byUid[pick.uid] = it }
+                        }
+                        val states = HorizonSelector(db, policy).loadStates(byUid.keys)
+                        val actorUids = actorEvidencePool.map { it.phraseUid }.toSet()
+                        val envUids = environmentPool.map { it.phraseUid }.toSet()
+
+                        val ranked = byUid.values.mapNotNull { c ->
+                            val state = states[c.phraseUid]
+                            // Left out: finished, told to stop, corrected away, or filed under a project that is done or silenced.
+                            if (state != null && (state.status == "resolved" || state.attention == AttentionDirective.SUPPRESSED || state.superseded ||
+                                    state.containerAttention == AttentionDirective.SUPPRESSED || (state.container != null && state.containerStatus != "active"))
+                            ) return@mapNotNull null
+                            rank(c, state, selection, reactivationResult.infoByTargetUid[c.phraseUid], currentCycleSeq, c.phraseUid in actorUids, c.phraseUid in envUids)
+                        }.filter { it.item.score >= policy.visibilityFloor }
+
+                        // Reports from outside the conversation may come in, but only in a few slots.
+                        val peripheralOnly = ranked.filter { r -> r.item.why.all { it.kind == "peripheral" } }.sortedByDescending { it.tie }
+                        val overPeripheralCap = peripheralOnly.drop(policy.peripheralSlots).map { it.item.sourceRefs.first().phraseUid }.toSet()
+                        prioritized = ranked.filter { it.item.sourceRefs.first().phraseUid !in overPeripheralCap }
+                            .sortedWith(compareByDescending<Ranked> { it.item.score }.thenByDescending { it.tie })
+                            .map { it.item }
+                        containerViews = selection.containers
+                        focusRef = selection.focus
+                        zoomLevel = selection.zoom
                     }
 
                     // Enforce the actual serialized-output byte budget, not just item count —
@@ -276,10 +325,10 @@ class ArcadeHorizonAssembler(
                     // payload fits. If even zero items doesn't fit, budgetExceeded signals the outer
                     // scope to return AssembleOutcome.BudgetExceeded instead of an oversized result.
                     var keptCount = minOf(budget.maxItems, prioritized.size)
-                    var built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable)
+                    var built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable, zoomLevel, focusRef, containerViews)
                     while (encodedByteSize(built) > byteBudget && keptCount > 0) {
                         keptCount--
-                        built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable)
+                        built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable, zoomLevel, focusRef, containerViews)
                     }
                     if (encodedByteSize(built) > byteBudget) {
                         budgetExceeded = true
@@ -308,8 +357,10 @@ class ArcadeHorizonAssembler(
     /** Builds the candidate result for [keptCount] kept items, moving the rest into omittedSample/omittedAtLeast — the single place both the item-count budget and the byte-budget enforcement loop construct a result, so evidence bookkeeping can't drift between the two reasons for dropping an item. */
     private fun buildHorizon(
         userEmail: String, now: Long, budget: HorizonBudget, prioritized: List<HorizonItem>, keptCount: Int, moreCandidatesAvailable: Boolean,
+        zoom: FocusZoom, focus: HorizonFocusRef?, containers: List<HorizonContainerView>,
     ): ContextHorizon {
         val kept = prioritized.take(keptCount)
+        val inView = kept.mapNotNull { it.container?.uid }.groupingBy { it }.eachCount()
         val overflow = prioritized.drop(keptCount)
         val omittedSample = overflow.take(HorizonLimits.OMITTED_SAMPLE_CAP).map { item ->
             OmittedRef(item.sourceRefs.first(), item.category, "budget exceeded: ${describeSurfacing(item.surfacing)}")
@@ -323,6 +374,9 @@ class ArcadeHorizonAssembler(
             omittedSample = omittedSample,
             omittedAtLeast = overflow.size,
             moreCandidatesAvailable = moreCandidatesAvailable,
+            zoom = zoom,
+            focus = focus,
+            containers = containers.map { it.copy(itemsInView = inView[it.uid] ?: 0) },
         )
     }
 
@@ -540,9 +594,13 @@ class ArcadeHorizonAssembler(
      * own bound on how many such queries this issues — small by design (default 3), never
      * proportional to total graph size.
      */
-    private fun queryAttributedEvidencePool(sourceUids: List<String>, minCycle: Long, currentCycleSeq: Long, limit: Int): List<RawCandidate> {
+    private fun queryAttributedEvidencePool(sourceUids: List<String>, minCycle: Long, currentCycleSeq: Long, limit: Int): List<RawCandidate> =
+        queryEvidencePool(sourceUids, ACTOR_ATTRIBUTED_SOURCE_TYPES, minCycle, currentCycleSeq, limit)
+
+    /** [queryAttributedEvidencePool]'s query, for any set of `Source.type`s — the environment's reports use it too. */
+    private fun queryEvidencePool(sourceUids: List<String>, types: Set<String>, minCycle: Long, currentCycleSeq: Long, limit: Int): List<RawCandidate> {
         if (sourceUids.isEmpty()) return emptyList()
-        val actorSourceUids = actorAttributedSourceUidsAmong(sourceUids)
+        val actorSourceUids = sourceUidsOfTypes(sourceUids, types)
         if (actorSourceUids.isEmpty()) return emptyList()
         val out = mutableListOf<RawCandidate>()
         var cycle = currentCycleSeq
@@ -572,10 +630,10 @@ class ArcadeHorizonAssembler(
     }
 
     /** The subset of [sourceUids] whose `Source.type` is Actor-attributed — a plain vertex-type filter, no edge `@out`/`@in` projection involved. */
-    private fun actorAttributedSourceUidsAmong(sourceUids: List<String>): List<String> {
+    private fun sourceUidsOfTypes(sourceUids: List<String>, types: Set<String>): List<String> {
         if (sourceUids.isEmpty()) return emptyList()
         val sql = "SELECT uid FROM Source WHERE uid IN :sourceUids AND type IN :actorSourceTypes"
-        val params = mapOf("sourceUids" to sourceUids, "actorSourceTypes" to ACTOR_ATTRIBUTED_SOURCE_TYPES.toList())
+        val params = mapOf("sourceUids" to sourceUids, "actorSourceTypes" to types.toList())
         return db.query("sql", sql, params).use { rs ->
             val out = mutableListOf<String>()
             while (rs.hasNext()) out += rs.next().toMap()["uid"] as? String ?: continue
@@ -678,35 +736,78 @@ class ArcadeHorizonAssembler(
         return ReactivationQueryResult(result, hitLimit = rows.size >= limit)
     }
 
-    private fun toHorizonItem(c: RawCandidate, currentCycleSeq: Long, reactivation: ReactivationInfo?): HorizonItem {
-        // JustAsserted is about the phrase's CONTENT being newly stated — the original assertion
-        // cycleSeq, never statusCycleSeq. A status change in a later cycle must not make an old
-        // phrase read as freshly stated in that cycle.
-        val surfacing = when {
-            reactivation != null -> SurfacingReason.ActiveReactivation(reactivation)
-            c.cycleSeq == currentCycleSeq -> SurfacingReason.JustAsserted(c.cycleSeq)
-            // Explicit precondition, not a bare `else` — DormantOpen specifically means an
-            // open-status intention. Every pre-existing non-reactivated, non-fresh candidate reached
-            // this point only via openPool (status='open'), so this changes nothing for them; it is
-            // what makes room for a well-defined RecentActorEvidence branch below instead of
-            // mislabeling that pool's members as open.
-            c.status != null -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
-            else -> SurfacingReason.RecentActorEvidence(c.cycleSeq)
+    private class Ranked(val item: HorizonItem, val tie: Long)
+
+    /**
+     * Turns one candidate into an item with a score and the reasons behind it. The pools contribute
+     * what they always did — something just said, reactivated by a fresh `relevant_to` link, reported
+     * from outside the conversation, still open and belonging to no project — each as one component
+     * with its own strength; [selection]'s focus, nudge, spread, deadline and pinned components are
+     * added to those, and the item's score is them combined (each adds, none can pass 1). Which one is
+     * named as *the* reason is the strongest, ties going to the more specific.
+     *
+     * An open item filed under a project gets no baseline: whether it is in view is decided by whether
+     * the project is, not by its being open.
+     */
+    private fun rank(
+        c: RawCandidate,
+        state: HorizonSelector.ItemState?,
+        selection: HorizonSelector.Selection,
+        reactivation: ReactivationInfo?,
+        currentCycleSeq: Long,
+        fromActor: Boolean,
+        fromEnvironment: Boolean,
+    ): Ranked? {
+        val activation = selection.activations[c.phraseUid]
+        val parts = mutableListOf<ScoreComponent>()
+        if (reactivation != null) parts += ScoreComponent("reactivation", policy.reactivationActivation, "linked to \"${reactivation.triggeringPhraseText.text.take(60)}\"")
+        if (c.cycleSeq == currentCycleSeq) parts += ScoreComponent("justAsserted", policy.justAssertedActivation, null)
+        if ((fromActor || fromEnvironment) && c.cycleSeq != currentCycleSeq) parts += ScoreComponent("peripheral", policy.peripheralActivation, null)
+        if (c.status == "open" && state?.container == null && c.cycleSeq != currentCycleSeq) parts += ScoreComponent("baseline", policy.unfiledOpenActivation, "still open")
+        if (activation != null) parts += activation.components
+        if (parts.isEmpty()) return null
+
+        val ordered = parts.sortedWith(compareByDescending<ScoreComponent> { it.value }.thenBy { SPECIFICITY.indexOf(it.kind).let { i -> if (i < 0) SPECIFICITY.size else i } })
+        val primary = ordered.first()
+        val surfacing: SurfacingReason = when (primary.kind) {
+            "pinned" -> SurfacingReason.Pinned
+            "reactivation" -> SurfacingReason.ActiveReactivation(reactivation!!)
+            "justAsserted" -> SurfacingReason.JustAsserted(c.cycleSeq)
+            "focus" -> SurfacingReason.InFocus(selection.focus?.name, selection.zoom, activation?.hops ?: 0)
+            "urgency" -> SurfacingReason.Urgent(activation?.dueAt ?: state?.dueAt ?: 0L, activation?.overdue ?: false)
+            "nudge", "spread" -> SurfacingReason.Activated(primary.detail ?: activation?.via ?: "mentioned", activation?.hops ?: 0)
+            "peripheral" -> if (fromEnvironment) SurfacingReason.Peripheral(c.cycleSeq) else SurfacingReason.RecentActorEvidence(c.cycleSeq)
+            else -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
         }
         val status = c.status?.let { s -> runCatching { AssertionStatus.valueOf(s.uppercase()) }.getOrNull() }
-        return HorizonItem(
+        val item = HorizonItem(
             category = categoryFor(c.sourceType, c.status),
             text = BoundedText.of(c.phraseText),
             status = status,
-            attentionDirective = null,
+            attentionDirective = state?.attention,
             provenance = provenanceFor(c.sourceType),
             surfacing = surfacing,
-            sourceRefs = listOf(SourceRef(c.phraseUid, c.sourceUid, c.sourceType, c.assertedAt, c.cycleSeq))
-                .take(HorizonLimits.MAX_SOURCE_REFS_PER_ITEM),
+            sourceRefs = listOf(SourceRef(c.phraseUid, c.sourceUid, c.sourceType, c.assertedAt, c.cycleSeq)).take(HorizonLimits.MAX_SOURCE_REFS_PER_ITEM),
             sourceCount = 1,
             actorMetadata = parseActorMetadata(c.sourceType, c.kindMetadata),
+            score = HorizonPolicy.combine(parts.map { it.value }),
+            why = ordered.take(HorizonLimits.MAX_SCORE_COMPONENTS),
+            kind = state?.kind,
+            dueAt = state?.dueAt,
+            askedBy = state?.askedBy,
+            container = state?.container,
         )
+        // Ties keep the order the pools always gave them: by the cycle the thing that surfaced it happened in.
+        val tie = when (surfacing) {
+            is SurfacingReason.ActiveReactivation -> surfacing.info.edgeCycleSeq
+            is SurfacingReason.DormantOpen -> surfacing.lastStatusChangeCycleSeq
+            else -> c.cycleSeq
+        }
+        return Ranked(item, tie)
     }
+
+    /** When two components tie, the one named first here is reported as the reason. */
+    private val SPECIFICITY = listOf("pinned", "reactivation", "justAsserted", "focus", "nudge", "urgency", "spread", "peripheral", "baseline")
 
     /**
      * Decodes the `ASSERTS.kindMetadata` JSON [ActorEventIngestionService] wrote at ingestion into
@@ -742,27 +843,15 @@ class ArcadeHorizonAssembler(
         else -> ProvenanceKind.EXPLICIT_USER_STATEMENT
     }
 
-    // RecentActorEvidence ranks above DormantOpen: bounded-recency Actor evidence is more likely to
-    // matter right now than an intention that has simply been open indefinitely — the same intuition
-    // already distinguishing JustAsserted/ActiveReactivation from DormantOpen, extended one step.
-    private fun priorityRank(reason: SurfacingReason): Int = when (reason) {
-        is SurfacingReason.ActiveReactivation -> 0
-        is SurfacingReason.JustAsserted -> 1
-        is SurfacingReason.RecentActorEvidence -> 2
-        is SurfacingReason.DormantOpen -> 3
-    }
-
-    private fun surfacingCycleSeq(reason: SurfacingReason): Long = when (reason) {
-        is SurfacingReason.ActiveReactivation -> reason.info.edgeCycleSeq
-        is SurfacingReason.JustAsserted -> reason.cycleSeq
-        is SurfacingReason.RecentActorEvidence -> reason.assertedCycleSeq
-        is SurfacingReason.DormantOpen -> reason.lastStatusChangeCycleSeq
-    }
-
     private fun describeSurfacing(reason: SurfacingReason): String = when (reason) {
         is SurfacingReason.ActiveReactivation -> "active reactivation"
         is SurfacingReason.JustAsserted -> "just asserted"
         is SurfacingReason.RecentActorEvidence -> "recent actor evidence"
         is SurfacingReason.DormantOpen -> "dormant open"
+        is SurfacingReason.Pinned -> "pinned"
+        is SurfacingReason.InFocus -> "in focus"
+        is SurfacingReason.Activated -> "activated"
+        is SurfacingReason.Urgent -> "urgent"
+        is SurfacingReason.Peripheral -> "peripheral"
     }
 }

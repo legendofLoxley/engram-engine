@@ -126,6 +126,71 @@ class HorizonOperationApplierTest {
         assertEquals("Corrected \"Sister's birthday\" to \"Sister's birthday\"", result.summary)
     }
 
+    // ── Filing an item from its own words ────────────────────────────────────
+
+    @Test
+    fun `an item that names a project is filed there even though the model did not file it, and the reply says so`() = runBlocking {
+        val user = newUser()
+        val garden = structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian demo")
+
+        val result = apply(user, RecordItem(ItemKind.TASK, "order soil for the garden redesign")).single()
+
+        assertEquals(garden.uid, structure.getItem(user, result.resultUid!!)!!.projectUid)
+        assertTrue(result.summary.contains("filed under \"Garden redesign\""), result.summary)
+    }
+
+    @Test
+    fun `sharing one distinctive word with exactly one project files it there`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")
+
+        val result = apply(user, RecordItem(ItemKind.TASK, "book the conference room for the demo", title = "Book the conference room")).single()
+
+        assertEquals(demo.uid, structure.getItem(user, result.resultUid!!)!!.projectUid)
+    }
+
+    @Test
+    fun `it stays unfiled when nothing names a project, when two fit equally, when the model was unsure, or the project is done`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Demo")!!
+        structure.createContainer(user, 1, ContainerKind.PROJECT, "Demo prep")
+        val old = structure.createContainer(user, 1, ContainerKind.PROJECT, "Kitchen remodel")!!
+        structure.resolve(user, 2, old.uid)
+        structure.setFocus(user, 2, demo.uid, FocusMode.PINNED)
+
+        fun projectOf(op: RecordItem) = runBlocking { structure.getItem(user, apply(user, op).single().resultUid!!)!!.projectUid }
+
+        assertNull(projectOf(RecordItem(ItemKind.TASK, "call the plumber tomorrow")), "working on the demo doesn't make this a demo task")
+        assertEquals(structure.listContainers(user, ContainerKind.PROJECT).first { it.name == "Demo prep" }.uid, projectOf(RecordItem(ItemKind.TASK, "finish the demo prep slides")), "the strictly longest full name wins")
+        assertNull(projectOf(RecordItem(ItemKind.TASK, "review the demo budget", askWhichProject = true)), "the model said it was unsure, so it is asked, not guessed")
+        assertNull(projectOf(RecordItem(ItemKind.TASK, "order the kitchen remodel tiles")), "a finished project takes nothing new")
+    }
+
+    @Test
+    fun `two projects sharing the same single word with an item is ambiguous, so it is not filed`() = runBlocking {
+        val user = newUser()
+        structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")
+        structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden party")
+
+        val item = structure.getItem(user, apply(user, RecordItem(ItemKind.TASK, "buy compost for the garden")).single().resultUid!!)!!
+
+        assertNull(item.projectUid)
+    }
+
+    @Test
+    fun `an explicit project from the model always wins over inference`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Demo")!!
+        val garden = structure.createContainer(user, 1, ContainerKind.PROJECT, "Garden redesign")!!
+
+        val item = structure.getItem(user, apply(user, RecordItem(ItemKind.TASK, "order soil for the garden redesign", projectUid = demo.uid)).single().resultUid!!)!!
+
+        assertEquals(demo.uid, item.projectUid)
+        assertNotNull(garden)
+    }
+
     @Test
     fun `a project created earlier in the same response can be filed under by name`() = runBlocking {
         val user = newUser()

@@ -278,6 +278,7 @@ object SchemaBootstrap {
             // "pinned" (an explicit instruction; persists until changed, at most one per user) or
             // "nudge" (a casual mention; fades). `zoom` is overview | binoculars | telescope.
             ensureEdge(schema, "FOCUSES_ON") { et ->
+                et.createProperty("weight", Type.DOUBLE)        // a nudge's strength (0..1) before it fades; 1.0 for a pin
                 et.createProperty("zoom", Type.STRING)
                 et.createProperty("mode", Type.STRING)
                 et.createProperty("setCycleSeq", Type.LONG)
@@ -304,11 +305,17 @@ object SchemaBootstrap {
             // task or event ("Order the soil" for "I never got around to ordering the soil"). Absent when
             // `text` already is the user's words.
             ensureProperty(schema, "Phrase",  "sourceQuote",         Type.STRING)
+            // Denormalized owner of an item created through HorizonStructureStore, so deadline and
+            // attention lookups can be scoped to one user by an index BEFORE any LIMIT — the same reason
+            // RELATED_TO carries one. A scoping aid only: ownership is still re-verified through
+            // TRUSTS -> Source -> ASSERTS before anything is surfaced.
+            ensureProperty(schema, "Phrase",  "ownerEmail",          Type.STRING)
             // Same properties as the ensureVertex blocks above, repeated so a database that already ran
             // an earlier revision of those blocks picks them up.
             ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)
             ensureProperty(schema, "Domain",  "attention",           Type.STRING)
             ensureProperty(schema, "Project", "attention",           Type.STRING)
+            ensureProperty(schema, "FOCUSES_ON", "weight",           Type.DOUBLE)
             ensureProperty(schema, "Domain",  "tentative",           Type.BOOLEAN)
             ensureProperty(schema, "Project", "tentative",           Type.BOOLEAN)
             ensureProperty(schema, "Event",   "status",              Type.STRING)
@@ -371,6 +378,17 @@ object SchemaBootstrap {
             ensureIndex(schema, "Project",     "dueAt")
             ensureIndex(schema, "Task",        "dueAt")
             ensureIndex(schema, "Event",       "occursAt")
+            // Deadline selection: one user's OPEN things, by index; the deadline itself is filtered in code.
+            // Deliberately NOT (ownerEmail, status, dueAt): in ArcadeDB 25.1.1 a composite index whose last
+            // column is null for some rows (an undated task, an undated project) returns those rows several
+            // times to a prefix lookup — a project listed three times — and duplicates suggest missing rows
+            // too. Both columns here are always set.
+            ensureCompositeIndex(schema, "Task",    "ownerEmail", "status")
+            ensureCompositeIndex(schema, "Event",   "ownerEmail", "status")
+            ensureCompositeIndex(schema, "Project", "ownerEmail", "status")
+            // "Everything this user pinned/suppressed": rare rows, found without scanning their items.
+            ensureCompositeIndex(schema, "Phrase",  "attention", "ownerEmail")
+            ensureIndex(schema, "ABOUT",       "ownerEmail")
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Source",      "uid")

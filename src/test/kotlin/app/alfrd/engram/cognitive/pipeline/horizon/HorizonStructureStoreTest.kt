@@ -567,6 +567,25 @@ class HorizonStructureStoreTest {
         assertEquals("Task", (viaSource as Vertex).typeName)
     }
 
+    @Test
+    fun `undated projects and tasks are each listed exactly once, however many there are`() = runBlocking {
+        // Regression: a composite index whose last column was null (dueAt) made ArcadeDB 25.1.1 return an undated
+        // project several times to an owner-scoped lookup.
+        val user = newUser()
+        repeat(30) { store.createContainer(user, 1, ContainerKind.PROJECT, "Project $it") }
+        repeat(30) { store.createItem(user, 1, ItemKind.TASK, "Undated task $it") }
+        val dated = store.createContainer(user, 1, ContainerKind.PROJECT, "Dated", dueAt = 5_000L)!!
+
+        val projects = store.listContainers(user, ContainerKind.PROJECT)
+        assertEquals(31, projects.size)
+        assertEquals(31, projects.map { it.uid }.toSet().size)
+        assertTrue(projects.any { it.uid == dated.uid })
+        val rows = dbManager.getDatabase().query("sql", "SELECT uid FROM Project WHERE ownerEmail = :e", mapOf("e" to user)).use { rs ->
+            generateSequence { if (rs.hasNext()) rs.next().toMap()["uid"] as String else null }.toList()
+        }
+        assertEquals(31, rows.size, "the raw owner-scoped query itself returns each project once: $rows")
+    }
+
     // ── Attention ─────────────────────────────────────────────────────────────
 
     @Test
