@@ -3,15 +3,32 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeRequestLedger
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.AssertionStatus
+import app.alfrd.engram.cognitive.pipeline.horizon.ContainerKind
+import app.alfrd.engram.cognitive.pipeline.horizon.CreateContainer
+import app.alfrd.engram.cognitive.pipeline.horizon.CycleFollowUp
 import app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer
+import app.alfrd.engram.cognitive.pipeline.horizon.FocusMode
+import app.alfrd.engram.cognitive.pipeline.horizon.HoldForChoice
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonGraphStore
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperation
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPropagator
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonStructureStore
+import app.alfrd.engram.cognitive.pipeline.horizon.ItemKind
+import app.alfrd.engram.cognitive.pipeline.horizon.OperationPlanCodec
+import app.alfrd.engram.cognitive.pipeline.horizon.OperationRejection
+import app.alfrd.engram.cognitive.pipeline.horizon.RecordItem
 import app.alfrd.engram.cognitive.pipeline.horizon.RequestLedger
+import app.alfrd.engram.cognitive.pipeline.horizon.ResolveItem
 import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
+import app.alfrd.engram.cognitive.pipeline.horizon.ViewSnapshot
+import app.alfrd.engram.cognitive.pipeline.horizon.ViewSnapshotBuilder
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.EngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.PhraseCandidate
@@ -23,30 +40,34 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.io.File
+import java.time.ZonedDateTime
 import java.util.UUID
 
 /**
- * Against real `DatabaseEngramClient`/`ArcadeHorizonGraphStore`/`ArcadeHorizonAssembler`/
- * `SalientTokenPropagator` — only [Interpreter] is faked (a subclass override, per this
- * codebase's testable-service-classes convention), since these tests target the coordinator's
- * own orchestration and checkpoint-resume logic, not interpretation itself (covered separately
- * in [InterpreterTest]). This is "the production-wired path" the coordinator-disabled legacy
- * path cannot stand in for.
+ * Against real `DatabaseEngramClient`/`ArcadeHorizonGraphStore`/`ArcadeHorizonStructureStore`/
+ * `ArcadeHorizonAssembler`/`SalientTokenPropagator` — only [Interpreter] is faked (a subclass
+ * override, per this codebase's testable-service-classes convention), since these tests target the
+ * coordinator's own orchestration and checkpoint-resume logic, not interpretation itself (covered
+ * in [InterpreterTest] and [app.alfrd.engram.cognitive.pipeline.horizon.OperationParserTest]).
  */
 class HorizonCycleCoordinatorTest {
 
     private lateinit var dbManager: DatabaseManager
     private lateinit var engramClient: DatabaseEngramClient
     private lateinit var horizonGraphStore: HorizonGraphStore
+    private lateinit var structureStore: HorizonStructureStore
     private lateinit var horizonAssembler: HorizonAssembler
     private lateinit var propagator: HorizonPropagator
     private lateinit var cycleSequencer: CycleSequencer
     private lateinit var requestLedger: RequestLedger
+    private lateinit var applier: HorizonOperationApplier
     private lateinit var testDbPath: String
+    private var clockNow = System.currentTimeMillis()
 
     @BeforeEach
     fun setUp() {
@@ -55,10 +76,12 @@ class HorizonCycleCoordinatorTest {
         SchemaBootstrap.bootstrap(dbManager.getDatabase())
         engramClient = DatabaseEngramClient(dbManager.getDatabase())
         horizonGraphStore = ArcadeHorizonGraphStore(dbManager.getDatabase())
+        structureStore = ArcadeHorizonStructureStore(dbManager.getDatabase())
         horizonAssembler = ArcadeHorizonAssembler(dbManager.getDatabase())
         propagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler)
         cycleSequencer = ArcadeCycleSequencer(dbManager.getDatabase())
         requestLedger = ArcadeRequestLedger(dbManager.getDatabase())
+        applier = HorizonOperationApplier(structureStore, horizonGraphStore)
     }
 
     @AfterEach
@@ -83,105 +106,296 @@ class HorizonCycleCoordinatorTest {
         }
     }
 
-    private fun coordinator(interpreter: Interpreter) = HorizonCycleCoordinator(
+    private fun coordinator(interpreter: Interpreter, client: EngramClient = engramClient) = HorizonCycleCoordinator(
         cycleSequencer = cycleSequencer,
         requestLedger = requestLedger,
         interpreter = interpreter,
-        engramClient = engramClient,
+        engramClient = client,
         horizonGraphStore = horizonGraphStore,
         horizonPropagator = propagator,
         horizonAssembler = horizonAssembler,
+        viewSnapshotBuilder = ViewSnapshotBuilder(structureStore),
+        operationApplier = applier,
+        horizonSeeder = HorizonSeeder(structureStore, clock = { clockNow }),
     )
 
-    private fun fixedInterpreter(outcome: InterpretOutcome): Interpreter = object : Interpreter(null) {
-        override suspend fun interpret(utterance: String): InterpretOutcome = outcome
+    /** An interpreter that always returns [outcome] and records what it was shown. */
+    private class FixedInterpreter(private val outcome: InterpretOutcome) : Interpreter(null) {
+        var calls = 0
+        var lastSnapshot: ViewSnapshot? = null
+        override suspend fun interpret(utterance: String, snapshot: ViewSnapshot, now: ZonedDateTime): InterpretOutcome {
+            calls++
+            lastSnapshot = snapshot
+            return outcome
+        }
     }
 
+    private fun proposes(vararg ops: HorizonOperation, rejections: List<OperationRejection> = emptyList()) =
+        FixedInterpreter(InterpretOutcome.Operations(ops.toList(), rejections, latencyMs = 5))
+
+    private fun noOperation() = FixedInterpreter(InterpretOutcome.NoOperation)
+    private fun modelDown() = FixedInterpreter(InterpretOutcome.LlmFailure("model unavailable"))
+
+    private fun assembled(result: HorizonCycleResult) = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
+
+    // ── The model's operations ───────────────────────────────────────────────
+
     @Test
-    fun `an ordinary fact utterance is captured and Horizon-visible the same cycle`() = runBlocking {
+    fun `a recorded fact is written and Horizon-visible the same cycle`() = runBlocking {
         val email = "coord-fact-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
+        val c = coordinator(proposes(RecordItem(ItemKind.FACT, "My dog's name is Newton")))
 
         val result = c.runCycle(email, requestId = "req-1", utterance = "My dog's name is Newton.")
 
-        assertTrue(result.mutationOutcomes.any { it is MutationOutcome.Fact && it.applied }, "the fact must be confirmed written")
-        assertTrue(result.mutationOutcomes.none { it is MutationOutcome.Intention }, "no intention was proposed")
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertTrue(horizon.items.any { it.text.text.contains("Newton") }, "the fact must be Horizon-visible immediately, same cycle")
+        val op = result.mutationOutcomes.filterIsInstance<MutationOutcome.Operation>().single().result
+        assertTrue(op.applied)
+        assertTrue(assembled(result).items.any { it.text.text.contains("Newton") }, "the fact must be Horizon-visible immediately, same cycle")
     }
 
     @Test
-    fun `an intention proposal is captured as an OPEN item`() = runBlocking {
-        val email = "coord-intention-${UUID.randomUUID()}@test.alfrd.internal"
+    fun `a recorded task is captured as an OPEN item`() = runBlocking {
+        val email = "coord-task-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
         val quote = "Getting Alfrd running on Arx is a priority for me"
-        val c = coordinator(fixedInterpreter(InterpretOutcome.ProposedAssertion(quote, latencyMs = 5)))
+        val c = coordinator(proposes(RecordItem(ItemKind.TASK, quote)))
 
         val result = c.runCycle(email, requestId = "req-2", utterance = "$quote, I keep meaning to get to it.")
 
-        val intentionOutcome = result.mutationOutcomes.filterIsInstance<MutationOutcome.Intention>().single()
-        assertTrue(intentionOutcome.applied)
-        assertEquals(quote, intentionOutcome.quote)
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        val item = horizon.items.single { it.text.text == quote }
+        assertTrue(result.mutationOutcomes.filterIsInstance<MutationOutcome.Operation>().single().result.applied)
+        val item = assembled(result).items.single { it.text.text == quote }
         assertEquals(AssertionStatus.OPEN, item.status)
     }
 
     @Test
-    fun `a combined fact-and-intention turn writes both without dropping either`() = runBlocking {
-        val email = "coord-combined-${UUID.randomUUID()}@test.alfrd.internal"
+    fun `several operations in one turn each land, and one failing does not hide the others`() = runBlocking {
+        val email = "coord-multi-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val quote = "getting Alfrd running on Arx is a priority for me"
-        val utterance = "My dog's name is Newton. Also, $quote."
-        val c = coordinator(fixedInterpreter(InterpretOutcome.ProposedAssertion(quote, latencyMs = 5)))
+        val c = coordinator(
+            proposes(
+                RecordItem(ItemKind.FACT, "My dog's name is Newton"),
+                ResolveItem(UUID.randomUUID().toString(), "that is done"),
+                RecordItem(ItemKind.TASK, "getting Alfrd running on Arx is a priority for me"),
+            ),
+        )
 
-        val result = c.runCycle(email, requestId = "req-3", utterance = utterance)
+        val result = c.runCycle(email, requestId = "req-3", utterance = "irrelevant")
 
-        assertTrue(result.mutationOutcomes.any { it is MutationOutcome.Fact && it.applied }, "the fact must not be discarded")
-        assertTrue(result.mutationOutcomes.any { it is MutationOutcome.Intention && it.applied }, "the intention must also be written")
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertTrue(horizon.items.any { it.text.text.contains("Newton") })
-        assertTrue(horizon.items.any { it.status == AssertionStatus.OPEN })
+        val applied = result.mutationOutcomes.filterIsInstance<MutationOutcome.Operation>().map { it.result }
+        assertEquals(listOf(true, false, true), applied.map { it.applied })
+        val h = assembled(result)
+        assertTrue(h.items.any { it.text.text.contains("Newton") })
+        assertTrue(h.items.any { it.status == AssertionStatus.OPEN })
+        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
+        assertNotNull(caveat, "the failed operation must be visible to response handling")
+        assertTrue(caveat!!.contains("NOT confirmed"))
     }
 
     @Test
-    fun `a NoOperation interpretation never fabricates an intention, ordinary fact capture is unaffected`() = runBlocking {
-        // What this coordinator must guarantee here: no InterpretOutcome.NoOperation ever
-        // produces an OPEN-status (intention) item. (decompose() separately declines to treat a
-        // bare greeting like "hey" as a claim at all — see ClaimOnlyDecomposeTest.)
+    fun `no operations writes nothing at all, and does not fall back to capturing claims`() = runBlocking {
         val email = "coord-noop-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
+        val c = coordinator(noOperation())
 
-        val result = c.runCycle(email, requestId = "req-4", utterance = "hey")
+        // A declarative sentence the deterministic decomposer WOULD capture — the model said it needs nothing, and that stands.
+        val result = c.runCycle(email, requestId = "req-4", utterance = "My dog's name is Newton.")
 
         assertNotNull(result.cycleSeq)
-        assertTrue(result.mutationOutcomes.none { it is MutationOutcome.Intention }, "no intention was proposed, so none must be written")
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertTrue(horizon.items.none { it.status == AssertionStatus.OPEN }, "no OPEN item may appear without an actual proposal")
+        assertTrue(result.mutationOutcomes.isEmpty(), "a valid empty answer is respected: ${result.mutationOutcomes}")
+        assertTrue(assembled(result).items.isEmpty())
     }
 
     @Test
-    fun `a question-only turn writes no fact, does not fail the cycle, and adds nothing to the Horizon`() = runBlocking {
-        // The exact utterance still lives in the episode ledger (EpisodicLogService); the claim graph
-        // and Horizon must not hold "What was worrying me about the demo" as if the user asserted it.
-        val email = "coord-question-${UUID.randomUUID()}@test.alfrd.internal"
+    fun `rejected proposals are carried on the outcome and write nothing`() = runBlocking {
+        val email = "coord-rejected-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
+        val interpreter = proposes(rejections = listOf(OperationRejection("resolve_item", "negation_marker_detected", "sending that invoice")))
+        val result = coordinator(interpreter).runCycle(email, requestId = "req-rej", utterance = "I never got around to sending that invoice")
 
-        val result = c.runCycle(email, requestId = "req-q", utterance = "What was worrying me about the demo?")
+        assertTrue(result.mutationOutcomes.isEmpty())
+        val outcome = result.interpretOutcome as InterpretOutcome.Operations
+        assertEquals("negation_marker_detected", outcome.rejections.single().reason)
+    }
 
-        assertNotNull(result.cycleSeq)
+    @Test
+    fun `the interpreter is shown the users containers and focus`() = runBlocking {
+        val email = "coord-snapshot-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val project = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")!!
+        structureStore.setFocus(email, 1, project.uid, FocusMode.PINNED)
+        val interpreter = noOperation()
+
+        coordinator(interpreter).runCycle(email, requestId = "req-snap", utterance = "hello there")
+
+        val shown = interpreter.lastSnapshot!!
+        assertEquals(listOf("Demo"), shown.containers.map { it.name })
+        assertEquals("c1", shown.containers.single().ref)
+        assertTrue(shown.focusLines.single().contains("Demo"))
+    }
+
+    // ── What a turn leaves for the selector ──────────────────────────────────
+
+    @Test
+    fun `a turn records that the user was here, and mentions in it are nudged before the Horizon is assembled`() = runBlocking {
+        val email = "coord-seed-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val demo = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")!!
+        structureStore.createItem(email, 0, ItemKind.TASK, "Book the room", projectUid = demo.uid) // an earlier cycle: not "just said"
+        // Nothing else is drawing "Book the room" in: it is in an undated task inside a project, and there is no focus.
+        assertNull(assembled(coordinator(noOperation()).runCycle(email, "req-before", "Hello there")).items.firstOrNull { it.text.text == "Book the room" })
+
+        val result = coordinator(noOperation()).runCycle(email, requestId = "req-mention", utterance = "How is the demo going?")
+
+        assertEquals(1, result.seeded!!.mentionedContainers)
+        val item = assembled(result).items.first { it.text.text == "Book the room" }
+        assertTrue(item.surfacing is app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason.Activated, "brought in by the mention, this same turn: ${item.surfacing}")
+        assertNotNull(structureStore.lastActiveAt(email), "and the turn is what the next silence is measured from")
+    }
+
+    @Test
+    fun `what the interpreter touched this turn is nudged`() = runBlocking {
+        val email = "coord-touch-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val task = structureStore.createItem(email, 1, ItemKind.TASK, "Send the invoice")!!
+
+        val result = coordinator(proposes(ResolveItem(task.uid, "I sent it"))).runCycle(email, requestId = "req-touch", utterance = "I sent it")
+
+        assertEquals(1, result.seeded!!.touched)
+        assertTrue(structureStore.getFocus(email).any { it.targetUid == task.uid && it.mode == FocusMode.NUDGE })
+    }
+
+    @Test
+    fun `after a long silence the turn opens a question, and the next turn closes it`() = runBlocking {
+        val email = "coord-silence-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        structureStore.touchLastActive(email, clockNow)
+        clockNow += 9 * 86_400_000L
+
+        val back = coordinator(noOperation()).runCycle(email, requestId = "req-back", utterance = "morning")
+
+        assertTrue(back.silenceQuestionAsked)
+        val question = assembled(back).items.single { it.text.text == "What have you been up to?" }
+        assertEquals("alfrd", question.askedBy)
+        assertTrue(HorizonItemsRenderer.render(assembled(back)).any { it.renderedLine.contains("a question you want to ask them") })
+
+        clockNow += 60_000
+        val answered = coordinator(noOperation()).runCycle(email, requestId = "req-answer", utterance = "I was travelling")
+
+        assertTrue(!answered.silenceQuestionAsked)
+        assertTrue(assembled(answered).items.none { it.text.text == "What have you been up to?" }, "answered, it goes")
+    }
+
+    @Test
+    fun `retrying a request after a long silence asks the question once`() = runBlocking {
+        val email = "coord-silence-retry-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        structureStore.touchLastActive(email, clockNow)
+        clockNow += 9 * 86_400_000L
+        val c = coordinator(noOperation())
+
+        c.runCycle(email, requestId = "req-once", utterance = "morning")
+        c.runCycle(email, requestId = "req-once", utterance = "morning")
+
+        assertEquals(1, structureStore.listRecentItems(email, 20).count { it.text == "What have you been up to?" })
+    }
+
+    @Test
+    fun `a failure in seeding never costs the turn`() = runBlocking {
+        val email = "coord-seed-fail-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val exploding = object : HorizonStructureStore by structureStore {
+            override suspend fun listContainers(userEmail: String, kind: ContainerKind?) = throw IllegalStateException("boom")
+        }
+        val c = HorizonCycleCoordinator(
+            cycleSequencer, requestLedger, noOperation(), engramClient, horizonGraphStore, propagator, horizonAssembler,
+            ViewSnapshotBuilder(structureStore), applier, HorizonSeeder(exploding),
+        )
+
+        val result = c.runCycle(email, requestId = "req-boom", utterance = "How is the demo going?")
+
+        assertNotNull(result.assembleOutcome)
+        assertNull(result.seeded)
+    }
+
+    // ── Follow-ups the reply owes the user ───────────────────────────────────
+
+    @Test
+    fun `holding a feeling writes nothing and asks the user what they want`() = runBlocking {
+        val email = "coord-hold-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val quote = "I'm really stressed about the demo"
+        val c = coordinator(proposes(HoldForChoice(quote)))
+
+        val result = c.runCycle(email, requestId = "req-hold", utterance = "$quote, I don't think it'll be ready")
+
+        assertEquals(CycleFollowUp.AskEmotionChoice(quote), result.followUp)
+        assertTrue(assembled(result).items.isEmpty(), "nothing the user felt is filed as a claim")
+        assertNull(HorizonItemsRenderer.composeChangeNotes(result), "a held statement is not a change to report")
+        assertTrue(HorizonItemsRenderer.composeFollowUpDirective(result)!!.contains("Nothing about it has been saved"))
+    }
+
+    @Test
+    fun `an item saved unfiled asks which project, naming the users projects`() = runBlocking {
+        val email = "coord-ask-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")
+        structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Garden redesign")
+        val c = coordinator(proposes(RecordItem(ItemKind.TASK, "review the budget", askWhichProject = true)))
+
+        val result = c.runCycle(email, requestId = "req-ask", utterance = "review the budget")
+
+        val followUp = result.followUp as CycleFollowUp.AskWhichProject
+        assertEquals("review the budget", followUp.itemText)
+        assertEquals(listOf("Demo", "Garden redesign"), followUp.projectNames)
+        assertNull(structureStore.getItem(email, followUp.itemUid)!!.projectUid, "saved, unfiled")
+        val directive = HorizonItemsRenderer.composeFollowUpDirective(result)!!
+        assertTrue(directive.contains("Demo, Garden redesign") && directive.contains("ask which project"))
+    }
+
+    @Test
+    fun `the pending statement from last turn is handed to the interpreter`() = runBlocking {
+        val email = "coord-pending-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val interpreter = noOperation()
+
+        coordinator(interpreter).runCycle(
+            email, requestId = "req-pend", utterance = "yes, make a task",
+            pending = PendingInterpretation(emotionQuote = "I'm really stressed about the demo"),
+        )
+
+        assertEquals("I'm really stressed about the demo", interpreter.lastSnapshot!!.pendingEmotionQuote)
+    }
+
+    // ── Model unavailable: fall back to plain claim capture, loudly ──────────
+
+    @Test
+    fun `when the model is unavailable a plain claim is still captured, and the failure is reported`() = runBlocking {
+        val email = "coord-fallback-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val c = coordinator(modelDown())
+
+        val result = c.runCycle(email, requestId = "req-fb", utterance = "My dog's name is Newton.")
+
+        assertTrue(result.mutationOutcomes.any { it is MutationOutcome.Fact && it.applied }, "a model outage must not become a memory outage")
+        assertTrue(assembled(result).items.any { it.text.text.contains("Newton") })
+        assertTrue(result.interpretOutcome is InterpretOutcome.LlmFailure)
+        assertTrue(HorizonItemsRenderer.composeIntegrityCaveat(result)!!.contains("could not be fully interpreted"))
+    }
+
+    @Test
+    fun `the fallback never captures a question or a greeting as a claim`() = runBlocking {
+        val email = "coord-fallback-q-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val result = coordinator(modelDown()).runCycle(email, requestId = "req-fbq", utterance = "What was worrying me about the demo?")
+
         assertTrue(result.mutationOutcomes.isEmpty(), "no claim, so no write to confirm or fail: ${result.mutationOutcomes}")
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertTrue(horizon.items.none { it.text.text.contains("worrying") }, "the question must not appear as a Horizon item")
+        assertTrue(assembled(result).items.none { it.text.text.contains("worrying") })
     }
 
     // ── Failed writes must be visible to response handling, never silently dropped ──
 
     @Test
-    fun `decompose() throwing is a visible failed write, never a silent no-op`() = runBlocking {
+    fun `fallback decompose() throwing is a visible failed write, never a silent no-op`() = runBlocking {
         val email = "coord-decompose-fail-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
         val failingClient = object : EngramClient by engramClient {
@@ -189,68 +403,38 @@ class HorizonCycleCoordinatorTest {
                 throw RuntimeException("simulated decompose failure")
             }
         }
-        val c = HorizonCycleCoordinator(
-            cycleSequencer = cycleSequencer,
-            requestLedger = requestLedger,
-            interpreter = fixedInterpreter(InterpretOutcome.NoOperation),
-            engramClient = failingClient,
-            horizonGraphStore = horizonGraphStore,
-            horizonPropagator = propagator,
-            horizonAssembler = horizonAssembler,
-        )
 
-        val result = c.runCycle(email, requestId = "req-decompose-fail", utterance = "My dog's name is Newton")
+        val result = coordinator(modelDown(), failingClient).runCycle(email, requestId = "req-decompose-fail", utterance = "My dog's name is Newton")
 
         assertNotNull(result.cycleSeq, "the cycle itself is still allocated — this is a partial failure, not a total one")
         val lostFact = result.mutationOutcomes.filterIsInstance<MutationOutcome.Fact>().single()
-        assertEquals(null, lostFact.phraseUid, "a candidate that never became a Phrase has no uid to report")
+        assertNull(lostFact.phraseUid, "a candidate that never became a Phrase has no uid to report")
         assertTrue(!lostFact.applied)
-        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
-        assertNotNull(caveat, "a failed write must produce a visible caveat, never silence")
-        assertTrue(caveat!!.contains("not confirmed recorded"))
+        assertTrue(HorizonItemsRenderer.composeIntegrityCaveat(result)!!.contains("not confirmed recorded"))
     }
 
     @Test
-    fun `ingest() throwing loses the fact candidate visibly and still marks a proposed intention unconfirmed`() = runBlocking {
+    fun `fallback ingest() throwing loses the fact candidate visibly`() = runBlocking {
         val email = "coord-ingest-fail-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val quote = "getting Alfrd running on Arx is a priority for me"
         val failingClient = object : EngramClient by engramClient {
             override suspend fun ingest(candidates: List<PhraseCandidate>, userEmail: String): List<String> {
                 throw RuntimeException("simulated ingest failure")
             }
         }
-        val c = HorizonCycleCoordinator(
-            cycleSequencer = cycleSequencer,
-            requestLedger = requestLedger,
-            interpreter = fixedInterpreter(InterpretOutcome.ProposedAssertion(quote, latencyMs = 5)),
-            engramClient = failingClient,
-            horizonGraphStore = horizonGraphStore,
-            horizonPropagator = propagator,
-            horizonAssembler = horizonAssembler,
-        )
-        // No '.', '!', '?', or contrastive marker — stays one decompose() segment, so exactly one
-        // fact candidate is lost (kept simple to assert against, not a claim about segmentation).
-        val result = c.runCycle(email, requestId = "req-ingest-fail", utterance = "My dog's name is Newton and $quote")
+
+        val result = coordinator(modelDown(), failingClient).runCycle(email, requestId = "req-ingest-fail", utterance = "My dog's name is Newton")
 
         assertNotNull(result.cycleSeq)
         val lostFact = result.mutationOutcomes.filterIsInstance<MutationOutcome.Fact>().single()
-        assertEquals(null, lostFact.phraseUid)
+        assertNull(lostFact.phraseUid)
         assertTrue(!lostFact.applied)
-        val intentionOutcome = result.mutationOutcomes.filterIsInstance<MutationOutcome.Intention>().single()
-        assertTrue(!intentionOutcome.applied, "the intention must also be reported unconfirmed, never silently dropped")
-        assertEquals(quote, intentionOutcome.quote)
-        val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
-        assertNotNull(caveat)
-        assertTrue(caveat!!.contains("NOT confirmed"), "the intention-specific caveat must still fire")
-        assertTrue(caveat.contains("not confirmed recorded"), "the fact-loss caveat must also fire")
+        assertTrue(HorizonItemsRenderer.composeIntegrityCaveat(result)!!.contains("not confirmed recorded"))
     }
 
     @Test
     fun `allocation failure for an unknown user is reported explicitly, not silently`() = runBlocking {
-        val c = coordinator(fixedInterpreter(InterpretOutcome.NoOperation))
-
-        val result = c.runCycle("nobody-${UUID.randomUUID()}@test.alfrd.internal", requestId = "req-unknown", utterance = "hey")
+        val result = coordinator(noOperation()).runCycle("nobody-${UUID.randomUUID()}@test.alfrd.internal", requestId = "req-unknown", utterance = "hey")
 
         assertTrue(result.allocationFailed)
         val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
@@ -261,55 +445,97 @@ class HorizonCycleCoordinatorTest {
     // ── Checkpoint resume — a crash artifact, never a live concurrent attempt (see PerUserCycleLock) ──
 
     @Test
+    fun `the validated plan is checkpointed before any write, and a completed cycle is marked so`() = runBlocking {
+        val email = "coord-plan-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val op = RecordItem(ItemKind.TASK, "send the invoice")
+        coordinator(proposes(op)).runCycle(email, requestId = "req-plan", utterance = "send the invoice")
+
+        val row = requestLedger.find(email, "req-plan")!!
+        assertEquals("completed", row.checkpoint)
+        assertEquals(listOf<HorizonOperation>(op), OperationPlanCodec.decode(row.opsPlan), "the plan that was applied is the plan that was stored")
+    }
+
+    @Test
+    fun `resumes from ops_planned by replaying the stored plan, never calling the model`() = runBlocking {
+        val email = "coord-resume-plan-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val quote = "getting Alfrd running on Arx is a priority for me"
+        // A crash right after the plan was checkpointed: nothing was written yet.
+        requestLedger.checkpoint(email, "req-resume-plan", cycleSeq = 1, checkpoint = "ops_planned", opsPlan = OperationPlanCodec.encode(listOf(RecordItem(ItemKind.TASK, quote))))
+
+        val interpreter = noOperation()
+        val result = coordinator(interpreter).runCycle(email, requestId = "req-resume-plan", utterance = "irrelevant on resume")
+
+        assertEquals(0, interpreter.calls, "resuming from ops_planned must never re-run interpretation")
+        assertEquals(1L, result.cycleSeq)
+        assertEquals(1, assembled(result).items.count { it.text.text == quote && it.status == AssertionStatus.OPEN })
+        assertEquals("completed", requestLedger.find(email, "req-resume-plan")!!.checkpoint)
+    }
+
+    @Test
+    fun `replaying a plan that was already fully applied creates no duplicates`() = runBlocking {
+        val email = "coord-resume-applied-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val plan = listOf(
+            CreateContainer(ContainerKind.PROJECT, "Demo", namedByUser = true),
+            RecordItem(ItemKind.TASK, "book the room", projectName = "Demo"),
+        )
+        // The crash happened after applying but before the writes_committed checkpoint.
+        applier.apply(email, 1, "req-resume-applied", plan)
+        requestLedger.checkpoint(email, "req-resume-applied", cycleSeq = 1, checkpoint = "ops_planned", opsPlan = OperationPlanCodec.encode(plan))
+
+        val result = coordinator(noOperation()).runCycle(email, requestId = "req-resume-applied", utterance = "irrelevant on resume")
+
+        assertTrue(result.mutationOutcomes.all { (it as MutationOutcome.Operation).result.applied })
+        assertEquals(1, structureStore.listContainers(email, ContainerKind.PROJECT).size)
+        val demo = structureStore.listContainers(email, ContainerKind.PROJECT).single()
+        assertEquals(1, structureStore.itemsIn(email, demo.uid).size, "the replayed record_item is keyed by requestId:index and returns the first item")
+        assertEquals(1, structureStore.listRecentItems(email, 10).count { it.text == "book the room" })
+    }
+
+    @Test
+    fun `a failed operation leaves the row at ops_planned so a retry re-applies instead of losing it`() = runBlocking {
+        val email = "coord-retry-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val c = coordinator(proposes(ResolveItem(UUID.randomUUID().toString(), "it is done")))
+
+        c.runCycle(email, requestId = "req-retry", utterance = "it is done")
+
+        assertEquals("ops_planned", requestLedger.find(email, "req-retry")!!.checkpoint)
+    }
+
+    @Test
     fun `resumes from facts_ingested without re-running interpretation or duplicating the write`() = runBlocking {
         val email = "coord-resume-facts-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val quote = "getting Alfrd running on Arx is a priority for me"
+        val text = "getting Alfrd running on Arx is a priority for me"
+        // Simulate a crash right after the fallback path's facts_ingested checkpoint: the phrase already
+        // exists (written via ingest()), but stamping and everything after never happened.
+        val uid = engramClient.ingest(listOf(PhraseCandidate(text, "user", PhraseCategory.CONTEXT)), email).single()
+        requestLedger.checkpoint(email, "req-resume-1", cycleSeq = 1, checkpoint = "facts_ingested", phraseUids = listOf(uid))
 
-        // Simulate a crash right after the facts_ingested checkpoint: the phrase already exists
-        // (written via ingest(), exactly as the coordinator itself would have), but stamping and
-        // everything after never happened.
-        val uid = engramClient.ingest(listOf(PhraseCandidate(quote, "interpreter", PhraseCategory.CONTEXT)), email).single()
-        requestLedger.checkpoint(email, "req-resume-1", cycleSeq = 1, checkpoint = "facts_ingested", phraseUids = listOf(uid), intentionPhraseUid = uid)
+        val interpreter = noOperation()
+        val result = coordinator(interpreter).runCycle(email, requestId = "req-resume-1", utterance = "irrelevant on resume")
 
-        var interpretCalls = 0
-        val c = coordinator(object : Interpreter(null) {
-            override suspend fun interpret(utterance: String): InterpretOutcome {
-                interpretCalls++
-                return InterpretOutcome.NoOperation
-            }
-        })
-
-        val result = c.runCycle(email, requestId = "req-resume-1", utterance = "irrelevant on resume")
-
-        assertEquals(0, interpretCalls, "resuming from facts_ingested must never re-run interpretation")
-        assertTrue(result.mutationOutcomes.any { it is MutationOutcome.Intention && it.applied && it.quote == quote })
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertEquals(1, horizon.items.count { it.text.text == quote }, "resume must not create a duplicate Phrase for the same content")
+        assertEquals(0, interpreter.calls, "resuming from facts_ingested must never re-run interpretation")
+        assertTrue(result.mutationOutcomes.any { it is MutationOutcome.Fact && it.applied })
+        assertEquals(1, assembled(result).items.count { it.text.text == text }, "resume must not create a duplicate Phrase for the same content")
     }
 
     @Test
     fun `resumes from writes_committed by skipping straight to propagate and assemble`() = runBlocking {
         val email = "coord-resume-committed-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
-        val quote = "getting Alfrd running on Arx is a priority for me"
-        val uid = engramClient.ingest(listOf(PhraseCandidate(quote, "interpreter", PhraseCategory.CONTEXT)), email).single()
-        horizonGraphStore.stampNewAssertion(email, cycleSeq = 1, phraseUid = uid, status = AssertionStatus.OPEN)
-        requestLedger.checkpoint(email, "req-resume-2", cycleSeq = 1, checkpoint = "writes_committed", phraseUids = listOf(uid), intentionPhraseUid = uid)
+        val text = "getting Alfrd running on Arx is a priority for me"
+        val task = structureStore.createItem(email, 1, ItemKind.TASK, text)!!
+        requestLedger.checkpoint(email, "req-resume-2", cycleSeq = 1, checkpoint = "writes_committed", phraseUids = listOf(task.uid))
 
-        var interpretCalls = 0
-        val c = coordinator(object : Interpreter(null) {
-            override suspend fun interpret(utterance: String): InterpretOutcome {
-                interpretCalls++
-                return InterpretOutcome.NoOperation
-            }
-        })
+        val interpreter = noOperation()
+        val result = coordinator(interpreter).runCycle(email, requestId = "req-resume-2", utterance = "irrelevant on resume")
 
-        val result = c.runCycle(email, requestId = "req-resume-2", utterance = "irrelevant on resume")
-
-        assertEquals(0, interpretCalls, "resuming from writes_committed must never re-run interpretation")
-        val horizon = (result.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertEquals(1, horizon.items.count { it.text.text == quote }, "resume must not create a duplicate Phrase")
+        assertEquals(0, interpreter.calls, "resuming from writes_committed must never re-run interpretation")
+        assertEquals(1, assembled(result).items.count { it.text.text == text }, "resume must not create a duplicate")
     }
 
     @Test
@@ -317,20 +543,16 @@ class HorizonCycleCoordinatorTest {
         val email = "coord-dup-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
         val quote = "getting Alfrd running on Arx is a priority for me"
-        val c = coordinator(fixedInterpreter(InterpretOutcome.ProposedAssertion(quote, latencyMs = 5)))
+        val interpreter = proposes(RecordItem(ItemKind.TASK, quote))
+        val c = coordinator(interpreter)
 
         val first = c.runCycle(email, requestId = "req-dup-1", utterance = quote)
         val second = c.runCycle(email, requestId = "req-dup-1", utterance = quote)
 
         assertEquals(first.cycleSeq, second.cycleSeq, "a retried requestId must not allocate a new cycle")
         assertEquals(emptyList<MutationOutcome>(), second.mutationOutcomes, "a duplicate-after-commit call performs no new writes")
-        // Counted by OPEN status, not raw text match: the first call legitimately writes the
-        // quote twice — once via ordinary decompose()-based fact capture (status=null, preserved
-        // per this task's own requirement not to discard ordinary evidence) and once as the
-        // confirmed intention (status=OPEN) — that is accepted, intentional redundancy, not a
-        // retry bug. What the retry must not do is add a *second* intention.
-        val horizonAfterBoth = (second.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertEquals(1, horizonAfterBoth.items.count { it.status == AssertionStatus.OPEN }, "the retry must not create a second OPEN intention")
+        assertEquals(1, interpreter.calls, "the retry must not call the model again")
+        assertEquals(1, assembled(second).items.count { it.status == AssertionStatus.OPEN }, "the retry must not create a second OPEN task")
     }
 
     @Test
@@ -338,15 +560,12 @@ class HorizonCycleCoordinatorTest {
         val email = "coord-new-event-${UUID.randomUUID()}@test.alfrd.internal"
         seedUser(email)
         val quote = "getting Alfrd running on Arx is a priority for me"
-        val c = coordinator(fixedInterpreter(InterpretOutcome.ProposedAssertion(quote, latencyMs = 5)))
+        val c = coordinator(proposes(RecordItem(ItemKind.TASK, quote)))
 
         val first = c.runCycle(email, requestId = "req-distinct-1", utterance = quote)
         val second = c.runCycle(email, requestId = "req-distinct-2", utterance = quote)
 
         assertNotEquals(first.cycleSeq, second.cycleSeq, "a genuinely new requestId must allocate its own cycle")
-        // Counted by OPEN status — see the duplicate-after-commit test above for why raw text
-        // matching over-counts (ordinary fact capture legitimately duplicates the intention text).
-        val horizon = (second.assembleOutcome as AssembleOutcome.Assembled).horizon
-        assertEquals(2, horizon.items.count { it.status == AssertionStatus.OPEN }, "two distinct conversational events each produce their own OPEN intention, even with identical text")
+        assertEquals(2, assembled(second).items.count { it.status == AssertionStatus.OPEN }, "two distinct conversational events each produce their own OPEN task, even with identical text")
     }
 }

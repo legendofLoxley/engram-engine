@@ -67,6 +67,16 @@ class Script(
     private val selectionService: ResponseSelectionService? = null,
     private val personaSource: PersonaSource = DefaultPersonaSource(),
     private val confidenceService: TopicConfidenceService? = null,
+    /**
+     * True when the Horizon cycle's interpretation stage owns every graph write for the turn (see
+     * [HorizonCycleCoordinator]). A correction here then only reads and reports — it never amends a
+     * phrase in place or ingests the utterance as a fact — because the interpretation stage's
+     * `correct_item` does that, superseding rather than overwriting, and a second writer for the same
+     * turn would fight it (live, this path stored a bare "the meridian one" as a fact and would have
+     * overwritten an existing phrase's text). False (default) keeps the original behavior for any
+     * pipeline built without a coordinator.
+     */
+    private val interpreterOwnsWrites: Boolean = false,
 ) {
 
     /**
@@ -232,6 +242,17 @@ class Script(
         // silently confirmed (see the success paths, where the flag is cleared).
         val topic = TopicResolver.resolve(intent.newFact)
         confidenceService?.recordContradictionDetected(ctx.userEmail, topic)
+
+        if (interpreterOwnsWrites) {
+            // Bookkeeping as before (the correction is being handled this turn, by the interpretation
+            // stage); the graph writes are not this path's to make.
+            confidenceService?.recordCorrectionConfirmed(ctx.userEmail, topic)
+            ctx.retrievalCoverage = RetrievalCoverage.of(
+                activationMass = if (phraseToAmend != null) 1.0 else 0.5, playFired = true, conceptResolutionRatio = if (phraseToAmend != null) 1.0 else 0.0,
+                gaps = if (phraseToAmend != null) emptyList() else listOf("no existing phrase matched superseded value"),
+            )
+            return RetrievedScript(lines = listOf(intent.newFact), label = "correction-deferred")
+        }
 
         return if (phraseToAmend != null) {
             try {

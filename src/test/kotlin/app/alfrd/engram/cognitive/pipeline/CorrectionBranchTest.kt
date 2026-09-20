@@ -138,6 +138,30 @@ class ScriptCorrectionTest {
     }
 
     @Test
+    fun `when the interpreter owns writes a correction neither amends a phrase nor ingests the utterance`() = runTest {
+        val engram = InMemoryEngramClient()
+        engram.ingest(listOf(PhraseCandidate("My dog's name is Neutron", "user", PhraseCategory.CONTEXT)), userEmail = "user-1")
+        val script = Script(engram, interpreterOwnsWrites = true)
+        val ctx = CognitiveContext(utterance = "Actually my dog's name is Newton, not Neutron", sessionId = "s", userId = "user-1", userEmail = "user-1")
+
+        val result = script.run(ctx, RetrievalIntent.Correction(supersededValue = "Neutron", newFact = "my dog's name is Newton"))
+
+        assertEquals("correction-deferred", result.label)
+        assertEquals(listOf("My dog's name is Neutron"), engram.allPhrases().map { it.content }, "no in-place overwrite and no second copy — the interpretation stage supersedes instead")
+    }
+
+    @Test
+    fun `when the interpreter owns writes a correction-shaped reply with no match stores nothing`() = runTest {
+        val engram = InMemoryEngramClient()
+        val script = Script(engram, interpreterOwnsWrites = true)
+        val ctx = CognitiveContext(utterance = "the meridian one", sessionId = "s", userId = "user-1", userEmail = "user-1")
+
+        script.run(ctx, RetrievalIntent.Correction(supersededValue = null, newFact = "the meridian one"))
+
+        assertTrue(engram.allPhrases().isEmpty(), "a short answer must not become a fact just because it looked like a correction")
+    }
+
+    @Test
     fun `a successful correction confirms and raises topic confidence, never lowers it`() = runTest {
         val engram = InMemoryEngramClient()
         val confidenceService = TopicConfidenceService(engram, scope = this)

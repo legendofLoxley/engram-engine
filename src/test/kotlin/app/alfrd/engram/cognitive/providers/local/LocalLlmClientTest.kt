@@ -93,6 +93,42 @@ class LocalLlmClientTest {
     }
 
     @Test
+    fun `a forced tool and a temperature are sent as OpenAI tool_choice and temperature`() = runBlocking {
+        enqueueChat("""{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"model":"m"}""")
+        val tool = ToolDefinition("apply_operations", "Write.", buildJsonObject { put("type", "object") })
+
+        client().complete(LlmRequest(prompt = "hi", tools = listOf(tool), forcedToolName = "apply_operations", temperature = 0.0))
+
+        val sentBody = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        val choice = sentBody["tool_choice"]!!.jsonObject
+        assertEquals("function", choice["type"]?.jsonPrimitive?.content)
+        assertEquals("apply_operations", choice["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content)
+        assertEquals("0.0", sentBody["temperature"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `without a forced tool or temperature neither is on the wire at all, because llama_cpp rejects a null temperature`() = runBlocking {
+        enqueueChat("""{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"model":"m"}""")
+
+        client().complete(LlmRequest(prompt = "hi"))
+
+        val sentBody = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertTrue(!sentBody.containsKey("temperature"), "llama.cpp answers 400 to \"temperature\": null — an unset field must be absent")
+        assertTrue(!sentBody.containsKey("tool_choice"))
+        assertTrue(!sentBody.containsKey("tools"))
+    }
+
+    @Test
+    fun `a forced tool with no tools offered is ignored rather than sent dangling`() = runBlocking {
+        enqueueChat("""{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"model":"m"}""")
+
+        client().complete(LlmRequest(prompt = "hi", forcedToolName = "apply_operations"))
+
+        val sentBody = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertTrue(!sentBody.containsKey("tool_choice"))
+    }
+
+    @Test
     fun `a tool_calls response is mapped to ToolCall with parsed JSON arguments`() = runBlocking {
         enqueueChat(
             """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"",

@@ -3,6 +3,10 @@ package app.alfrd.engram.cognitive.pipeline.horizon
 import app.alfrd.engram.cognitive.pipeline.CognitivePipeline
 import app.alfrd.engram.cognitive.pipeline.HorizonCycleCoordinator
 import app.alfrd.engram.cognitive.pipeline.Interpreter
+import app.alfrd.engram.cognitive.pipeline.interpretedMessage
+import app.alfrd.engram.cognitive.pipeline.isInterpretation
+import app.alfrd.engram.cognitive.pipeline.op
+import app.alfrd.engram.cognitive.pipeline.opsResponse
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import app.alfrd.engram.cognitive.pipeline.memory.MemoryWriteService
 import app.alfrd.engram.cognitive.providers.LlmResponse
@@ -17,6 +21,7 @@ import kotlinx.serialization.json.put
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -44,6 +49,7 @@ class ContextHorizonConversationalCycleTest {
     private lateinit var engramClient: DatabaseEngramClient
     private lateinit var horizonGraphStore: HorizonGraphStore
     private lateinit var horizonAssembler: HorizonAssembler
+    private lateinit var structureStore: HorizonStructureStore
     private lateinit var cycleSequencer: CycleSequencer
 
     @BeforeEach
@@ -53,6 +59,7 @@ class ContextHorizonConversationalCycleTest {
         SchemaBootstrap.bootstrap(dbManager.getDatabase())
         engramClient = DatabaseEngramClient(dbManager.getDatabase())
         horizonGraphStore = ArcadeHorizonGraphStore(dbManager.getDatabase())
+        structureStore = ArcadeHorizonStructureStore(dbManager.getDatabase())
         horizonAssembler = ArcadeHorizonAssembler(dbManager.getDatabase())
         cycleSequencer = ArcadeCycleSequencer(dbManager.getDatabase())
     }
@@ -106,6 +113,9 @@ class ContextHorizonConversationalCycleTest {
             horizonGraphStore = horizonGraphStore,
             horizonPropagator = propagator,
             horizonAssembler = horizonAssembler,
+            viewSnapshotBuilder = ViewSnapshotBuilder(structureStore),
+            operationApplier = HorizonOperationApplier(structureStore, horizonGraphStore),
+            horizonSeeder = HorizonSeeder(structureStore),
         )
         return CognitivePipeline(
             engramClient = engramClient,
@@ -115,13 +125,8 @@ class ContextHorizonConversationalCycleTest {
         )
     }
 
-    private fun toolCall(quote: String): ToolCall = ToolCall(
-        name = "assert_open_intention",
-        input = buildJsonObject {
-            put("quote", JsonPrimitive(quote))
-            put("is_first_person_and_not_negated", JsonPrimitive(true))
-        },
-    )
+    /** The interpretation model recording the user's stated priority as a task. */
+    private fun recordTask(quote: String): LlmResponse = opsResponse(op("record_item", "kind" to "task", "quote" to quote))
 
     @Test
     fun `Arx priority, topic change, environment signal, reactivated relevance, invited surfacing`() = runBlocking {
@@ -136,13 +141,9 @@ class ContextHorizonConversationalCycleTest {
         val environmentText = "Arx developer build v0.9.2 finished compiling and is ready to flash — no errors."
 
         val llmClient = TestLlmClient { request ->
-            if (request.tools.isNotEmpty()) {
+            if (request.isInterpretation) {
                 // Interpretation call.
-                if (request.prompt.contains(arxQuote)) {
-                    LlmResponse(text = "", toolCalls = listOf(toolCall(arxQuote)), latencyMs = 5, retryCount = 0)
-                } else {
-                    LlmResponse(text = "", latencyMs = 5, retryCount = 0) // no tool call — NoOperation
-                }
+                if (request.interpretedMessage.contains(arxQuote)) recordTask(arxQuote) else opsResponse() // no operations — NoOperation
             } else {
                 // Actor response call — scripted per turn; genuine model judgment (restraint vs.
                 // surfacing) is exercised on the real deployed model during live verification, not
@@ -166,8 +167,8 @@ class ContextHorizonConversationalCycleTest {
         // ── Turn 1: the priority statement ──────────────────────────────────
         val turn1 = pipeline.processForDebug(arxUtterance, "s1", email, requestId = "req-t1")
         val cycle1 = turn1.trace.horizonCycle!!
-        assertEquals("ProposedAssertion", cycle1.interpretOutcome)
-        assertTrue(cycle1.mutationOutcomes.any { it.kind == "intention" && it.applied }, "the intention must be confirmed written before the response was composed")
+        assertEquals("Operations:record_item", cycle1.interpretOutcome)
+        assertTrue(cycle1.mutationOutcomes.any { it.kind == "record_item" && it.applied }, "the intention must be confirmed written before the response was composed")
         val horizonAfterTurn1 = (horizonAssembler.assemble(email, cycle1.cycleSeq!!) as AssembleOutcome.Assembled).horizon
         val arxItem = horizonAfterTurn1.items.single { it.status == AssertionStatus.OPEN }
         assertEquals(ProvenanceKind.EXPLICIT_USER_STATEMENT, arxItem.provenance)
@@ -177,7 +178,7 @@ class ContextHorizonConversationalCycleTest {
         val turn2 = pipeline.processForDebug(groceryModelUtterance, "s1", email, requestId = "req-t2")
         val cycle2 = turn2.trace.horizonCycle!!
         assertEquals("NoOperation", cycle2.interpretOutcome)
-        assertTrue(cycle2.mutationOutcomes.none { it.kind == "intention" }, "an ordinary subject change must never fabricate an intention")
+        assertTrue(cycle2.mutationOutcomes.none { it.kind == "record_item" }, "an ordinary subject change must never fabricate an intention")
         assertEquals("A normalized schema with separate Item and Category tables would work well.", turn2.chat.responseText)
 
         // ── Environment signal: its own provenance, injected out-of-band, not via the pipeline ──
@@ -337,12 +338,8 @@ class ContextHorizonConversationalCycleTest {
         seedUser(email)
         val quote = "Getting Kestrel deployed to the staging cluster is something I need to finish"
         val llmClient = TestLlmClient { request ->
-            if (request.tools.isNotEmpty()) {
-                if (request.prompt.contains(quote)) {
-                    LlmResponse(text = "", toolCalls = listOf(toolCall(quote)), latencyMs = 5, retryCount = 0)
-                } else {
-                    LlmResponse(text = "", latencyMs = 5, retryCount = 0)
-                }
+            if (request.isInterpretation) {
+                if (request.interpretedMessage.contains(quote)) recordTask(quote) else opsResponse()
             } else {
                 LlmResponse(text = "Understood.", latencyMs = 5, retryCount = 0)
             }
@@ -365,8 +362,8 @@ class ContextHorizonConversationalCycleTest {
         seedUser(email)
         val quote = "Getting Alfrd running on Arx is a priority for me"
         val llmClient = TestLlmClient { request ->
-            if (request.tools.isNotEmpty()) {
-                LlmResponse(text = "", toolCalls = listOf(toolCall(quote)), latencyMs = 5, retryCount = 0)
+            if (request.isInterpretation) {
+                recordTask(quote)
             } else {
                 LlmResponse(text = "Got it.", latencyMs = 5, retryCount = 0)
             }
@@ -437,5 +434,177 @@ class ContextHorizonConversationalCycleTest {
             horizonDisabled.items.any { it.surfacing is SurfacingReason.ActiveReactivation },
             "with propagation disabled (NoOp), no reactivation can exist — same assembler, same starting state",
         )
+    }
+
+    // ── Follow-up flows across turns ─────────────────────────────────────────
+
+    private fun promptOf(cycle: app.alfrd.engram.cognitive.pipeline.HorizonCycleTrace): String =
+        (cycle.finalSystemPromptSent ?: "") + "\n" + (cycle.finalUserPromptSent ?: "")
+
+    @Test
+    fun `a strong feeling saves nothing, the reply asks, and a yes next turn makes a task from what they said`() = runBlocking {
+        val email = "feeling-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val feeling = "I'm really stressed about the demo"
+        val seenSnapshots = mutableListOf<String>()
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                seenSnapshots += request.prompt
+                when {
+                    request.interpretedMessage.contains(feeling) -> opsResponse(op("hold_for_choice", "quote" to feeling))
+                    request.prompt.contains("Pending: the user said") && request.interpretedMessage.contains("make a task") ->
+                        opsResponse(op("record_item", "kind" to "task", "quote" to feeling, "title" to "Sort out the demo"))
+                    else -> opsResponse()
+                }
+            } else {
+                LlmResponse(text = "That sounds heavy. Do you want to just talk it through, or shall I make a task to help?", latencyMs = 5, retryCount = 0)
+            }
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        val turn1 = pipeline.processForDebug("$feeling, I don't think it'll be ready.", "s1", email, requestId = "req-f1")
+        val cycle1 = turn1.trace.horizonCycle!!
+        assertEquals("Operations:hold_for_choice", cycle1.interpretOutcome)
+        assertTrue(structureStore.listRecentItems(email, 10).isEmpty(), "nothing the user felt is saved until they choose")
+        assertTrue(promptOf(cycle1).contains("Nothing about it has been saved"), "the reply is told to ask, and that nothing was saved")
+
+        val turn2 = pipeline.processForDebug("yes, please make a task for that", "s1", email, requestId = "req-f2")
+        assertTrue(seenSnapshots.last().contains("Pending: the user said \"$feeling\""), "the model reads turn 2 as the answer to the question")
+        val saved = structureStore.listRecentItems(email, 10).single()
+        assertEquals("Sort out the demo", saved.text, "a task made from a feeling reads as a task, not as the feeling")
+        assertEquals(feeling, saved.sourceQuote, "and what they actually said is kept")
+        assertEquals(ItemKind.TASK, saved.kind)
+        assertTrue(turn2.trace.horizonCycle!!.mutationOutcomes.any { it.kind == "record_item" && it.applied })
+
+        pipeline.processForDebug("thanks", "s1", email, requestId = "req-f3")
+        assertTrue(!seenSnapshots.last().contains("Pending:"), "the question is asked once and cleared, never carried forward")
+    }
+
+    @Test
+    fun `choosing just to talk saves nothing at all`() = runBlocking {
+        val email = "vent-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val feeling = "I'm so overwhelmed with everything"
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                if (request.interpretedMessage.contains(feeling)) opsResponse(op("hold_for_choice", "quote" to feeling)) else opsResponse()
+            } else LlmResponse(text = "I'm here.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        pipeline.processForDebug("$feeling right now.", "s1", email, requestId = "req-v1")
+        pipeline.processForDebug("no, I just want to talk", "s1", email, requestId = "req-v2")
+
+        assertTrue(structureStore.listRecentItems(email, 10).isEmpty(), "just listening leaves only the ledger")
+    }
+
+    @Test
+    fun `an item saved unfiled prompts which project, and the answer files it`() = runBlocking {
+        val email = "which-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")
+        structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Garden redesign")
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                val pendingRef = Regex("which project (i\\d+) belongs to").find(request.prompt)?.groupValues?.get(1)
+                val demoRef = Regex("(c\\d+) Demo \\(project").find(request.prompt)?.groupValues?.get(1)
+                when {
+                    request.interpretedMessage.contains("review the budget") ->
+                        opsResponse(op("record_item", "kind" to "task", "quote" to "review the budget", "ask_which_project" to true))
+                    pendingRef != null && demoRef != null && request.interpretedMessage.contains("demo") ->
+                        opsResponse(op("file_item", "item" to pendingRef, "into" to demoRef, "quote" to "the demo one"))
+                    else -> opsResponse()
+                }
+            } else LlmResponse(text = "Noted.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        val turn1 = pipeline.processForDebug("Please remind me to review the budget next week.", "s1", email, requestId = "req-w1")
+        val saved = structureStore.listRecentItems(email, 10).single()
+        assertNull(saved.projectUid, "saved unfiled, not guessed")
+        val prompt1 = promptOf(turn1.trace.horizonCycle!!)
+        assertTrue(prompt1.contains("Demo, Garden redesign") && prompt1.contains("ask which project"), prompt1)
+
+        pipeline.processForDebug("the demo one", "s1", email, requestId = "req-w2")
+        val demo = structureStore.listContainers(email, ContainerKind.PROJECT).single { it.name == "Demo" }
+        assertEquals(demo.uid, structureStore.getItem(email, saved.uid)!!.projectUid)
+    }
+
+    @Test
+    fun `what the interpreter changed reaches the reply so it can say so, and a rejected change is never claimed`() = runBlocking {
+        val email = "notes-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val task = structureStore.createItem(email, 1, ItemKind.TASK, "Send the invoice to Acme")!!
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                val ref = Regex("(i\\d+) task \"Send the invoice").find(request.prompt)?.groupValues?.get(1)
+                when {
+                    ref != null && request.interpretedMessage.startsWith("I sent") -> opsResponse(op("resolve_item", "item" to ref, "quote" to "I sent the invoice"))
+                    ref != null && request.interpretedMessage.startsWith("I never") -> opsResponse(op("resolve_item", "item" to ref, "quote" to "sending that invoice"))
+                    else -> opsResponse()
+                }
+            } else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        val negated = pipeline.processForDebug("I never got around to sending that invoice.", "s1", email, requestId = "req-n1")
+        assertEquals("open", structureStore.getItem(email, task.uid)!!.status, "the negated clause blocked the resolve")
+        assertTrue(negated.trace.horizonCycle!!.interpretOutcome!!.contains("negation_marker_detected"))
+        assertTrue(!promptOf(negated.trace.horizonCycle!!).contains("Changes you just made"), "nothing changed, so nothing is claimed")
+
+        val sent = pipeline.processForDebug("I sent the invoice to Acme.", "s1", email, requestId = "req-n2")
+        assertEquals("resolved", structureStore.getItem(email, task.uid)!!.status)
+        val prompt = promptOf(sent.trace.horizonCycle!!)
+        assertTrue(prompt.contains("Changes you just made to memory") && prompt.contains("Marked done: \"Send the invoice to Acme\""), prompt)
+    }
+
+    // ── Focus and recall across turns ────────────────────────────────────────
+
+    @Test
+    fun `working on a project brings its items into view, switching takes them out, and a recall question brings back what it is about`() = runBlocking {
+        val email = "focus-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val demo = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Demo")!!
+        val garden = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structureStore.createItem(email, 0, ItemKind.TASK, "Sort out the firewall rules", projectUid = demo.uid)
+        structureStore.createItem(email, 0, ItemKind.TASK, "Choose the plants", projectUid = garden.uid)
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                val demoRef = Regex("(c\\d+) Demo \\(project").find(request.prompt)?.groupValues?.get(1)
+                val gardenRef = Regex("(c\\d+) Garden redesign \\(project").find(request.prompt)?.groupValues?.get(1)
+                when {
+                    request.interpretedMessage.startsWith("Let's work on the demo") ->
+                        opsResponse(op("set_focus", "target" to demoRef, "quote" to "Let's work on the demo"))
+                    request.interpretedMessage.startsWith("Let's switch to the garden") ->
+                        opsResponse(op("set_focus", "target" to gardenRef, "quote" to "Let's switch to the garden"))
+                    else -> opsResponse()
+                }
+            } else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+        fun inView(turn: CognitivePipeline.DebugChatResult) = turn.trace.horizonCycle!!.horizonAfterPropagation.map { it.text }
+
+        val before = pipeline.processForDebug("Good morning", "s1", email, requestId = "req-a")
+        assertTrue(inView(before).none { it.contains("firewall") || it.contains("plants") }, "zoomed out: what is inside projects is not in view")
+        val shape = before.trace.horizonCycle!!.containers
+        assertTrue(shape.any { it == "Demo (1 open, 0 in view)" } && shape.any { it == "Garden redesign (1 open, 0 in view)" }, "the overview still shows the shape of what they have going on: $shape")
+
+        val demoTurn = pipeline.processForDebug("Let's work on the demo.", "s1", email, requestId = "req-b")
+        assertTrue(inView(demoTurn).contains("Sort out the firewall rules"))
+        assertTrue(inView(demoTurn).none { it.contains("plants") })
+        assertEquals("demo", demoTurn.trace.horizonCycle!!.focus!!.substringBefore(" (").lowercase())
+        assertEquals("BINOCULARS", demoTurn.trace.horizonCycle!!.zoom!!.uppercase())
+        val firewall = demoTurn.trace.horizonCycle!!.horizonAfterPropagation.first { it.text.contains("firewall") }
+        assertEquals("InFocus", firewall.surfacing)
+        assertTrue(firewall.why.any { it.startsWith("focus=") }, "the trace answers 'why is this in view': ${firewall.why}")
+
+        val gardenTurn = pipeline.processForDebug("Let's switch to the garden.", "s1", email, requestId = "req-c")
+        assertTrue(inView(gardenTurn).contains("Choose the plants"))
+        assertTrue(inView(gardenTurn).none { it.contains("firewall") })
+
+        val recall = pipeline.processForDebug("What was I doing about the firewall rules?", "s1", email, requestId = "req-d")
+        assertTrue(inView(recall).contains("Sort out the firewall rules"), "asking about it brings it back, though the focus is elsewhere")
+        assertEquals("Activated", recall.trace.horizonCycle!!.horizonAfterPropagation.first { it.text.contains("firewall") }.surfacing)
+        assertTrue(promptOf(recall.trace.horizonCycle!!).contains("Sort out the firewall rules"), "and it reaches the reply's prompt")
     }
 }

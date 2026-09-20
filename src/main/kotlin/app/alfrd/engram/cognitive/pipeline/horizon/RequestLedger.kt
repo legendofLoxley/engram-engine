@@ -21,6 +21,8 @@ data class ProcessedRequestRecord(
     val phraseUids: List<String>,
     val intentionPhraseUid: String?,
     val failureReason: String?,
+    /** The validated write plan (see [OperationPlanCodec]), present from the `ops_planned` checkpoint on — what a resume replays instead of calling the model again. */
+    val opsPlan: String? = null,
 )
 
 /**
@@ -40,10 +42,13 @@ data class ProcessedRequestRecord(
  * supplies one explicitly, so the mechanism is fully exercised regardless.
  *
  * **Checkpoint state machine**, in order: `cycle_allocated` (a cycle number was consumed, nothing
- * written yet) → `facts_ingested` (ordinary-fact/intention Phrases exist via
+ * written yet) → `ops_planned` (the interpretation model's validated operations are stored in
+ * [ProcessedRequestRecord.opsPlan] — from here a resume replays that plan and never calls the model
+ * again) → `writes_committed` (every operation was applied) → `completed` (propagation and assembly
+ * also ran). When the model could not be used, the fallback path goes `cycle_allocated` →
+ * `facts_ingested` (ordinary-fact Phrases exist via
  * [app.alfrd.engram.cognitive.pipeline.memory.EngramClient.ingest], not yet Horizon-stamped) →
- * `writes_committed` (every confirmed write is stamped via [HorizonGraphStore.stampNewAssertion])
- * → `completed` (propagation and assembly also ran). `failed` records a terminal, non-resumable
+ * `writes_committed` → `completed`. `failed` records a terminal, non-resumable
  * failure with [ProcessedRequestRecord.failureReason] set.
  *
  * A caller finding an existing row for `(userEmail, requestId)` resumes from exactly that
@@ -71,6 +76,7 @@ interface RequestLedger {
         phraseUids: List<String>? = null,
         intentionPhraseUid: String? = null,
         failureReason: String? = null,
+        opsPlan: String? = null,
     )
 }
 
@@ -110,6 +116,7 @@ class ArcadeRequestLedger(
         phraseUids: List<String>?,
         intentionPhraseUid: String?,
         failureReason: String?,
+        opsPlan: String?,
     ): Unit = withContext(Dispatchers.IO) {
         try {
             val acquired = withHorizonWriteLock(db, lockTimeoutMs) {
@@ -131,6 +138,7 @@ class ArcadeRequestLedger(
                     if (phraseUids != null) vertex.set("phraseUids", json.encodeToString(phraseUids))
                     if (intentionPhraseUid != null) vertex.set("intentionPhraseUid", intentionPhraseUid)
                     if (failureReason != null) vertex.set("failureReason", failureReason)
+                    if (opsPlan != null) vertex.set("opsPlan", opsPlan)
                     vertex.set("updatedAt", now)
                     vertex.save()
 
@@ -168,6 +176,7 @@ class ArcadeRequestLedger(
             phraseUids = uids,
             intentionPhraseUid = get("intentionPhraseUid") as? String,
             failureReason = get("failureReason") as? String,
+            opsPlan = get("opsPlan") as? String,
         )
     }
 }

@@ -168,7 +168,22 @@ data class PropagationCandidateTrace(val phraseUid: String, val text: String, va
 
 /** One assembled Horizon item, flattened for tracing — mirrors [app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem]. */
 @Serializable
-data class HorizonItemTrace(val category: String, val text: String, val status: String?, val surfacing: String)
+data class HorizonItemTrace(
+    val category: String,
+    val text: String,
+    val status: String?,
+    val surfacing: String,
+    /** 0 to 1, from [why]. */
+    val score: Double = 0.0,
+    /** What contributed to the score, strongest first, as `kind=value (detail)` — the answer to "why is this in view". */
+    val why: List<String> = emptyList(),
+    val kind: String? = null,
+    val container: String? = null,
+)
+
+/** How many nudges one turn set, by source — see [app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder.Seeded]. */
+@Serializable
+data class NudgeTrace(val touched: Int, val mentionedContainers: Int, val mentionedEntities: Int, val mentionedItems: Int, val pruned: Int)
 
 /**
  * Controlled debug evidence for one Horizon cycle — populated only when [PipelineTrace] itself is
@@ -188,6 +203,15 @@ data class HorizonCycleTrace(
     var interpretOutcome: String? = null,
     var interpretLatencyMs: Long = 0,
     var mutationOutcomes: List<MutationOutcomeTrace> = emptyList(),
+    /** True when this turn opened the "what have you been up to?" question after a long silence. */
+    var silenceQuestionAsked: Boolean = false,
+    /** Nudges set this turn: what was touched, and what the message mentioned (projects, entities, items), and how many old ones were pruned. */
+    var nudges: NudgeTrace? = null,
+    /** The pinned focus and zoom the Horizon was assembled under; null when zoomed out. */
+    var focus: String? = null,
+    var zoom: String? = null,
+    /** The user's containers as they appeared in the Horizon: `name (open, inView)`. */
+    var containers: List<String> = emptyList(),
     var propagationOutcome: String? = null,
     var propagationEdges: List<RelevanceEdgeTrace> = emptyList(),
     var propagateLatencyMs: Long = 0,

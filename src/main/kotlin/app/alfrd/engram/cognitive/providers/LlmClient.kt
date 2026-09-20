@@ -32,6 +32,16 @@ data class LlmRequest(
     val structuredOutput: Boolean = false,
     /** Empty (default) omits `tools` from the wire request entirely — every existing caller is unaffected. Tool choice is left at the API's default ("auto") — 0 or 1 tool call, model's discretion; this is a single-shot decision, not a multi-turn tool-result round trip. */
     val tools: List<ToolDefinition> = emptyList(),
+    /**
+     * When set, the model must call exactly this tool (one of [tools]) instead of choosing between a
+     * tool call and plain text — provider-native `tool_choice`. Lets a caller model "nothing to do"
+     * as an explicit empty argument (an empty list) rather than as the absence of a call, which a
+     * small model with many tools on offer will otherwise sometimes fill with an irrelevant call.
+     * Null (default) leaves tool choice at the API's default, so every existing caller is unaffected.
+     */
+    val forcedToolName: String? = null,
+    /** Sampling temperature. Null (default) leaves the provider's own default, so every existing caller is unaffected. */
+    val temperature: Double? = null,
 )
 
 data class LlmResponse(

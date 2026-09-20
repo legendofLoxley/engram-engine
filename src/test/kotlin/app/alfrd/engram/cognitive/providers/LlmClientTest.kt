@@ -208,6 +208,12 @@ class LlmClientTest {
     }
 
     @Test
+    fun `forcedToolName and temperature default to null so every existing caller is unaffected`() {
+        assertEquals(null, defaultRequest.forcedToolName)
+        assertEquals(null, defaultRequest.temperature)
+    }
+
+    @Test
     fun `toolCalls defaults to empty when a provider returns none`() = runTest {
         val client = fakeLlmClient { successResponse() }
 
