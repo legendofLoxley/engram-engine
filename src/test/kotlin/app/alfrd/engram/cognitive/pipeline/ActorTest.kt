@@ -11,6 +11,9 @@ import app.alfrd.engram.cognitive.pipeline.horizon.BoundedText
 import app.alfrd.engram.cognitive.pipeline.horizon.ContextHorizon
 import app.alfrd.engram.cognitive.pipeline.horizon.FocusZoom
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonBudget
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonContainerRef
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonContainerView
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonFocusRef
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItemCategory
 import app.alfrd.engram.cognitive.pipeline.horizon.ProvenanceKind
@@ -84,7 +87,7 @@ class ActorTest {
     @Test
     fun `an item in the focus names the focus, and is droppable`() {
         val rendered = renderedAt(0L, selectedItem("Book the room", SurfacingReason.InFocus("Demo", FocusZoom.BINOCULARS, 1))).single()
-        assertTrue(rendered.renderedLine.contains("part of what they are focused on (\"Demo\")"), rendered.renderedLine)
+        assertTrue(rendered.renderedLine.contains("part of what they are focused on"), rendered.renderedLine)
         assertTrue(!rendered.essential)
     }
 
@@ -137,6 +140,150 @@ class ActorTest {
         val theirs = renderedAt(0L, selectedItem("Should I take the job?", SurfacingReason.JustAsserted(1), kind = "question", askedBy = "user")).single()
         assertTrue(asked.renderedLine.contains("a question you want to ask them; ask it naturally, and do not assume an answer"))
         assertTrue(!theirs.renderedLine.contains("ask it naturally"), "their own open question is not Alfrd's to ask")
+    }
+
+    // ---- The Horizon read as places: headings, orientation, time-sensitive guidance ----
+
+    private fun filedItem(text: String, container: HorizonContainerRef?, surfacing: SurfacingReason = SurfacingReason.InFocus(container?.name, FocusZoom.BINOCULARS, 1)) =
+        selectedItem(text, surfacing).copy(container = container)
+
+    private val demo = HorizonContainerRef("p1", "Meridian demo", "project")
+    private val garden = HorizonContainerRef("p2", "Garden", "project")
+
+    private fun horizonWith(
+        asOf: Long,
+        items: List<HorizonItem>,
+        focus: HorizonFocusRef? = null,
+        containers: List<HorizonContainerView> = emptyList(),
+    ) = ContextHorizon(
+        "u@test.alfrd.internal", asOf, 2, items, HorizonBudget(12, items.size, false), emptyList(), 0, false,
+        zoom = focus?.zoom ?: FocusZoom.OVERVIEW, focus = focus, containers = containers,
+    )
+
+    @Test
+    fun `items are headed by the project they are filed in, the focused one marked, and unfiled and outside reports get their own headings`() {
+        val focus = HorizonFocusRef("p1", "Meridian demo", "project", FocusZoom.BINOCULARS)
+        val rendered = HorizonItemsRenderer.render(
+            horizonWith(
+                0L,
+                listOf(
+                    filedItem("Book the room", demo),
+                    filedItem("Water the tomatoes", garden, SurfacingReason.Activated("about garden", 1)),
+                    selectedItem("Call the plumber", SurfacingReason.DormantOpen(1)),
+                    selectedItem("Build finished", SurfacingReason.Peripheral(4)),
+                ),
+                focus = focus,
+            ),
+        )
+        assertEquals(
+            listOf(
+                "In \"Meridian demo\" (project) — what they are focused on",
+                "In \"Garden\" (project)",
+                "Not filed under any project",
+                "Reported from outside this conversation",
+            ),
+            rendered.map { it.group },
+        )
+    }
+
+    @Test
+    fun `the prompt lists items under their headings, in the order the highest-priority item of each first appears`() = runBlocking {
+        var receivedRequest: LlmRequest? = null
+        val client = TestLlmClient { req -> receivedRequest = req; LlmResponse(text = "ok", latencyMs = 1L, retryCount = 0) }
+        val items = HorizonItemsRenderer.render(
+            horizonWith(0L, listOf(filedItem("Book the room", demo), selectedItem("Call the plumber", SurfacingReason.DormantOpen(1)), filedItem("Print the agenda", demo))),
+        )
+
+        Actor(client).compose("hi", script = null, conditioners = baseConditioners(horizonItems = items))
+
+        val prompt = receivedRequest!!.systemPrompt!!
+        val demoHeading = prompt.indexOf("In \"Meridian demo\" (project):")
+        val unfiledHeading = prompt.indexOf("Not filed under any project:")
+        assertTrue(demoHeading >= 0 && unfiledHeading > demoHeading, prompt)
+        assertTrue(prompt.indexOf("Book the room") in demoHeading until unfiledHeading)
+        assertTrue(prompt.indexOf("Print the agenda") in demoHeading until unfiledHeading, "both demo items sit under the one heading, though another item ranks between them")
+        assertTrue(prompt.indexOf("Call the plumber") > unfiledHeading)
+    }
+
+    @Test
+    fun `items with no heading are listed flat, as before`() = runBlocking {
+        var receivedRequest: LlmRequest? = null
+        val client = TestLlmClient { req -> receivedRequest = req; LlmResponse(text = "ok", latencyMs = 1L, retryCount = 0) }
+        val items = listOf(HorizonPromptItem("\"One\" — a", essential = true), HorizonPromptItem("\"Two\" — b", essential = false))
+
+        Actor(client).compose("hi", script = null, conditioners = baseConditioners(horizonItems = items))
+
+        assertTrue(receivedRequest!!.systemPrompt!!.contains("- \"One\" — a\n- \"Two\" — b"))
+    }
+
+    @Test
+    fun `trimming still drops from the priority-ordered tail, so a heading is never left empty`() = runBlocking {
+        var receivedRequest: LlmRequest? = null
+        val client = TestLlmClient { req -> receivedRequest = req; LlmResponse(text = "ok", latencyMs = 1L, retryCount = 0) }
+        val essential = HorizonPromptItem("\"Send the invoice\" — a", essential = true, group = "In \"Work\" (project)")
+        val droppable = List(90) { HorizonPromptItem("\"Filler item $it ${"x".repeat(400)}\" — b", essential = false, group = "Not filed under any project") }
+
+        val result = Actor(client).compose("hi", script = null, conditioners = baseConditioners(horizonItems = listOf(essential) + droppable))
+
+        val prompt = receivedRequest!!.systemPrompt!!
+        assertTrue(prompt.contains("Send the invoice"))
+        val kept = result.promptDebug!!.horizonItemsIncluded
+        assertTrue(kept.size < 91 && kept.first() == essential, "only the tail was trimmed, and the essential item stayed at the head")
+        if (kept.none { it.group == "Not filed under any project" }) assertTrue(!prompt.contains("Not filed under any project:"), "a heading with nothing under it must not appear")
+    }
+
+    @Test
+    fun `orientation says what they are focused on, how closely, and what else they have going`() {
+        val now = 10 * dayMs
+        val focus = HorizonFocusRef("p1", "Meridian demo", "project", FocusZoom.BINOCULARS)
+        val orientation = HorizonItemsRenderer.composeOrientation(
+            horizonWith(
+                now, emptyList(), focus,
+                listOf(
+                    HorizonContainerView("p1", "Meridian demo", "project", openItems = 4, itemsInView = 3, nextDueAt = null, inFocus = true),
+                    HorizonContainerView("p2", "Garden", "project", openItems = 3, itemsInView = 0),
+                    HorizonContainerView("p3", "Home", "project", openItems = 0, itemsInView = 0, nextDueAt = now + 3 * dayMs + 3_600_000L),
+                ),
+            ),
+        )!!
+        assertTrue(orientation.contains("focused on the project \"Meridian demo\" (4 open) — looking closely at just that project"), orientation)
+        assertTrue(orientation.contains("\"Garden\" (3 open)"), orientation)
+        assertTrue(orientation.contains("\"Home\" (nothing open, next: due in 3 days"), orientation)
+        assertTrue(!orientation.contains("\"Meridian demo\" (4 open), "), "the focused project is not repeated among the others")
+    }
+
+    @Test
+    fun `orientation with no focus says it is the broad view, and there is nothing to say when there are no projects either`() {
+        val broad = HorizonItemsRenderer.composeOrientation(
+            horizonWith(0L, emptyList(), null, listOf(HorizonContainerView("p2", "Garden", "project", openItems = 1, itemsInView = 0))),
+        )!!
+        assertTrue(broad.contains("no particular focus — the broad view"), broad)
+        assertNull(HorizonItemsRenderer.composeOrientation(horizonWith(0L, emptyList())))
+    }
+
+    @Test
+    fun `the time-sensitive guidance appears only when a deadline item is in view`() {
+        val focus = HorizonFocusRef("p1", "Meridian demo", "project", FocusZoom.BINOCULARS)
+        val plain = HorizonItemsRenderer.composeOrientation(horizonWith(0L, listOf(filedItem("Book the room", demo)), focus))!!
+        val withDeadline = HorizonItemsRenderer.composeOrientation(
+            horizonWith(0L, listOf(selectedItem("Sister's birthday", SurfacingReason.Urgent(2 * dayMs, overdue = false))), focus),
+        )!!
+        assertTrue(!plain.contains("time-sensitive"), plain)
+        assertTrue(withDeadline.contains("bring one up when it bears on what they are saying"), withDeadline)
+        assertTrue(withDeadline.contains("already mentioned it"), withDeadline)
+    }
+
+    @Test
+    fun `the orientation heads the Horizon block, and a user with projects but nothing in view still gets it`() = runBlocking {
+        var receivedRequest: LlmRequest? = null
+        val client = TestLlmClient { req -> receivedRequest = req; LlmResponse(text = "ok", latencyMs = 1L, retryCount = 0) }
+        val frame = "Where they are right now: no particular focus — the broad view.\nWhat else they have going: \"Garden\" (1 open)."
+
+        Actor(client).compose("hi", script = null, conditioners = baseConditioners(horizonItems = emptyList()).copy(horizonFrame = frame))
+
+        val prompt = receivedRequest!!.systemPrompt!!
+        assertTrue(prompt.contains("Contextual awareness"))
+        assertTrue(prompt.contains(frame))
     }
 
     // ---- HorizonItemsRenderer.render ----

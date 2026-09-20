@@ -194,6 +194,71 @@ class HorizonSeederTest {
         assertEquals(HorizonSeeder.Seeded(0, 0, 0, 0, 0), seeded)
     }
 
+    // ── Recall: a question about something they said is a mention like any other ──
+
+    @Test
+    fun `a question about something said long ago finds it, however much has been said since`() = runBlocking {
+        val user = newUser()
+        val old = structure.createItem(user, 1, ItemKind.FACT, "My cat Biscuit hates the vet")!!
+        repeat(250) { structure.createItem(user, 2, ItemKind.FACT, "Unrelated remark number $it about the weather") }
+
+        val seeded = seeder().seedTurn(user, 300, "How is Biscuit doing these days?", emptyList())
+
+        assertEquals(1, seeded.mentionedItems)
+        assertTrue(nudged(user).containsKey(old.uid))
+        val recalled = horizon(user, 300).items.firstOrNull { it.text.text == old.text }
+        assertNotNull(recalled, "the old fact is in view for the reply, from the mention alone")
+        assertTrue(recalled!!.surfacing is SurfacingReason.Activated)
+
+        // What used to bound this: matching against only the 200 most recent items misses it. It is a policy knob, not a constant.
+        val narrow = seeder(HorizonPolicy(mentionScanItems = 200)).seedTurn(user, 301, "How is Biscuit doing these days?", emptyList())
+        assertEquals(0, narrow.mentionedItems)
+    }
+
+    @Test
+    fun `a question about something Hermes reported long ago finds it, and it comes back framed as self-reported`() = runBlocking {
+        val user = newUser()
+        val ingest = ActorEventIngestionService(ArcadeCycleSequencer(dbManager.getDatabase()), graph, NoOpHorizonPropagator())
+        val committed = ingest.ingest(
+            user, "evt-release", ActorEventKind.ToolResult("Cut a known-good v0.2 release candidate", toolName = "release", toolSucceeded = true), "hermes",
+        ) as ActorEventIngestOutcome.Committed
+        val later = 500L
+
+        val seeded = seeder().seedTurn(user, later, "How did the release candidate go?", emptyList())
+
+        assertEquals(1, seeded.mentionedItems)
+        val h = horizon(user, later)
+        val item = h.items.firstOrNull { it.sourceRefs.first().phraseUid == committed.phraseUid }
+        assertNotNull(item, "a report Hermes made is recalled like anything else the user's own Sources hold")
+        assertEquals(ProvenanceKind.ACTOR_TOOL_RESULT, item!!.provenance)
+        val rendered = HorizonItemsRenderer.render(h).first { it.renderedLine.contains("known-good") }
+        assertTrue(rendered.renderedLine.contains("self-reported, not independently verified"), rendered.renderedLine)
+        assertEquals("Reported from outside this conversation", rendered.group)
+    }
+
+    @Test
+    fun `the seeded result names each nudge, where it came from and what it is on`() = runBlocking {
+        val user = newUser()
+        val demo = structure.createContainer(user, 1, ContainerKind.PROJECT, "Demo")!!
+        val note = structure.createItem(user, 1, ItemKind.FACT, "Firewall rules block the demo box")!!
+        val task = structure.createItem(user, 1, ItemKind.TASK, "Send the invoice")!!
+
+        val seeded = seeder().seedTurn(
+            user, 5, "Is the firewall on the demo box sorted?",
+            listOf(AppliedOperation(ResolveItem(task.uid, "sent"), true, "Marked done")),
+        )
+
+        val bySource = seeded.nudges.associateBy { it.source }
+        assertEquals(setOf("touched", "container", "text"), bySource.keys)
+        assertEquals(task.uid, bySource.getValue("touched").uid)
+        assertEquals("Marked done", bySource.getValue("touched").label)
+        assertEquals(demo.uid, bySource.getValue("container").uid)
+        assertEquals("Demo", bySource.getValue("container").label)
+        assertEquals(note.uid, bySource.getValue("text").uid)
+        assertEquals(note.text, bySource.getValue("text").label)
+        assertTrue(bySource.getValue("text").weight in 0.34..1.0)
+    }
+
     @Test
     fun `one user's mention never nudges another user's things, even through a shared entity`() = runBlocking {
         val a = newUser()

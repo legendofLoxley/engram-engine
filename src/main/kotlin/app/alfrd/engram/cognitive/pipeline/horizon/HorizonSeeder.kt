@@ -11,7 +11,9 @@ import org.slf4j.LoggerFactory
  * - a message that names a project or domain nudges it;
  * - a message that names an entity ("my sister") nudges the items tied to that entity — this is how
  *   an ordinary fact comes back into view without a separate lookup;
- * - a message that shares distinctive words with an item nudges that item;
+ * - a message that shares distinctive words with an item nudges that item (this is also how a
+ *   question about something they once said finds it: recall is a mention like any other, and
+ *   there is no separate lookup);
  * - anything the interpretation stage just created, resolved, corrected, filed or linked is nudged too.
  * A nudge is an ordinary `FOCUSES_ON` edge with a weight; it fades by itself (see [HorizonPolicy.nudgeStrength]),
  * so nothing here decides how long anything stays in view, and old ones are pruned so they can't pile up.
@@ -27,25 +29,41 @@ class HorizonSeeder(
 ) {
     private val logger = LoggerFactory.getLogger(HorizonSeeder::class.java)
 
-    /** How many nudges one turn set, by where they came from — for tracing. */
-    data class Seeded(val touched: Int, val mentionedContainers: Int, val mentionedEntities: Int, val mentionedItems: Int, val pruned: Int)
+    /** One nudge that was set: what it is on, where it came from (`touched`, `container`, `entity`, `text`), how strong, and a short label — for tracing. */
+    data class SeededNudge(val uid: String, val source: String, val weight: Double, val label: String?)
+
+    /** How many nudges one turn set, by where they came from, and the nudges themselves — for tracing. */
+    data class Seeded(
+        val touched: Int, val mentionedContainers: Int, val mentionedEntities: Int, val mentionedItems: Int, val pruned: Int,
+        val nudges: List<SeededNudge> = emptyList(),
+    )
 
     suspend fun seedTurn(userEmail: String, cycleSeq: Long, utterance: String, applied: List<AppliedOperation>): Seeded {
         val nudged = LinkedHashMap<String, Double>() // uid -> weight; strongest wins
-        fun nudge(uid: String?, weight: Double) { if (uid != null) nudged.merge(uid, weight.coerceIn(0.0, 1.0), ::maxOf) }
+        val detail = LinkedHashMap<String, SeededNudge>()
+        fun nudge(uid: String?, weight: Double, source: String, label: String? = null) {
+            if (uid == null) return
+            val strength = weight.coerceIn(0.0, 1.0)
+            val previous = nudged[uid]
+            if (previous == null || strength > previous) {
+                nudged[uid] = strength
+                detail[uid] = SeededNudge(uid, source, strength, label?.take(MAX_LABEL))
+            }
+        }
 
         // What the interpretation stage just did to.
         var touched = 0
         for (result in applied.filter { it.applied }) {
             val before = nudged.size
+            val label = result.summary
             when (val op = result.operation) {
-                is RecordItem -> nudge(result.resultUid, 1.0)
-                is CorrectItem -> nudge(result.resultUid, 1.0)
-                is ResolveItem -> nudge(op.targetUid, 1.0)
-                is ReopenItem -> nudge(op.targetUid, 1.0)
-                is FileItem -> { nudge(op.targetUid, 1.0); nudge(op.intoUid, 1.0) }
-                is SetAttention -> nudge(op.targetUid, 1.0)
-                is LinkItems -> { nudge(op.fromUid, 1.0); nudge(op.toUid, 1.0) }
+                is RecordItem -> nudge(result.resultUid, 1.0, "touched", label)
+                is CorrectItem -> nudge(result.resultUid, 1.0, "touched", label)
+                is ResolveItem -> nudge(op.targetUid, 1.0, "touched", label)
+                is ReopenItem -> nudge(op.targetUid, 1.0, "touched", label)
+                is FileItem -> { nudge(op.targetUid, 1.0, "touched", label); nudge(op.intoUid, 1.0, "touched", label) }
+                is SetAttention -> nudge(op.targetUid, 1.0, "touched", label)
+                is LinkItems -> { nudge(op.fromUid, 1.0, "touched", label); nudge(op.toUid, 1.0, "touched", label) }
                 is CreateContainer, is SetFocus, is ReleaseFocus, is HoldForChoice -> Unit // a pin is not a nudge; a held feeling touches nothing
             }
             touched += nudged.size - before
@@ -53,43 +71,42 @@ class HorizonSeeder(
 
         val words = wordsOf(utterance)
         val containers = mentionedContainers(userEmail, utterance)
-        containers.forEach { nudge(it, 1.0) }
+        containers.forEach { nudge(it.uid, 1.0, "container", it.name) }
         val entityItems = mentionedEntities(userEmail, words)
-        entityItems.forEach { nudge(it, policy.entityMentionWeight) }
-        val textItems = mentionedItems(userEmail, utterance, cycleSeq)
-        textItems.forEach { (uid, weight) -> nudge(uid, weight) }
+        entityItems.forEach { nudge(it.uid, policy.entityMentionWeight, "entity", it.text) }
+        val textItems = mentionedItems(userEmail, utterance)
+        textItems.forEach { (item, weight) -> nudge(item.uid, weight, "text", item.text) }
 
         for ((uid, weight) in nudged) structure.setFocus(userEmail, cycleSeq, uid, FocusMode.NUDGE, weight = weight)
         val pruned = structure.pruneNudges(userEmail, cycleSeq - policy.nudgePruneCycles)
-        return Seeded(touched, containers.size, entityItems.size, textItems.size, pruned)
+        return Seeded(touched, containers.size, entityItems.size, textItems.size, pruned, detail.values.toList())
     }
 
-    private suspend fun mentionedContainers(userEmail: String, utterance: String): List<String> {
+    private suspend fun mentionedContainers(userEmail: String, utterance: String): List<ContainerRecord> {
         val padded = " ${normalize(utterance)} "
         return structure.listContainers(userEmail).filter { it.status == "active" && it.normalizedName.length >= MIN_NAME_LENGTH }
             .filter { padded.contains(" ${normalize(it.name)} ") }
-            .map { it.uid }
     }
 
     /** Items tied to an entity the message names — one word or two, matched to the entity's normalized name. */
-    private suspend fun mentionedEntities(userEmail: String, words: List<String>): List<String> {
+    private suspend fun mentionedEntities(userEmail: String, words: List<String>): List<ItemRecord> {
         val candidates = (words.filter { it !in STOP_WORDS && it.length >= MIN_NAME_LENGTH } + words.zipWithNext { a, b -> "$a $b" })
             .distinct().take(MAX_ENTITY_CANDIDATES)
-        return candidates.flatMap { structure.itemsAbout(userEmail, it, ITEMS_PER_ENTITY).map { item -> item.uid } }
-            .distinct().take(policy.maxMentionNudges * 2)
+        return candidates.flatMap { structure.itemsAbout(userEmail, it, ITEMS_PER_ENTITY) }
+            .distinctBy { it.uid }.take(policy.maxMentionNudges * 2)
     }
 
     /** Items whose own words overlap the message's distinctive words enough to count as being talked about. */
-    private suspend fun mentionedItems(userEmail: String, utterance: String, cycleSeq: Long): List<Pair<String, Double>> {
+    private suspend fun mentionedItems(userEmail: String, utterance: String): List<Pair<ItemText, Double>> {
         val said = SalientTokenPropagator.salientTokens(utterance)
         if (said.isEmpty()) return emptyList()
-        return structure.listRecentItems(userEmail, policy.mentionScanItems).mapNotNull { item ->
+        return structure.scanItemTexts(userEmail, policy.mentionScanItems).mapNotNull { item ->
             val theirs = SalientTokenPropagator.salientTokens(item.text)
             if (theirs.isEmpty()) return@mapNotNull null
             val overlap = (said intersect theirs).size
             if (overlap == 0) return@mapNotNull null
             val weight = overlap.toDouble() / minOf(said.size, theirs.size)
-            if (weight < policy.mentionMinOverlap) null else item.uid to weight
+            if (weight < policy.mentionMinOverlap) null else item to weight
         }.sortedByDescending { it.second }.take(policy.maxMentionNudges)
     }
 
@@ -134,6 +151,7 @@ class HorizonSeeder(
         const val SILENCE_QUESTION = "What have you been up to?"
         private const val MIN_NAME_LENGTH = 3
         private const val MAX_WORDS = 60
+        private const val MAX_LABEL = 80
         private const val MAX_ENTITY_CANDIDATES = 24
         private const val ITEMS_PER_ENTITY = 8
         private const val OPEN_QUESTION_SCAN = 50

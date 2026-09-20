@@ -3,6 +3,9 @@ package app.alfrd.engram.cognitive.pipeline
 import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventMetadata
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.ContextHorizon
+import app.alfrd.engram.cognitive.pipeline.horizon.FocusZoom
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItemCategory
 import app.alfrd.engram.cognitive.pipeline.horizon.ProvenanceKind
 import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason
@@ -33,9 +36,6 @@ sealed interface RetrievalIntent {
         val expressionPhase: ExpressionPhase = ExpressionPhase.FIRST_RESPONSE,
     ) : RetrievalIntent
 
-    /** Query the memory graph for phrases relevant to [hint]. */
-    data class MemoryQuery(val hint: String, val limit: Int = 5) : RetrievalIntent
-
     /** Resolve a correction: amend the phrase matching [supersededValue], or ingest [newFact] fresh. */
     data class Correction(val supersededValue: String?, val newFact: String) : RetrievalIntent
 }
@@ -56,8 +56,14 @@ data class RetrievedScript(
  * in the priority order [HorizonItemsRenderer.render] already received them in — bounded-recency
  * eligibility (see that reason's own doc) is not itself a guarantee of a place in the rendered
  * prompt.
+ *
+ * [group] is the heading the item is listed under in the prompt — the project it is filed in,
+ * "not filed under any project", or "reported from outside this conversation" — so the model reads
+ * the Horizon as a set of places, not one undifferentiated list. Grouping is presentation only: it
+ * happens after budget trimming, which still works on the priority-ordered flat list. Null means
+ * ungrouped (the items are then listed flat).
  */
-data class HorizonPromptItem(val renderedLine: String, val essential: Boolean)
+data class HorizonPromptItem(val renderedLine: String, val essential: Boolean, val group: String? = null)
 
 /** Pure functions turning graph-level Horizon/cycle results into what [Actor] renders — kept separate from [Actor] itself so its dependency on [app.alfrd.engram.cognitive.pipeline.horizon] types is contained to one small surface. */
 object HorizonItemsRenderer {
@@ -79,7 +85,7 @@ object HorizonItemsRenderer {
             is SurfacingReason.RecentActorEvidence -> "reported recently, independent of this conversation"
             is SurfacingReason.DormantOpen -> "noted earlier, still open"
             is SurfacingReason.Pinned -> "they asked you to keep this in front of them"
-            is SurfacingReason.InFocus -> "part of what they are focused on" + (surfacing.container?.let { " (\"$it\")" } ?: "")
+            is SurfacingReason.InFocus -> "part of what they are focused on"
             is SurfacingReason.Activated -> "connected to what they have been talking about (${surfacing.via})"
             is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone)
             is SurfacingReason.Peripheral -> "reported recently by the environment, independent of this conversation"
@@ -92,8 +98,66 @@ object HorizonItemsRenderer {
         // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
         // `when (surfacing)` above.
         val provenanceNote = provenanceAnnotation(item.provenance, item.actorMetadata)?.let { " [$it]" } ?: ""
-        HorizonPromptItem(renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$askNote", essential = essential)
+        HorizonPromptItem(
+            renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$askNote",
+            essential = essential,
+            group = groupHeading(item, horizon),
+        )
     }
+
+    /** The heading an item is listed under: its project (marking the one they are focused on), else where it came from. */
+    private fun groupHeading(item: HorizonItem, horizon: ContextHorizon): String {
+        item.container?.let { container ->
+            val focused = horizon.focus?.uid == container.uid
+            return "In \"${container.name}\" (${container.kind})" + if (focused) " — what they are focused on" else ""
+        }
+        val fromOutside = item.category == HorizonItemCategory.ENVIRONMENT_EVENT || item.actorMetadata != null ||
+            item.surfacing is SurfacingReason.Peripheral || item.surfacing is SurfacingReason.RecentActorEvidence
+        return if (fromOutside) "Reported from outside this conversation" else "Not filed under any project"
+    }
+
+    /**
+     * Where the user is in their own picture, in a few lines: what they are focused on (and how closely),
+     * and what else they have going, with how much is open in each — so the model knows the shape of their
+     * life even where none of a project's items is in view, and can say "that's under your Garden project".
+     * Also carries the one instruction about time-sensitive items, since it only matters when one is in
+     * view: raise it when it bears on what they are saying or the first time it appears, not every turn.
+     * Null when there is no focus and no projects yet (nothing worth saying).
+     */
+    fun composeOrientation(horizon: ContextHorizon, zone: java.time.ZoneId = java.time.ZoneOffset.UTC): String? {
+        val focus = horizon.focus
+        val others = horizon.containers.filter { it.uid != focus?.uid }.take(MAX_ORIENTATION_CONTAINERS)
+        if (focus == null && others.isEmpty()) return null
+        fun openWords(view: app.alfrd.engram.cognitive.pipeline.horizon.HorizonContainerView?): String {
+            if (view == null) return ""
+            val open = if (view.openItems == 0) "nothing open" else "${view.openItems} open"
+            val next = view.nextDueAt?.let { ", next: " + describeDeadline(SurfacingReason.Urgent(it, overdue = it < horizon.asOf), horizon.asOf, zone) } ?: ""
+            return " ($open$next)"
+        }
+        val lines = mutableListOf<String>()
+        if (focus != null) {
+            val how = when (focus.zoom) {
+                FocusZoom.OVERVIEW -> "keeping the whole picture in view"
+                FocusZoom.BINOCULARS -> "looking closely at just that ${focus.kind}"
+                FocusZoom.TELESCOPE -> "looking at that one thing and what is directly tied to it"
+            }
+            val view = horizon.containers.firstOrNull { it.uid == focus.uid }
+            lines += "Where they are right now: focused on the ${focus.kind} \"${focus.name}\"${openWords(view)} — $how."
+        } else {
+            lines += "Where they are right now: no particular focus — the broad view."
+        }
+        if (others.isNotEmpty()) {
+            lines += "What else they have going: " + others.joinToString(", ") { "\"${it.name}\"${openWords(it)}" } + "."
+        }
+        if (horizon.items.any { it.surfacing is SurfacingReason.Urgent }) {
+            lines += "Items marked with a deadline are time-sensitive: bring one up when it bears on what they are saying, or the first " +
+                "time it comes into view. If your recent replies already mentioned it, leave it out unless it is now due today or " +
+                "overdue, or they ask."
+        }
+        return lines.joinToString("\n")
+    }
+
+    private const val MAX_ORIENTATION_CONTAINERS = 8
 
     /**
      * "overdue by 2 days", "due today", "due in 3 days (2026-09-23)" — counted in calendar days in [zone]
@@ -228,6 +292,8 @@ object HorizonItemsRenderer {
  * [CognitivePipeline] for how that distinction is preserved in tracing).
  * [integrityCaveat] is a composed, per-operation instruction not to claim a write succeeded when
  * it didn't — see [HorizonItemsRenderer.composeIntegrityCaveat].
+ * [horizonFrame] is the short orientation that heads the Horizon block: what they are focused on and
+ * what else they have going — see [HorizonItemsRenderer.composeOrientation].
  */
 data class Conditioners(
     val modality: Modality,
@@ -241,6 +307,8 @@ data class Conditioners(
     val recentTurns: String?,
     val horizonItems: List<HorizonPromptItem> = emptyList(),
     val integrityCaveat: String? = null,
+    /** Where the user is in their own picture — focus, zoom, their other projects — see [HorizonItemsRenderer.composeOrientation]. Null when there is nothing to say. */
+    val horizonFrame: String? = null,
 )
 
 /** Result of a single actor composition. [source] is "llm" for a real completion, "degraded" for the failure fallback. [promptDebug] is always populated — the caller decides whether to surface it (debug trace only; never the plain response). [providerName]/[modelName] mirror [app.alfrd.engram.cognitive.providers.LlmResponse]'s fields — null for a "degraded" result, since no client answered. */
@@ -397,6 +465,21 @@ class Actor(private val llmClient: LlmClient?) {
     }
 
     /**
+     * The Horizon items as a list per heading, headings in the order their first (highest-priority) item
+     * appears — so the project holding the most pressing thing comes first, and the focused project's
+     * items lead whenever they rank highest, as they normally do. Items with no heading (a caller that
+     * builds [HorizonPromptItem]s by hand) are listed flat.
+     */
+    private fun renderGrouped(items: List<HorizonPromptItem>): String {
+        if (items.all { it.group == null }) return items.joinToString("\n") { "- ${it.renderedLine}" }
+        val byGroup = LinkedHashMap<String?, MutableList<HorizonPromptItem>>()
+        for (item in items) byGroup.getOrPut(item.group) { mutableListOf() } += item
+        return byGroup.entries.joinToString("\n\n") { (heading, group) ->
+            (heading?.let { "$it:\n" } ?: "") + group.joinToString("\n") { "- ${it.renderedLine}" }
+        }
+    }
+
+    /**
      * Priority-ordered degradation, cheapest/least-important dropped first, with a hard floor —
      * never the reverse. Order: (1) try everything; (2) drop [Conditioners.recentTurns] entirely
      * (already tightly bounded — 6 turns × 280 chars — so this alone is usually sufficient, and
@@ -439,20 +522,25 @@ class Actor(private val llmClient: LlmClient?) {
                 append("\n\n")
                 append(it)
             }
-            if (horizonItems.isNotEmpty()) {
+            val frame = conditioners.horizonFrame
+            if (horizonItems.isNotEmpty() || frame != null) {
                 // The "use it naturally, don't recite everything" guidance now lives once, in
                 // STANDING_CONTEXT_POLICY above — stated there so it still applies on a turn with
                 // no Horizon items at all, rather than duplicated (or, worse, only present) here.
                 append(
                     "\n\nContextual awareness — background orientation from your durable memory of this user:\n",
                 )
-                append(horizonItems.joinToString("\n") { "- ${it.renderedLine}" })
+                if (frame != null) {
+                    append(frame)
+                    if (horizonItems.isNotEmpty()) append("\n\n")
+                }
+                append(renderGrouped(horizonItems))
             }
             val grounding = script?.lines?.takeIf { it.isNotEmpty() }
             if (grounding != null) {
                 append("\n\nContext:\n")
                 append(grounding.joinToString("\n") { "- $it" })
-                append("\nTreat lower-confidence or tentative items as tentative. Be concise and warm.")
+                append("\nBe concise and warm.")
             }
         }
 

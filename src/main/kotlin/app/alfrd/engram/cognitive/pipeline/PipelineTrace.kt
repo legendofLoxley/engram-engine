@@ -76,6 +76,10 @@ data class SessionTrace(
     var trustPhase: Int? = null,
     var turnCount: Int = 0,
     var sessionAgeMs: Long = 0,
+    /** How many turns of recent conversation were in the reply prompt (0 when the prompt budget dropped them). */
+    var recentTurnsInPrompt: Int = 0,
+    /** How many of those were read back from the durable ledger rather than made in this session — non-zero after a restart or a new session. */
+    var recentTurnsRestoredFromLedger: Int = 0,
 )
 
 @Serializable
@@ -181,6 +185,10 @@ data class HorizonItemTrace(
     val container: String? = null,
 )
 
+/** One nudge set this turn: what it is on, where it came from (`touched`, `container`, `entity` or `text`), how strong, and a short label. */
+@Serializable
+data class NudgedItemTrace(val uid: String, val source: String, val weight: Double, val label: String? = null)
+
 /** How many nudges one turn set, by source — see [app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder.Seeded]. */
 @Serializable
 data class NudgeTrace(val touched: Int, val mentionedContainers: Int, val mentionedEntities: Int, val mentionedItems: Int, val pruned: Int)
@@ -207,6 +215,8 @@ data class HorizonCycleTrace(
     var silenceQuestionAsked: Boolean = false,
     /** Nudges set this turn: what was touched, and what the message mentioned (projects, entities, items), and how many old ones were pruned. */
     var nudges: NudgeTrace? = null,
+    /** The nudges themselves — what the message made a candidate for the Horizon, and why. Recall of something they once said shows up here. */
+    var nudged: List<NudgedItemTrace> = emptyList(),
     /** The pinned focus and zoom the Horizon was assembled under; null when zoomed out. */
     var focus: String? = null,
     var zoom: String? = null,
@@ -221,6 +231,10 @@ data class HorizonCycleTrace(
     var horizonAfterPropagation: List<HorizonItemTrace> = emptyList(),
     var horizonAfterBudget: List<HorizonItemTrace> = emptyList(),
     var promptOmissions: List<String> = emptyList(),
+    /** How the Horizon was laid out in the reply prompt: each heading with how many items sit under it, in prompt order. */
+    var promptGroups: List<String> = emptyList(),
+    /** The orientation lines that head the Horizon block (focus, zoom, what else they have going); null when there was nothing to say. */
+    var orientation: String? = null,
     var promptBudgetOutcome: String? = null,
     var finalSystemPromptSent: String? = null,
     var finalUserPromptSent: String? = null,

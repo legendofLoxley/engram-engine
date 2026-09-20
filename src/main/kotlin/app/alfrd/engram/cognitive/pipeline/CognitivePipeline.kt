@@ -159,6 +159,16 @@ open class CognitivePipeline(
     @Volatile private var recentTurns: List<RecentTurn> = emptyList()
 
     /**
+     * Set the first time this pipeline looks in the durable ledger for the tail of the user's last
+     * conversation (see [restoreRecentTurns]) — once per pipeline, so a session that starts, or a
+     * process that restarts, picks up where the user left off, and then never asks again.
+     */
+    private val recentTurnsRestored = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** How many of [recentTurns] were read back from the ledger rather than made in this session — for tracing. */
+    @Volatile private var recentTurnsRestoredCount: Int = 0
+
+    /**
      * Non-null exactly between the turn where [HermesDocumentIntentDirector] decided `Clarify`
      * (the user wants some approved document summarized but which one is ambiguous) and whichever
      * later turn resolves it — one document-summary request in flight at a time, same
@@ -212,6 +222,14 @@ open class CognitivePipeline(
 
         /** Per-entry text cap in [recentTurns] — see [recordTurn]. */
         private const val MAX_TURN_TEXT_LENGTH = 280
+
+        /**
+         * How far back the ledger is read to restore [recentTurns]. Provisional: long enough that a restart
+         * or a fresh session the same day continues the conversation, short enough that the tail of
+         * something said last week is not presented as "the conversation so far" (what carries the
+         * longer past is the Horizon, not this tail).
+         */
+        private const val RECENT_TURNS_LOOKBACK_MS = 24L * 60 * 60 * 1000
 
         /**
          * Reuses Comprehension's own already-computed intent — not a new keyword gate — to decide
@@ -401,6 +419,8 @@ open class CognitivePipeline(
             }
         }
 
+        restoreRecentTurns(userId)
+
         if (userEmail == "yardkup@gmail.com") {
             return buildInitResponse(
                 greeting  = "[debug] engram-engine ok · session=$sessionId",
@@ -581,6 +601,7 @@ open class CognitivePipeline(
         // Absent a caller-supplied id, this call gets no retry protection — RequestLedger cannot
         // recognize a retry it was never given a stable identity for. See RequestLedger's doc.
         val effectiveRequestId = requestId ?: java.util.UUID.randomUUID().toString()
+        restoreRecentTurns(userId)
         val turnIndex = turnCounters.merge(sessionId, 1, Int::plus)!!
         val trace = if (debug) PipelineTrace() else null
         // Per-stage nanosecond accumulators — summed into totalPipelineMs at the end so that
@@ -726,8 +747,10 @@ open class CognitivePipeline(
         } else {
             script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
         }
-        val horizonItems = (horizonCycleResult?.assembleOutcome as? AssembleOutcome.Assembled)
-            ?.horizon?.let { HorizonItemsRenderer.render(it, sessionZoneId ?: java.time.ZoneId.systemDefault()) } ?: emptyList()
+        val promptZone = sessionZoneId ?: java.time.ZoneId.systemDefault()
+        val assembledHorizon = (horizonCycleResult?.assembleOutcome as? AssembleOutcome.Assembled)?.horizon
+        val horizonItems = assembledHorizon?.let { HorizonItemsRenderer.render(it, promptZone) } ?: emptyList()
+        val horizonFrame = assembledHorizon?.let { HorizonItemsRenderer.composeOrientation(it, promptZone) }
         val integrityCaveat = HorizonItemsRenderer.composeIntegrityCaveat(horizonCycleResult)
         val persona = script.persona(ctx.modality)
         // Posture read as a natural-language directive — computed independent of which branch
@@ -861,6 +884,7 @@ open class CognitivePipeline(
             recentTurns      = recentTurnsConditioner(),
             horizonItems     = horizonItems,
             integrityCaveat  = integrityCaveat,
+            horizonFrame     = horizonFrame,
         )
         val coverage = ctx.retrievalCoverage ?: RetrievalCoverage.NONE_NEEDED
         logger.info(
@@ -960,6 +984,7 @@ open class CognitivePipeline(
                     mutationOutcomes = hcr.mutationOutcomes.map { toMutationOutcomeTrace(it) },
                     silenceQuestionAsked = hcr.silenceQuestionAsked,
                     nudges = hcr.seeded?.let { NudgeTrace(it.touched, it.mentionedContainers, it.mentionedEntities, it.mentionedItems, it.pruned) },
+                    nudged = hcr.seeded?.nudges?.map { NudgedItemTrace(it.uid, it.source, it.weight, it.label) } ?: emptyList(),
                     focus = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.focus?.let { "${it.name} (${it.kind})" },
                     zoom = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.zoom?.name?.lowercase(),
                     containers = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.containers
@@ -979,6 +1004,8 @@ open class CognitivePipeline(
                         HorizonItemTrace(category = "", text = it.renderedLine, status = null, surfacing = if (it.essential) "essential" else "dormant")
                     } ?: emptyList(),
                     promptOmissions = promptDebug?.omissions ?: emptyList(),
+                    promptGroups = promptDebug?.horizonItemsIncluded.orEmpty().groupBy { it.group ?: "(ungrouped)" }.map { (heading, items) -> "$heading (${items.size})" },
+                    orientation = horizonFrame,
                     promptBudgetOutcome = promptDebug?.outcome,
                     finalSystemPromptSent = promptDebug?.finalSystemPrompt,
                     finalUserPromptSent = promptDebug?.finalUserPrompt,
@@ -1052,6 +1079,8 @@ open class CognitivePipeline(
             trace.session.trustPhase = trustPhaseStringToInt(ctx.trustPhase)
             trace.session.turnCount = ctx.priorUtterances.size + 1
             trace.session.sessionAgeMs = 0 // SessionManager doesn't expose creation time to pipeline
+            trace.session.recentTurnsInPrompt = if (ctx.actorResult?.promptDebug?.omissions?.contains("recentTurns") == true) 0 else recentTurns.size
+            trace.session.recentTurnsRestoredFromLedger = recentTurnsRestoredCount
         }
 
         // Short-term conversational continuity — record both sides of this turn for the *next*
@@ -1221,6 +1250,26 @@ open class CognitivePipeline(
         if (text.isBlank()) return
         val truncated = if (text.length > MAX_TURN_TEXT_LENGTH) text.take(MAX_TURN_TEXT_LENGTH) + "…" else text
         recentTurns = (recentTurns + RecentTurn(role, truncated)).takeLast(MAX_RECENT_TURNS)
+    }
+
+    /**
+     * Rebuilds [recentTurns] from the durable episode ledger so the short tail of the conversation
+     * survives a restart and carries across sessions — the reply model is told what was just said
+     * even when this process has never heard it. Runs once per pipeline, before anything else has
+     * been recorded, and only when a ledger is wired. Never throws: a ledger that can't be read
+     * leaves the tail empty, exactly as before.
+     */
+    private suspend fun restoreRecentTurns(userId: String) {
+        if (episodicLogService == null || userId.isBlank() || !recentTurnsRestored.compareAndSet(false, true)) return
+        if (recentTurns.isNotEmpty()) return
+        val turns = try {
+            engramClient.getEpisodicLog(userId, sinceMillis = System.currentTimeMillis() - RECENT_TURNS_LOOKBACK_MS, limit = MAX_RECENT_TURNS)
+        } catch (e: Exception) {
+            logger.warn("restoreRecentTurns failed for userId=$userId: ${e.message}")
+            emptyList()
+        }
+        turns.forEach { recordTurn(it.role, it.text) }
+        recentTurnsRestoredCount = recentTurns.size
     }
 
     /** Renders [recentTurns] for [Conditioners.recentTurns]; null when empty (fresh session). */

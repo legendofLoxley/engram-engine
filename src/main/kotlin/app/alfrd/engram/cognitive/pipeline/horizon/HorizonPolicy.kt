@@ -66,8 +66,12 @@ data class HorizonPolicy(
     val entityMentionWeight: Double = 0.8,
     /** At most this many items are nudged by one message. */
     val maxMentionNudges: Int = 6,
-    /** How many of the user's recent items a message is matched against. */
-    val mentionScanItems: Int = 200,
+    /**
+     * How many of the user's most recent items a message is matched against. This is the whole of
+     * recall — there is no separate lookup — so it reaches well back; the scan is one query over
+     * item words, and only [maxMentionNudges] of the matches are kept.
+     */
+    val mentionScanItems: Int = 1500,
 
     // ── Deadlines ────────────────────────────────────────────────────────────
     /** An item's urgency halves this many days out (so 0.5 at that distance, 1.0 when due, rising toward it). */

@@ -48,12 +48,6 @@ class Comprehension(
         ctx.intent = intent
         ctx.intentConfidence = confidence
         ctx.comprehensionTier = tier
-        ctx.requiresMemory = intent in setOf(IntentType.QUESTION, IntentType.META)
-        ctx.memoryQueryHint = when (intent) {
-            IntentType.QUESTION -> "answer: ${ctx.utterance}"
-            IntentType.META     -> "profile: ${ctx.utterance}"
-            else                -> null
-        }
 
         // Text-path turn shape — heuristic classifier, null when no explicit signal.
         ctx.turnShape = classifyTextPathTurnShape(ctx.utterance)

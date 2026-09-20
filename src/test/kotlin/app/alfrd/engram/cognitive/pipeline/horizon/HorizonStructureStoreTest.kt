@@ -661,6 +661,23 @@ class HorizonStructureStoreTest {
     // ── Reads for the interpretation snapshot ─────────────────────────────────
 
     @Test
+    fun `scanItemTexts returns just identity and words, newest first, limited, and only the callers own`() = runBlocking {
+        val a = newUser()
+        val b = newUser()
+        val first = store.createItem(a, 1, ItemKind.TASK, "first thing")!!
+        Thread.sleep(3)
+        val second = store.createItem(a, 2, ItemKind.FACT, "second thing")!!
+        Thread.sleep(3)
+        store.createItem(b, 1, ItemKind.FACT, "second thing, but someone else's")
+
+        assertEquals(listOf(ItemText(second.uid, "second thing"), ItemText(first.uid, "first thing")), store.scanItemTexts(a, 10))
+        assertEquals(listOf(second.uid), store.scanItemTexts(a, 1).map { it.uid })
+        assertTrue(store.scanItemTexts(a, 0).isEmpty())
+        assertTrue(store.scanItemTexts("nobody@example.test", 5).isEmpty())
+        assertTrue(store.scanItemTexts(b, 10).none { it.text == "first thing" || it.text == "second thing" }, "b never sees a's words")
+    }
+
+    @Test
     fun `listRecentItems returns newest first, can be limited to open ones, and only shows the callers own`() = runBlocking {
         val a = newUser()
         val b = newUser()

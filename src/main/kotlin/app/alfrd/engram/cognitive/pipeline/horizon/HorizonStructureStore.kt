@@ -251,7 +251,18 @@ interface HorizonStructureStore {
      * show the interpretation model what it can refer to; a bounded read, never the whole graph.
      */
     suspend fun listRecentItems(userEmail: String, limit: Int, openOnly: Boolean = false): List<ItemRecord>
+
+    /**
+     * Just the words of the most recent things the user's own Sources assert (their statements, and
+     * reports made for them), newest first, capped at [limit] — one query, nothing else loaded. This is what "the message mentions something they
+     * told me" is matched against, so it has to reach further back than [listRecentItems] is asked to
+     * and stay cheap enough to run every turn.
+     */
+    suspend fun scanItemTexts(userEmail: String, limit: Int): List<ItemText>
 }
+
+/** An item's identity and words, nothing more — see [HorizonStructureStore.scanItemTexts]. */
+data class ItemText(val uid: String, val text: String)
 
 class ArcadeHorizonStructureStore(
     private val db: Database,
@@ -659,6 +670,32 @@ class ArcadeHorizonStructureStore(
                 db.query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to uid))
                     .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
                     ?.toItemRecord()
+            }
+        }
+
+    override suspend fun scanItemTexts(userEmail: String, limit: Int): List<ItemText> =
+        read("scanItemTexts", emptyList()) {
+            if (limit <= 0) return@read emptyList()
+            val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@read emptyList()
+            // Everything the user's own Sources assert — what they said, and also what Hermes or the environment
+            // reported on their behalf, since a question about a report should find it (the assembler frames those
+            // by provenance when they surface). Ownership is the TRUSTS edge, as everywhere else.
+            val sourceUids = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
+                .mapNotNull { it.get("uid") as? String }
+            if (sourceUids.isEmpty()) return@read emptyList()
+            db.query(
+                "sql",
+                "SELECT @in.uid AS uid, @in.text AS text FROM ASSERTS WHERE @out.uid IN :sourceUids ORDER BY timestamp DESC LIMIT :limit",
+                mapOf("sourceUids" to sourceUids, "limit" to limit),
+            ).use { rs ->
+                val out = LinkedHashMap<String, String>()
+                while (rs.hasNext()) {
+                    val row = rs.next().toMap()
+                    val uid = row["uid"] as? String ?: continue
+                    val text = row["text"] as? String ?: continue
+                    out.putIfAbsent(uid, text)
+                }
+                out.map { (uid, text) -> ItemText(uid, text) }
             }
         }
 
