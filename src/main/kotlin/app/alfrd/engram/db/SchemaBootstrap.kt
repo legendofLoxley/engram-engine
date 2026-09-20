@@ -104,6 +104,8 @@ object SchemaBootstrap {
                 vt.createProperty("normalizedName", Type.STRING)
                 vt.createProperty("ownerEmail", Type.STRING)
                 vt.createProperty("status", Type.STRING)        // active | archived
+                vt.createProperty("attention", Type.STRING)     // pinned | suppressed; absent = normal
+                vt.createProperty("tentative", Type.BOOLEAN)    // true = a label the model chose, not a name the user said
                 vt.createProperty("createdAt", Type.LONG)
                 vt.createProperty("updatedAt", Type.LONG)
             }
@@ -115,6 +117,8 @@ object SchemaBootstrap {
                 vt.createProperty("ownerEmail", Type.STRING)
                 vt.createProperty("status", Type.STRING)        // active | done | archived
                 vt.createProperty("dueAt", Type.LONG)           // nullable, epoch millis
+                vt.createProperty("attention", Type.STRING)     // pinned | suppressed; absent = normal
+                vt.createProperty("tentative", Type.BOOLEAN)    // true = a label the model chose, not a name the user said
                 vt.createProperty("createdAt", Type.LONG)
                 vt.createProperty("updatedAt", Type.LONG)
             }
@@ -129,6 +133,8 @@ object SchemaBootstrap {
             ensureVertex(schema, "Event") { vt ->
                 vt.addSuperType("Phrase")
                 vt.createProperty("occursAt", Type.LONG)        // nullable, epoch millis
+                vt.createProperty("status", Type.STRING)        // open | resolved (past or cancelled)
+                vt.createProperty("resolvedAt", Type.LONG)      // nullable
             }
 
             ensureVertex(schema, "Question") { vt ->
@@ -149,10 +155,11 @@ object SchemaBootstrap {
                 vt.createProperty("requestId", Type.STRING)
                 vt.createProperty("userEmail", Type.STRING)
                 vt.createProperty("cycleSeq", Type.LONG)
-                vt.createProperty("checkpoint", Type.STRING)        // cycle_allocated | facts_ingested | writes_committed | completed | failed
+                vt.createProperty("checkpoint", Type.STRING)        // cycle_allocated | ops_planned | facts_ingested | writes_committed | completed | failed
                 vt.createProperty("phraseUids", Type.STRING)        // JSON array, populated as known
                 vt.createProperty("intentionPhraseUid", Type.STRING) // nullable
                 vt.createProperty("failureReason", Type.STRING)     // nullable
+                vt.createProperty("opsPlan", Type.STRING)           // nullable JSON: the validated write plan, stored before it is applied
                 vt.createProperty("createdAt", Type.LONG)
                 vt.createProperty("updatedAt", Type.LONG)
             }
@@ -290,6 +297,18 @@ object SchemaBootstrap {
             // Idempotency key for an item created by a Horizon write operation, namespaced by
             // owner — see HorizonStructureStore.createItem. Null for ordinarily-ingested phrases.
             ensureProperty(schema, "Phrase",  "opKey",               Type.STRING)
+            // The user's explicit "keep this in front of me" / "stop bringing this up" — pinned |
+            // suppressed, absent = normal. Persisted here; the selector (not built yet) is what acts on it.
+            ensureProperty(schema, "Phrase",  "attention",           Type.STRING)
+            // Same properties as the ensureVertex blocks above, repeated so a database that already ran
+            // an earlier revision of those blocks picks them up.
+            ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)
+            ensureProperty(schema, "Domain",  "attention",           Type.STRING)
+            ensureProperty(schema, "Project", "attention",           Type.STRING)
+            ensureProperty(schema, "Domain",  "tentative",           Type.BOOLEAN)
+            ensureProperty(schema, "Project", "tentative",           Type.BOOLEAN)
+            ensureProperty(schema, "Event",   "status",              Type.STRING)
+            ensureProperty(schema, "Event",   "resolvedAt",          Type.LONG)
             ensureProperty(schema, "ASSERTS", "scores",              Type.STRING)
             ensureProperty(schema, "INVITED", "relationshipContext", Type.STRING)
             ensureProperty(schema, "INVITED", "trustPhase",          Type.STRING)

@@ -64,8 +64,7 @@ class CloudLlmClient(
             else                       -> request.model.apiId
         }
 
-        val bodyObj = buildAnthropicBody(modelId, request)
-        val bodyStr = json.encodeToString(bodyObj)
+        val bodyStr = anthropicRequestJson(modelId, request)
 
         val httpRequest = HttpRequest.newBuilder()
             .uri(URI.create("https://api.anthropic.com/v1/messages"))
@@ -98,6 +97,10 @@ class CloudLlmClient(
         )
     }
 
+    /** The exact JSON sent to Anthropic for [request] — a seam so the wire shape can be asserted without a network call. */
+    internal fun anthropicRequestJson(modelId: String, request: LlmRequest): String =
+        json.encodeToString(buildAnthropicBody(modelId, request))
+
     private fun buildAnthropicBody(modelId: String, request: LlmRequest): AnthropicRequest {
         val messages = listOf(AnthropicMessage(role = "user", content = request.prompt))
         return AnthropicRequest(
@@ -108,6 +111,9 @@ class CloudLlmClient(
             tools = request.tools.takeIf { it.isNotEmpty() }?.map {
                 AnthropicTool(name = it.name, description = it.description, input_schema = it.inputSchema)
             },
+            tool_choice = request.forcedToolName?.takeIf { request.tools.isNotEmpty() }
+                ?.let { AnthropicToolChoice(type = "tool", name = it) },
+            temperature = request.temperature,
         )
     }
 
@@ -222,7 +228,14 @@ class CloudLlmClient(
         val messages: List<AnthropicMessage>,
         /** Omitted from the wire request when null — every caller not passing [LlmRequest.tools] is unaffected. */
         val tools: List<AnthropicTool>? = null,
+        /** Omitted when null — see [LlmRequest.forcedToolName]. */
+        val tool_choice: AnthropicToolChoice? = null,
+        /** Omitted when null — see [LlmRequest.temperature]. */
+        val temperature: Double? = null,
     )
+
+    @Serializable
+    private data class AnthropicToolChoice(val type: String, val name: String)
 
     @Serializable
     private data class AnthropicMessage(val role: String, val content: String)

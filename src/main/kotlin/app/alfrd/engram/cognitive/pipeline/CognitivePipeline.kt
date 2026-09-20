@@ -24,6 +24,7 @@ import app.alfrd.engram.cognitive.pipeline.hermes.HermesDelegationTrigger
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDecision
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesDocumentIntentDirector
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
+import app.alfrd.engram.cognitive.pipeline.horizon.CycleFollowUp
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItem
 import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
 import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
@@ -119,7 +120,7 @@ open class CognitivePipeline(
     private val attention     = Attention()
     private val comprehension = Comprehension(llmClient, selectTier2Model(llmClient))
     private val router        = Router()
-    private val script        = Script(engramClient, selectionService, personaSource, confidenceService)
+    private val script        = Script(engramClient, selectionService, personaSource, confidenceService, interpreterOwnsWrites = horizonCycleCoordinator != null)
     private val actor         = Actor(llmClient)
     private val expression    = Expression()
 
@@ -168,6 +169,22 @@ open class CognitivePipeline(
      * one-shot follow-up slot, never a queue of outstanding questions.
      */
     @Volatile private var pendingDocumentClarification: List<String>? = null
+
+    /**
+     * Non-null exactly between a turn where the interpretation stage saved an item but couldn't
+     * tell which project it belongs to (the reply asked) and the next turn, which reads the user's
+     * message as the answer. One-shot, same one-instance-per-session pattern as
+     * [pendingDocumentClarification]: cleared after that next turn whether or not it was answered.
+     */
+    @Volatile private var pendingProjectFilingItemUid: String? = null
+
+    /**
+     * Non-null exactly between a turn where the user voiced strong feeling (nothing was saved; the
+     * reply asked whether they just want to talk or want a task made to help) and the next turn,
+     * which reads their message as the choice. Holds the statement itself so a "yes, make a task"
+     * can be grounded in what they actually said a turn earlier. One-shot, cleared after the next turn.
+     */
+    @Volatile private var pendingEmotionQuote: String? = null
 
     /**
      * First-session state recorded when an invited user is greeted with the warm provenance
@@ -694,10 +711,17 @@ open class CognitivePipeline(
         val retrievedScript: RetrievedScript = if (coordinator != null) {
             val (rs, hcr) = PerUserCycleLock.withLock(ctx.userEmail) {
                 val r = script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
-                val h = coordinator.runCycle(ctx.userEmail, effectiveRequestId, ctx.utterance)
+                val h = coordinator.runCycle(
+                    ctx.userEmail, effectiveRequestId, ctx.utterance,
+                    PendingInterpretation(filingItemUid = pendingProjectFilingItemUid, emotionQuote = pendingEmotionQuote),
+                    sessionZoneId ?: java.time.ZoneId.systemDefault(),
+                )
                 r to h
             }
             horizonCycleResult = hcr
+            // What this turn left waiting on the user replaces whatever the last one did — one slot each, never a queue.
+            pendingEmotionQuote = (hcr.followUp as? CycleFollowUp.AskEmotionChoice)?.quote
+            pendingProjectFilingItemUid = (hcr.followUp as? CycleFollowUp.AskWhichProject)?.itemUid
             rs
         } else {
             script.run(ctx, ctx.branchResult?.retrieval ?: RetrievalIntent.None)
@@ -820,7 +844,10 @@ open class CognitivePipeline(
                     describeApprovedDocuments(documentClarifyCandidates!!) + ". Do not guess which one, and do " +
                     "not claim to have started anything yet."
             else -> baseDirective
-        }
+        } + listOfNotNull(
+            HorizonItemsRenderer.composeFollowUpDirective(horizonCycleResult),
+            HorizonItemsRenderer.composeChangeNotes(horizonCycleResult),
+        ).joinToString("") { "\n\n$it" }
 
         val conditioners = Conditioners(
             modality         = ctx.modality,
@@ -1049,8 +1076,9 @@ open class CognitivePipeline(
 
     private fun describeInterpretOutcome(outcome: InterpretOutcome): String = when (outcome) {
         is InterpretOutcome.NoOperation -> "NoOperation"
-        is InterpretOutcome.ProposedAssertion -> "ProposedAssertion"
-        is InterpretOutcome.ValidationRejected -> "ValidationRejected:${outcome.reason}"
+        is InterpretOutcome.Operations ->
+            "Operations:${outcome.operations.joinToString(",") { it.verb }}" +
+                (if (outcome.rejections.isNotEmpty()) " Rejected:${outcome.rejections.joinToString(",") { "${it.verb}=${it.reason}" }}" else "")
         is InterpretOutcome.LlmFailure -> "LlmFailure:${outcome.reason}"
     }
 
@@ -1068,8 +1096,8 @@ open class CognitivePipeline(
 
     private fun toMutationOutcomeTrace(outcome: MutationOutcome): MutationOutcomeTrace = when (outcome) {
         is MutationOutcome.Fact -> MutationOutcomeTrace(kind = "fact", phraseUid = outcome.phraseUid, applied = outcome.applied)
-        is MutationOutcome.Intention -> MutationOutcomeTrace(
-            kind = "intention", phraseUid = outcome.phraseUid, applied = outcome.applied, textSummary = outcome.quote,
+        is MutationOutcome.Operation -> MutationOutcomeTrace(
+            kind = outcome.result.operation.verb, phraseUid = outcome.result.resultUid, applied = outcome.result.applied, textSummary = outcome.result.summary,
         )
     }
 

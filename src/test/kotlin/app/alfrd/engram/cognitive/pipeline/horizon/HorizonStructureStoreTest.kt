@@ -133,7 +133,7 @@ class HorizonStructureStoreTest {
         val fact = store.createItem(user, 1, ItemKind.FACT, "My sister is allergic to peanuts")!!
 
         assertEquals(ItemKind.TASK, task.kind); assertEquals("open", task.status); assertEquals(due, task.dueAt)
-        assertEquals(ItemKind.EVENT, event.kind); assertNull(event.status); assertEquals(due, event.dueAt)
+        assertEquals(ItemKind.EVENT, event.kind); assertEquals("open", event.status); assertEquals(due, event.dueAt)
         assertEquals(ItemKind.QUESTION, question.kind); assertEquals("open", question.status)
         assertEquals(ItemKind.FACT, fact.kind); assertNull(fact.status); assertNull(fact.dueAt)
 
@@ -338,8 +338,17 @@ class HorizonStructureStoreTest {
         assertEquals("active", store.getContainer(user, project.uid)!!.status)
 
         assertFalse(store.resolve(user, 3, fact.uid))
-        assertFalse(store.resolve(user, 3, event.uid))
         assertFalse(store.resolve(user, 3, domain.uid))
+    }
+
+    @Test
+    fun `an event can be resolved and reopened, for a cancelled or past event`() = runBlocking {
+        val user = newUser()
+        val event = store.createItem(user, 1, ItemKind.EVENT, "Team offsite", dueAt = 5_000L)!!
+        assertTrue(store.resolve(user, 2, event.uid))
+        assertEquals("resolved", store.getItem(user, event.uid)!!.status)
+        assertTrue(store.resolve(user, 3, event.uid, resolved = false))
+        assertEquals("open", store.getItem(user, event.uid)!!.status)
     }
 
     @Test
@@ -544,5 +553,108 @@ class HorizonStructureStoreTest {
         val viaSource = HorizonOwnership.findPhraseOwnedByUser(db, user, task.uid)
         assertNotNull(viaSource)
         assertEquals("Task", (viaSource as Vertex).typeName)
+    }
+
+    // ── Attention ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun `attention pins or suppresses an item or a project and can be cleared, without resolving anything`() = runBlocking {
+        val user = newUser()
+        val task = store.createItem(user, 1, ItemKind.TASK, "Order the soil")!!
+        val project = store.createContainer(user, 1, ContainerKind.PROJECT, "Garden")!!
+
+        assertTrue(store.setAttention(user, 2, task.uid, AttentionDirective.SUPPRESSED))
+        assertTrue(store.setAttention(user, 2, task.uid, AttentionDirective.SUPPRESSED), "setting it again is a no-op")
+        assertEquals(AttentionDirective.SUPPRESSED, store.getItem(user, task.uid)!!.attention)
+        assertEquals("open", store.getItem(user, task.uid)!!.status, "suppressing is not resolving")
+
+        assertTrue(store.setAttention(user, 3, project.uid, AttentionDirective.PINNED))
+        assertEquals(AttentionDirective.PINNED, store.getContainer(user, project.uid)!!.attention)
+
+        assertTrue(store.setAttention(user, 4, task.uid, null))
+        assertNull(store.getItem(user, task.uid)!!.attention)
+    }
+
+    @Test
+    fun `attention cannot be set on another users things`() = runBlocking {
+        val a = newUser()
+        val b = newUser()
+        val task = store.createItem(a, 1, ItemKind.TASK, "A's task")!!
+        assertFalse(store.setAttention(b, 2, task.uid, AttentionDirective.SUPPRESSED))
+        assertNull(store.getItem(a, task.uid)!!.attention)
+    }
+
+    // ── Legacy Horizon compatibility ──────────────────────────────────────────
+
+    @Test
+    fun `a task or question carries the legacy open status, and resolving or reopening keeps it in step`() = runBlocking {
+        val user = newUser()
+        val db = dbManager.getDatabase()
+        val task = store.createItem(user, 3, ItemKind.TASK, "Send the invoice")!!
+        val question = store.createItem(user, 3, ItemKind.QUESTION, "What next?")!!
+        val fact = store.createItem(user, 3, ItemKind.FACT, "A plain fact")!!
+        fun legacy(uid: String) = HorizonOwnership.ownedAssertsEdges(db, user, uid).single().get("status") as String?
+
+        assertEquals("open", legacy(task.uid))
+        assertEquals("open", legacy(question.uid))
+        assertNull(legacy(fact.uid), "a fact was never intention-shaped")
+
+        assertTrue(store.resolve(user, 4, task.uid))
+        assertEquals("resolved", legacy(task.uid))
+        assertEquals(4L, (HorizonOwnership.ownedAssertsEdges(db, user, task.uid).single().get("statusCycleSeq") as Number).toLong())
+        assertTrue(store.resolve(user, 5, task.uid, resolved = false))
+        assertEquals("open", legacy(task.uid))
+        val history = HorizonOwnership.ownedAssertsEdges(db, user, task.uid).single().get("statusHistory") as String
+        assertEquals(3, Regex("\"state\"").findAll(history).count(), "open, resolved, open — every transition kept")
+    }
+
+    @Test
+    fun `the current Horizon assembler surfaces a created task as open and drops it once resolved`() = runBlocking {
+        val user = newUser()
+        val assembler = ArcadeHorizonAssembler(dbManager.getDatabase())
+        val text = "Send the unique invoice ${UUID.randomUUID()}"
+        val task = store.createItem(user, 1, ItemKind.TASK, text)!!
+
+        suspend fun surfaced(cycle: Long): List<HorizonItem> =
+            ((assembler.assemble(user, cycle)) as AssembleOutcome.Assembled).horizon.items.filter { it.text.text == text }
+
+        val open = surfaced(1)
+        assertEquals(1, open.size)
+        assertEquals(HorizonItemCategory.INTENTION, open.single().category)
+        assertEquals(AssertionStatus.OPEN, open.single().status)
+
+        assertTrue(store.resolve(user, 2, task.uid))
+        assertTrue(surfaced(3).none { it.status == AssertionStatus.OPEN }, "a resolved task is no longer an open intention")
+    }
+
+    // ── Reads for the interpretation snapshot ─────────────────────────────────
+
+    @Test
+    fun `listRecentItems returns newest first, can be limited to open ones, and only shows the callers own`() = runBlocking {
+        val a = newUser()
+        val b = newUser()
+        val first = store.createItem(a, 1, ItemKind.TASK, "first")!!
+        Thread.sleep(3)
+        val second = store.createItem(a, 2, ItemKind.FACT, "second")!!
+        Thread.sleep(3)
+        val third = store.createItem(a, 3, ItemKind.TASK, "third")!!
+        store.createItem(b, 1, ItemKind.TASK, "someone else's")
+        store.resolve(a, 4, first.uid)
+
+        assertEquals(listOf(third.uid, second.uid, first.uid), store.listRecentItems(a, 10).map { it.uid })
+        assertEquals(listOf(third.uid, second.uid), store.listRecentItems(a, 2).map { it.uid })
+        assertEquals(listOf(third.uid), store.listRecentItems(a, 10, openOnly = true).map { it.uid }, "the fact was never open, the first task is resolved")
+        assertTrue(store.listRecentItems(a, 0).isEmpty())
+        assertTrue(store.listRecentItems("nobody@example.test", 5).isEmpty())
+    }
+
+    @Test
+    fun `an item reports the entities it is about`() = runBlocking {
+        val user = newUser()
+        val item = store.createItem(user, 1, ItemKind.FACT, "My sister is allergic to peanuts")!!
+        store.linkAbout(user, 1, item.uid, "sister")
+        store.linkAbout(user, 1, item.uid, "peanuts")
+        assertEquals(setOf("sister", "peanuts"), store.getItem(user, item.uid)!!.about.toSet())
+        assertEquals(setOf("sister", "peanuts"), store.listRecentItems(user, 5).single().about.toSet())
     }
 }

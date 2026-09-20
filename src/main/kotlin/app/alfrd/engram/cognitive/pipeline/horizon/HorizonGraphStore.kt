@@ -75,7 +75,7 @@ interface HorizonGraphStore {
      */
     suspend fun markRelevant(userEmail: String, cycleSeq: Long, fromPhraseUid: String, toPhraseUid: String, strength: Double = 1.0): Boolean
 
-    /** Creates a `supersedes` edge from [newerPhraseUid] to [olderPhraseUid]. Both must be owned by [userEmail]; returns false otherwise. Representation only — no live code path calls this yet. */
+    /** Creates a `supersedes` edge from [newerPhraseUid] to [olderPhraseUid]. Both must be owned by [userEmail]; returns false otherwise. Idempotent per (newer, older) pair. */
     suspend fun markSuperseded(userEmail: String, cycleSeq: Long, newerPhraseUid: String, olderPhraseUid: String): Boolean
 
     /**
@@ -586,6 +586,15 @@ class ArcadeHorizonGraphStore(
                 db.transaction {
                     val newer = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, newerPhraseUid) ?: return@transaction
                     val older = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, olderPhraseUid) ?: return@transaction
+                    // Idempotent, like markRelevant: a replayed write plan must not stack a second edge.
+                    val olderUid = older.get("uid")
+                    val alreadySuperseded = newer.getEdges(Vertex.DIRECTION.OUT, "RELATED_TO").any {
+                        it.get("relationType") as? String == "supersedes" && it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == olderUid
+                    }
+                    if (alreadySuperseded) {
+                        success = true
+                        return@transaction
+                    }
                     RelatedToEdges.createSupersedes(newer.modify(), older.modify(), cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail)
                     success = true
                 }

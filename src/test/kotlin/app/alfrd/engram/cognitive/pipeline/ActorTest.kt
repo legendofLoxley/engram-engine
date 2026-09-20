@@ -1,5 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline
 
+import app.alfrd.engram.cognitive.pipeline.horizon.AppliedOperation
+import app.alfrd.engram.cognitive.pipeline.horizon.ItemKind
+import app.alfrd.engram.cognitive.pipeline.horizon.RecordItem
 import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventMetadata
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.AssertionStatus
@@ -263,7 +266,7 @@ class ActorTest {
         val result = HorizonCycleResult(
             cycleSeq = 1,
             interpretOutcome = null,
-            mutationOutcomes = listOf(MutationOutcome.Fact("p1", applied = true), MutationOutcome.Intention("p2", applied = true, quote = "priority")),
+            mutationOutcomes = listOf(MutationOutcome.Fact("p1", applied = true), MutationOutcome.Operation(AppliedOperation(RecordItem(ItemKind.TASK, "priority"), applied = true, summary = "Recorded task: \"priority\"", resultUid = "p2"))),
             propagationOutcome = PropagationOutcome.Propagated(emptyList()),
             assembleOutcome = null,
         )
@@ -271,13 +274,13 @@ class ActorTest {
     }
 
     @Test
-    fun `a failed intention write caveats only the intention, a successful fact is never gagged`() {
+    fun `a failed operation caveats only that operation, a successful fact is never gagged`() {
         val result = HorizonCycleResult(
             cycleSeq = 1,
             interpretOutcome = null,
             mutationOutcomes = listOf(
                 MutationOutcome.Fact("p1", applied = true),
-                MutationOutcome.Intention(null, applied = false, quote = "getting Arx running is a priority"),
+                MutationOutcome.Operation(AppliedOperation(RecordItem(ItemKind.TASK, "getting Arx running is a priority"), applied = false, summary = "Could not record task \"getting Arx running is a priority\"")),
             ),
             propagationOutcome = PropagationOutcome.Propagated(emptyList()),
             assembleOutcome = null,
@@ -312,7 +315,7 @@ class ActorTest {
     }
 
     @Test
-    fun `an LlmFailure interpretation caveats that a priority may have been missed, not just silence`() {
+    fun `an LlmFailure interpretation caveats that something may have gone unrecorded, not just silence`() {
         val result = HorizonCycleResult(
             cycleSeq = 1,
             interpretOutcome = InterpretOutcome.LlmFailure("timeout"),
@@ -322,7 +325,7 @@ class ActorTest {
         )
         val caveat = HorizonItemsRenderer.composeIntegrityCaveat(result)
         assertNotNull(caveat, "an interpreter failure must not be indistinguishable from a quiet turn with nothing to say")
-        assertTrue(caveat!!.contains("could not be fully checked"))
+        assertTrue(caveat!!.contains("could not be fully interpreted"))
         assertTrue(!caveat.contains("not confirmed recorded"), "the successful fact write must not also be caveated")
     }
 

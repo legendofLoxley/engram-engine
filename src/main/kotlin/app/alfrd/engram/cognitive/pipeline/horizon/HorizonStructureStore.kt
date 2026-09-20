@@ -3,6 +3,8 @@ package app.alfrd.engram.cognitive.pipeline.horizon
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import com.arcadedb.database.Database
 import com.arcadedb.graph.Vertex
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
@@ -56,18 +58,25 @@ data class ContainerRecord(
     /** For a project, the domain it is filed under, if any. Always null for a domain. */
     val parentUid: String?,
     val createdAt: Long,
+    /** The user's explicit "keep this up front" / "stop bringing this up"; null = normal. */
+    val attention: AttentionDirective? = null,
+    /** True when the name is the model's own label rather than something the user said. */
+    val tentative: Boolean = false,
 )
 
 data class ItemRecord(
     val uid: String,
     val kind: ItemKind,
     val text: String,
-    /** `open`/`resolved` for a task or question; null for a fact or event. */
+    /** `open`/`resolved` for a task, event or question; null for a fact. */
     val status: String?,
     /** A task's `dueAt` or an event's `occursAt` — the time this item is bound to, if any. */
     val dueAt: Long?,
     val projectUid: String?,
     val createdAt: Long,
+    /** Short names of the entities this item is tied to (its `ABOUT` links), e.g. "sister". */
+    val about: List<String> = emptyList(),
+    val attention: AttentionDirective? = null,
 )
 
 data class FocusRecord(
@@ -117,7 +126,8 @@ interface HorizonStructureStore {
      * under the same (owner, kind, normalized name). When [parentDomainUid] is given for a
      * [ContainerKind.PROJECT] it is filed under that domain at creation; an already-existing
      * project is returned as-is, never re-filed (use [file]). Null on an unknown user, a blank
-     * name, or a [parentDomainUid] that isn't one of the user's domains.
+     * name, or a [parentDomainUid] that isn't one of the user's domains. [tentative] marks a name
+     * the model chose rather than one the user said.
      */
     suspend fun createContainer(
         userEmail: String,
@@ -126,6 +136,7 @@ interface HorizonStructureStore {
         name: String,
         parentDomainUid: String? = null,
         dueAt: Long? = null,
+        tentative: Boolean = false,
     ): ContainerRecord?
 
     /**
@@ -166,11 +177,20 @@ interface HorizonStructureStore {
     suspend fun setDue(userEmail: String, cycleSeq: Long, targetUid: String, dueAt: Long?): Boolean
 
     /**
-     * Marks a task or question `resolved` (or `open` again when [resolved] is false), or a project
-     * `done`/`active`. False for any other target or one the user doesn't own. Records
-     * `resolvedAt` when resolving; a no-op if it is already in the requested state.
+     * Marks a task, event or question `resolved` (or `open` again when [resolved] is false), or a
+     * project `done`/`active`. False for any other target or one the user doesn't own. Records
+     * `resolvedAt` when resolving; a no-op if it is already in the requested state. For a task or
+     * question the legacy `ASSERTS.status` the current Horizon reads is kept in step (see [createItem]).
      */
     suspend fun resolve(userEmail: String, cycleSeq: Long, targetUid: String, resolved: Boolean = true): Boolean
+
+    /**
+     * Records the user's explicit attention instruction for an item, project or domain: [PINNED]
+     * keeps it in front of them, [SUPPRESSED] stops it being brought up (without resolving it),
+     * `null` returns it to normal. False for a target the user doesn't own. Persisted only — what
+     * acts on it is the selector.
+     */
+    suspend fun setAttention(userEmail: String, cycleSeq: Long, targetUid: String, attention: AttentionDirective?): Boolean
 
     /**
      * Sets a focus on [targetUid]. A [FocusMode.PINNED] focus replaces any other pinned focus (at
@@ -208,6 +228,13 @@ interface HorizonStructureStore {
 
     /** The projects filed directly under domain [domainUid], oldest first. Empty for a domain the user doesn't own. */
     suspend fun projectsIn(userEmail: String, domainUid: String): List<ContainerRecord>
+
+    /**
+     * The user's most recently asserted conversational items, newest first, capped at [limit] —
+     * or, when [openOnly], only those still open (a task or question not yet resolved). Used to
+     * show the interpretation model what it can refer to; a bounded read, never the whole graph.
+     */
+    suspend fun listRecentItems(userEmail: String, limit: Int, openOnly: Boolean = false): List<ItemRecord>
 }
 
 class ArcadeHorizonStructureStore(
@@ -226,6 +253,7 @@ class ArcadeHorizonStructureStore(
         name: String,
         parentDomainUid: String?,
         dueAt: Long?,
+        tentative: Boolean,
     ): ContainerRecord? {
         if (userEmail.isBlank() || name.isBlank()) return null
         return mutate("createContainer", null) {
@@ -245,6 +273,7 @@ class ArcadeHorizonStructureStore(
                 set("normalizedName", normalized)
                 set("ownerEmail", userEmail)
                 set("status", "active")
+                if (tentative) set("tentative", true)
                 if (kind == ContainerKind.PROJECT && dueAt != null) set("dueAt", dueAt)
                 set("createdAt", now)
                 set("updatedAt", now)
@@ -296,7 +325,10 @@ class ArcadeHorizonStructureStore(
                         set("status", "open")
                         if (dueAt != null) set("dueAt", dueAt)
                     }
-                    ItemKind.EVENT -> if (dueAt != null) set("occursAt", dueAt)
+                    ItemKind.EVENT -> {
+                        set("status", "open")
+                        if (dueAt != null) set("occursAt", dueAt)
+                    }
                     ItemKind.QUESTION -> {
                         set("status", "open")
                         set("askedBy", askedBy)
@@ -310,6 +342,10 @@ class ArcadeHorizonStructureStore(
                 set("timestamp", now)
                 set("scores", """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
+                // Legacy dual-write, removed with the legacy Horizon pools: today's assembler decides
+                // "open" from ASSERTS.status, so a task or question must carry it or it would vanish
+                // from the Horizon until the selector replaces those pools.
+                if (kind == ItemKind.TASK || kind == ItemKind.QUESTION) applyLegacyStatus(this, "open", cycleSeq, now)
                 save()
             }
             if (project != null) newPartOf(vertex, project, cycleSeq, userEmail)
@@ -376,7 +412,7 @@ class ArcadeHorizonStructureStore(
         mutate("resolve", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
             val (doneValue, undoneValue) = when (target.typeName) {
-                "Task", "Question" -> "resolved" to "open"
+                "Task", "Event", "Question" -> "resolved" to "open"
                 "Project" -> "done" to "active"
                 else -> return@mutate false
             }
@@ -389,6 +425,27 @@ class ArcadeHorizonStructureStore(
                     if (resolved) set("resolvedAt", now) else remove("resolvedAt")
                 }
                 set("updatedAt", now)
+                save()
+            }
+            if (target.typeName == "Task" || target.typeName == "Question") {
+                // Keep the legacy ASSERTS.status the current Horizon reads in step — see createItem.
+                HorizonOwnership.ownedAssertsEdges(db, userEmail, targetUid).forEach { edge ->
+                    val mutable = edge.modify()
+                    applyLegacyStatus(mutable, if (resolved) "resolved" else "open", cycleSeq, now)
+                    mutable.save()
+                }
+            }
+            true
+        }
+
+    override suspend fun setAttention(userEmail: String, cycleSeq: Long, targetUid: String, attention: AttentionDirective?): Boolean =
+        mutate("setAttention", false) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
+            val desired = attention?.name?.lowercase()
+            if (target.get("attention") as? String == desired) return@mutate true
+            target.modify().apply {
+                if (desired == null) remove("attention") else set("attention", desired)
+                set("updatedAt", System.currentTimeMillis())
                 save()
             }
             true
@@ -526,7 +583,53 @@ class ArcadeHorizonStructureStore(
                 .sortedBy { it.createdAt }
         }
 
+    override suspend fun listRecentItems(userEmail: String, limit: Int, openOnly: Boolean): List<ItemRecord> =
+        read("listRecentItems", emptyList()) {
+            if (limit <= 0) return@read emptyList()
+            val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@read emptyList()
+            // Only the conversational Source: Actor and environment evidence are not things the user said.
+            val sourceUids = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
+                .filter { it.get("type") == DatabaseEngramClient.SOURCE_TYPE }
+                .mapNotNull { it.get("uid") as? String }
+            if (sourceUids.isEmpty()) return@read emptyList()
+            val sql = if (openOnly) {
+                "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids AND status = 'open' ORDER BY timestamp DESC LIMIT :limit"
+            } else {
+                "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids ORDER BY timestamp DESC LIMIT :limit"
+            }
+            val uids = db.query("sql", sql, mapOf("sourceUids" to sourceUids, "limit" to limit)).use { rs ->
+                val out = mutableListOf<String>()
+                while (rs.hasNext()) (rs.next().toMap()["uid"] as? String)?.let { out += it }
+                out
+            }
+            uids.distinct().mapNotNull { uid ->
+                db.query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to uid))
+                    .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+                    ?.toItemRecord()
+            }
+        }
+
     // ── Plumbing ─────────────────────────────────────────────────────────────
+
+    /**
+     * Sets the legacy `status`/`statusHistory`/`statusCycleSeq` on an ASSERTS edge — the exact shape
+     * [ArcadeHorizonGraphStore.markAssertionStatus] writes — so today's Horizon assembler, which
+     * reads open/resolved from there, sees a task or question the way it saw an intention.
+     */
+    private fun applyLegacyStatus(edge: com.arcadedb.graph.MutableEdge, state: String, cycleSeq: Long, now: Long) {
+        val history = legacyHistory(edge.get("statusHistory") as? String) + StatusHistoryEntry(state, now)
+        edge.set("status", state)
+        edge.set("statusHistory", legacyJson.encodeToString(history))
+        edge.set("statusCycleSeq", cycleSeq)
+    }
+
+    private val legacyJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    private fun legacyHistory(raw: String?): List<StatusHistoryEntry> = try {
+        if (raw.isNullOrBlank()) emptyList() else legacyJson.decodeFromString(raw)
+    } catch (_: Exception) {
+        emptyList()
+    }
 
     /** Runs [body] in one transaction holding the Horizon write lock; [failure] if the lock can't be had or anything throws. */
     private suspend fun <T> mutate(op: String, failure: T, body: () -> T): T = withContext(Dispatchers.IO) {
@@ -637,6 +740,8 @@ class ArcadeHorizonStructureStore(
             dueAt = (get("dueAt") as? Number)?.toLong(),
             parentUid = parentUid,
             createdAt = (get("createdAt") as? Number)?.toLong() ?: 0L,
+            attention = attentionOf(),
+            tentative = get("tentative") == true,
         )
     }
 
@@ -646,13 +751,18 @@ class ArcadeHorizonStructureStore(
             uid = get("uid") as String,
             kind = kind,
             text = get("text") as? String ?: "",
-            status = if (kind == ItemKind.TASK || kind == ItemKind.QUESTION) get("status") as? String else null,
+            status = if (kind == ItemKind.FACT) null else get("status") as? String,
             dueAt = (get(if (kind == ItemKind.EVENT) "occursAt" else "dueAt") as? Number)?.toLong(),
             projectUid = getVertices(Vertex.DIRECTION.OUT, "PART_OF")
                 .firstOrNull { it.typeName == ContainerKind.PROJECT.typeName }?.get("uid") as? String,
             createdAt = (get("createdAt") as? Number)?.toLong() ?: 0L,
+            about = getVertices(Vertex.DIRECTION.OUT, "ABOUT").mapNotNull { it.get("name") as? String },
+            attention = attentionOf(),
         )
     }
+
+    private fun Vertex.attentionOf(): AttentionDirective? =
+        AttentionDirective.entries.firstOrNull { it.name.equals(get("attention") as? String, ignoreCase = true) }
 
     private fun Vertex.focusTargetKind(): FocusTargetKind = when (typeName) {
         ContainerKind.DOMAIN.typeName -> FocusTargetKind.DOMAIN

@@ -13,6 +13,9 @@ import app.alfrd.engram.cognitive.pipeline.horizon.ActorEventIngestionService
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
+import app.alfrd.engram.cognitive.pipeline.horizon.ViewSnapshotBuilder
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeRequestLedger
 import app.alfrd.engram.cognitive.pipeline.horizon.SalientTokenPropagator
 import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
@@ -91,6 +94,7 @@ object CognitivePipelineFactory {
         val horizonCycleCoordinator = db?.let {
             val horizonGraphStore = ArcadeHorizonGraphStore(it)
             val horizonAssembler = ArcadeHorizonAssembler(it)
+            val structureStore = ArcadeHorizonStructureStore(it)
             HorizonCycleCoordinator(
                 cycleSequencer    = ArcadeCycleSequencer(it),
                 requestLedger     = ArcadeRequestLedger(it),
@@ -99,6 +103,8 @@ object CognitivePipelineFactory {
                 horizonGraphStore = horizonGraphStore,
                 horizonPropagator = SalientTokenPropagator(horizonGraphStore, horizonAssembler),
                 horizonAssembler  = horizonAssembler,
+                viewSnapshotBuilder = ViewSnapshotBuilder(structureStore),
+                operationApplier  = HorizonOperationApplier(structureStore, horizonGraphStore),
             )
         }
 

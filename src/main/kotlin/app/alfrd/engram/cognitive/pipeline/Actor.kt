@@ -113,6 +113,34 @@ object HorizonItemsRenderer {
     }
 
     /**
+     * What the interpretation stage actually changed this turn, in plain terms, so the reply can say
+     * so briefly and truthfully — the check that makes a wrong judgment visible and correctable by
+     * the user. Only operations that landed are listed; a held statement is not a change. Null when
+     * nothing was changed.
+     */
+    fun composeChangeNotes(result: HorizonCycleResult?): String? {
+        val notes = result?.mutationOutcomes.orEmpty()
+            .mapNotNull { (it as? MutationOutcome.Operation)?.result }
+            .filter { it.applied && it.operation !is app.alfrd.engram.cognitive.pipeline.horizon.HoldForChoice }
+            .map { "- ${it.summary}" }
+        if (notes.isEmpty()) return null
+        return "Changes you just made to memory this turn (acknowledge in at most one short clause, only where natural, and never claim any other change):\n" +
+            notes.joinToString("\n")
+    }
+
+    /** The instruction the reply owes the user because of an operation — a question to ask, not a change to report. Null when there is none. */
+    fun composeFollowUpDirective(result: HorizonCycleResult?): String? = when (val followUp = result?.followUp) {
+        is app.alfrd.engram.cognitive.pipeline.horizon.CycleFollowUp.AskEmotionChoice ->
+            "The user just said something that carries real feeling: \"${followUp.quote}\". Nothing about it has been saved. Respond warmly and briefly, then ask what they'd like: " +
+                "just talk it through (you will not save anything), or would they like you to make a task to help. Do not claim to have saved or created anything."
+        is app.alfrd.engram.cognitive.pipeline.horizon.CycleFollowUp.AskWhichProject ->
+            "You saved \"${followUp.itemText}\" but could not tell which project it belongs to." +
+                (if (followUp.projectNames.isNotEmpty()) " Their projects are: ${followUp.projectNames.joinToString(", ")}." else "") +
+                " Tell them it is saved, and ask which project it goes under. Do not guess."
+        null -> null
+    }
+
+    /**
      * One clause per confirmed-or-not operation this cycle, composed so the response never claims
      * a write succeeded when it didn't — never a single blanket flag, since a failed intention
      * write alongside a successful fact write must not also gag the fact that *did* succeed.
@@ -125,8 +153,8 @@ object HorizonItemsRenderer {
         }
         for (outcome in result.mutationOutcomes) {
             when (outcome) {
-                is MutationOutcome.Intention -> if (!outcome.applied) {
-                    caveats += "You have NOT confirmed recording \"${outcome.quote}\" as a priority — do not say you have."
+                is MutationOutcome.Operation -> if (!outcome.result.applied) {
+                    caveats += "You have NOT confirmed this change to memory: ${outcome.result.summary} — do not say you did."
                 }
                 is MutationOutcome.Fact -> if (!outcome.applied) {
                     caveats += "Something from this turn was not confirmed recorded to memory — do not claim it was."
@@ -134,7 +162,7 @@ object HorizonItemsRenderer {
             }
         }
         if (result.interpretOutcome is InterpretOutcome.LlmFailure) {
-            caveats += "This turn could not be fully checked for anything you should treat as a new priority — do not claim to have captured one if the user stated one."
+            caveats += "This turn's message could not be fully interpreted for memory — do not claim to have recorded a task, deadline, correction or other change from it."
         }
         val propagationOutcome = result.propagationOutcome
         val propagationFailed = propagationOutcome is PropagationOutcome.Failed ||

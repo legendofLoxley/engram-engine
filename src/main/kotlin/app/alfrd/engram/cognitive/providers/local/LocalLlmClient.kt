@@ -46,7 +46,11 @@ class LocalLlmClient(
     // encodeDefaults = true: without it, kotlinx.serialization omits chat_template_kwargs
     // entirely (it sits at its declared default), silently dropping the enable_thinking=false
     // override this client depends on.
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    //
+    // explicitNulls = false: an unset optional field (temperature, tool_choice, tools) must be
+    // ABSENT from the request, not `null` — llama.cpp rejects `"temperature": null` with a 400
+    // ("type must be number, but is null"), which failed every local call, not just the one that set it.
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     private val http: HttpClient = HttpClient.newHttpClient()
 
     override suspend fun doComplete(request: LlmRequest): LlmResponse = withContext(Dispatchers.IO) {
@@ -69,6 +73,9 @@ class LocalLlmClient(
                 messages = messages,
                 max_tokens = request.maxTokens,
                 tools = request.tools.takeIf { it.isNotEmpty() }?.map { it.toWireFormat() },
+                tool_choice = request.forcedToolName?.takeIf { request.tools.isNotEmpty() }
+                    ?.let { OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = it)) },
+                temperature = request.temperature,
             )
         )
 
@@ -154,7 +161,17 @@ class LocalLlmClient(
         val max_tokens: Int,
         val chat_template_kwargs: ChatTemplateKwargs = ChatTemplateKwargs(),
         val tools: List<OpenAiTool>? = null,
+        /** Omitted when null — see [LlmRequest.forcedToolName]. */
+        val tool_choice: OpenAiToolChoice? = null,
+        /** Omitted when null — see [LlmRequest.temperature]. */
+        val temperature: Double? = null,
     )
+
+    @Serializable
+    private data class OpenAiToolChoice(val type: String = "function", val function: OpenAiToolChoiceFunction)
+
+    @Serializable
+    private data class OpenAiToolChoiceFunction(val name: String)
 
     @Serializable
     private data class ChatTemplateKwargs(val enable_thinking: Boolean = false)
