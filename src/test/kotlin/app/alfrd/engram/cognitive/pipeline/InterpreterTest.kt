@@ -197,4 +197,70 @@ class InterpreterTest {
         val outcome = Interpreter(null).interpret("Hi!", snapshot, now)
         assertNotNull(outcome as? InterpretOutcome.LlmFailure)
     }
+
+    // ── The narrow second look at a message with a date ──────────────────────
+
+    private val birthday = "My sister's birthday is on the 22nd."
+
+    @Test
+    fun `the dated look asks one narrow question and offers only a dated event or task`() = runTest {
+        val seen = mutableListOf<LlmRequest>()
+        interpreterAnswering(opsResponse(), seen).interpretDated(birthday, snapshot, now)
+
+        val request = seen.single()
+        assertEquals(Interpreter.TOOL_NAME, request.forcedToolName)
+        assertEquals(0.0, request.temperature)
+        assertTrue(request.systemPrompt!!.contains("mentions a date or time"), request.systemPrompt)
+        assertTrue(request.systemPrompt!!.contains("day-22"), "the same day-number calendar as the main prompt")
+        assertTrue(request.prompt.endsWith("User message:\n$birthday"), request.prompt)
+        assertTrue(!request.prompt.contains("Snapshot"), "it is not shown the snapshot; duplicates are the applier's business")
+        val schema = request.tools.single().inputSchema.toString()
+        assertTrue(schema.contains("\"record_item\"") && !schema.contains("resolve_item") && !schema.contains("set_focus"), schema)
+        assertTrue(schema.contains("\"event\"") && schema.contains("\"task\"") && !schema.contains("\"fact\""), schema)
+    }
+
+    @Test
+    fun `the main prompt is untouched by the safety net`() {
+        val main = Interpreter.systemPrompt(now)
+        assertTrue(!main.contains("mentions a date or time"))
+        assertTrue(main.contains("A bare day of the month (\"the 24th\") is the entry below tagged with that day number."))
+    }
+
+    @Test
+    fun `the dated look records a dated event through the same guards`() = runTest {
+        val answer = opsResponse(op("record_item", "kind" to "event", "quote" to "My sister's birthday is on the 22nd", "due" to "2026-09-22", "about" to listOf("sister"), "title" to "Sister's birthday"))
+
+        val outcome = interpreterAnswering(answer).interpretDated(birthday, snapshot, now) as InterpretOutcome.Operations
+
+        val record = outcome.operations.single() as RecordItem
+        assertEquals(ItemKind.EVENT, record.kind)
+        assertEquals(listOf("sister"), record.about)
+        assertNotNull(record.dueAt)
+    }
+
+    @Test
+    fun `an ungrounded quote is rejected even from the dated look`() = runTest {
+        val answer = opsResponse(op("record_item", "kind" to "event", "quote" to "Her party is on the 22nd", "due" to "2026-09-22"))
+
+        val outcome = interpreterAnswering(answer).interpretDated(birthday, snapshot, now)
+
+        assertEquals(InterpretOutcome.NoOperation, outcome, "nothing trustworthy came back, so nothing is written")
+    }
+
+    @Test
+    fun `only a dated event or task ever comes out of the dated look`() = runTest {
+        val answer = opsResponse(
+            op("record_item", "kind" to "fact", "quote" to "My sister's birthday is on the 22nd"),
+            op("set_focus", "target" to "c2", "quote" to "My sister's birthday"),
+        )
+
+        assertEquals(InterpretOutcome.NoOperation, interpreterAnswering(answer).interpretDated(birthday, snapshot, now))
+    }
+
+    @Test
+    fun `an empty answer, a failing call and no client are each explicit`() = runTest {
+        assertEquals(InterpretOutcome.NoOperation, interpreterAnswering(opsResponse()).interpretDated(birthday, snapshot, now))
+        assertEquals(InterpretOutcome.LlmFailure("timeout"), Interpreter(TestLlmClient { throw RuntimeException("timeout") }).interpretDated(birthday, snapshot, now))
+        assertNotNull(Interpreter(null).interpretDated(birthday, snapshot, now) as? InterpretOutcome.LlmFailure)
+    }
 }

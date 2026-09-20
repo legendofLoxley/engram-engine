@@ -243,7 +243,12 @@ object HorizonItemsRenderer {
         val notes = result?.mutationOutcomes.orEmpty()
             .mapNotNull { (it as? MutationOutcome.Operation)?.result }
             .filter { it.applied && it.operation !is app.alfrd.engram.cognitive.pipeline.horizon.HoldForChoice }
-            .map { "- ${it.summary}" }
+            .map { "- ${it.summary}" } +
+            listOfNotNull(
+                result?.seeded?.focusMove?.let {
+                    "- Focus moved from \"${it.fromName}\" to \"${it.toName}\", because their message was about it — you are now looking at that instead"
+                },
+            )
         if (notes.isEmpty()) return null
         return "Changes you just made to memory this turn (acknowledge in at most one short clause, only where natural, and never claim any other change):\n" +
             notes.joinToString("\n")

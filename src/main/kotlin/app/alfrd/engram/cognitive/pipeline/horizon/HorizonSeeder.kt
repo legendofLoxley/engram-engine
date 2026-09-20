@@ -32,10 +32,14 @@ class HorizonSeeder(
     /** One nudge that was set: what it is on, where it came from (`touched`, `container`, `entity`, `text`), how strong, and a short label — for tracing. */
     data class SeededNudge(val uid: String, val source: String, val weight: Double, val label: String?)
 
-    /** How many nudges one turn set, by where they came from, and the nudges themselves — for tracing. */
+    /** The pinned focus moved from [fromName] to [toName] because the message was about the latter. */
+    data class FocusMove(val fromName: String, val toUid: String, val toName: String)
+
+    /** How many nudges one turn set, by where they came from, and the nudges themselves — for tracing. [focusMove] is set when the subject changed and the focus followed. */
     data class Seeded(
         val touched: Int, val mentionedContainers: Int, val mentionedEntities: Int, val mentionedItems: Int, val pruned: Int,
         val nudges: List<SeededNudge> = emptyList(),
+        val focusMove: FocusMove? = null,
     )
 
     suspend fun seedTurn(userEmail: String, cycleSeq: Long, utterance: String, applied: List<AppliedOperation>): Seeded {
@@ -57,7 +61,7 @@ class HorizonSeeder(
             val before = nudged.size
             val label = result.summary
             when (val op = result.operation) {
-                is RecordItem -> nudge(result.resultUid, 1.0, "touched", label)
+                is RecordItem -> nudge(result.resultUid ?: result.existingUid, 1.0, "touched", label)
                 is CorrectItem -> nudge(result.resultUid, 1.0, "touched", label)
                 is ResolveItem -> nudge(op.targetUid, 1.0, "touched", label)
                 is ReopenItem -> nudge(op.targetUid, 1.0, "touched", label)
@@ -77,9 +81,31 @@ class HorizonSeeder(
         val textItems = mentionedItems(userEmail, utterance)
         textItems.forEach { (item, weight) -> nudge(item.uid, weight, "text", item.text) }
 
+        // The subject changed: the focus follows. Before the nudges, so the new focus is a pin, not a nudge that fades.
+        val explicitFocus = applied.any { it.applied && (it.operation is SetFocus || it.operation is ReleaseFocus) }
+        val focusMove = if (explicitFocus) null else followSubject(userEmail, cycleSeq, containers)
+
         for ((uid, weight) in nudged) structure.setFocus(userEmail, cycleSeq, uid, FocusMode.NUDGE, weight = weight)
         val pruned = structure.pruneNudges(userEmail, cycleSeq - policy.nudgePruneCycles)
-        return Seeded(touched, containers.size, entityItems.size, textItems.size, pruned, detail.values.toList())
+        return Seeded(touched, containers.size, entityItems.size, textItems.size, pruned, detail.values.toList(), focusMove)
+    }
+
+    /**
+     * The focus moves with the subject, whether or not there has been a long gap: while a project or domain is pinned,
+     * a message that names exactly one *other* project or domain (and not the pinned one) moves the pin there. Nothing is
+     * lost — projects, items and deadlines stay, only what is in view changes, and mentions still bring things back — so
+     * it is better to follow than to make the user say "switch to" every time.
+     * It does not fire when: nothing is pinned (a first pin is the user's to make); the message names several
+     * containers or the pinned one (no clear change of subject); the pin is on a single item; or the interpretation
+     * model already set or cleared the focus this turn (an explicit instruction wins).
+     */
+    private suspend fun followSubject(userEmail: String, cycleSeq: Long, named: List<ContainerRecord>): FocusMove? {
+        val pinned = structure.getFocus(userEmail).firstOrNull { it.mode == FocusMode.PINNED } ?: return null
+        val current = structure.getContainer(userEmail, pinned.targetUid) ?: return null
+        if (named.any { it.uid == current.uid }) return null
+        val target = named.singleOrNull() ?: return null
+        if (!structure.setFocus(userEmail, cycleSeq, target.uid, FocusMode.PINNED)) return null
+        return FocusMove(current.name, target.uid, target.name)
     }
 
     private suspend fun mentionedContainers(userEmail: String, utterance: String): List<ContainerRecord> {

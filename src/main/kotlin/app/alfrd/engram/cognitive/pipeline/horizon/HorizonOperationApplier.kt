@@ -95,6 +95,8 @@ data class AppliedOperation(
     /** The Phrase this operation created (a new or corrected item), if any — what propagation is run over. */
     val resultUid: String? = null,
     val resultText: String? = null,
+    /** When a recorded task or event turned out to be one already on the list: that item. Nothing new was created ([resultUid] is null), but it was touched, so it is nudged. */
+    val existingUid: String? = null,
 )
 
 /**
@@ -115,11 +117,17 @@ class HorizonOperationApplier(
 ) {
     private val logger = LoggerFactory.getLogger(HorizonOperationApplier::class.java)
 
-    suspend fun apply(userEmail: String, cycleSeq: Long, requestId: String, operations: List<HorizonOperation>): List<AppliedOperation> {
+    suspend fun apply(
+        userEmail: String,
+        cycleSeq: Long,
+        requestId: String,
+        operations: List<HorizonOperation>,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): List<AppliedOperation> {
         val createdContainerUids = mutableMapOf<String, String>()
         return operations.mapIndexed { index, op ->
             try {
-                applyOne(userEmail, cycleSeq, "$requestId:$index", op, createdContainerUids)
+                applyOne(userEmail, cycleSeq, "$requestId:$index", op, createdContainerUids, zone)
             } catch (e: Exception) {
                 logger.warn("apply ${op.verb} failed for userEmail=$userEmail: ${e.message}")
                 AppliedOperation(op, applied = false, summary = "Could not apply ${op.verb}")
@@ -133,13 +141,14 @@ class HorizonOperationApplier(
         opKey: String,
         op: HorizonOperation,
         createdContainerUids: MutableMap<String, String>,
+        zone: ZoneId,
     ): AppliedOperation = when (op) {
         is CreateContainer -> {
             val record = structure.createContainer(userEmail, cycleSeq, op.kind, op.name, op.parentUid, tentative = !op.namedByUser)
             record?.let { createdContainerUids[OperationParser.normalizeName(op.name)] = it.uid }
             AppliedOperation(op, record != null, if (record != null) "Created ${op.kind.name.lowercase()} \"${record.name}\"" else "Could not create ${op.kind.name.lowercase()} \"${op.name}\"")
         }
-        is RecordItem -> {
+        is RecordItem -> duplicateOf(userEmail, opKey, op)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone) } ?: run {
             val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
             // The model rarely files an item even when the message plainly names its project, and an unfiled
             // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
@@ -201,6 +210,47 @@ class HorizonOperationApplier(
     }
 
     /**
+     * The open task or event already on the list that a new one is plainly the same as — or null. A message like
+     * "I'll do the room booking tomorrow" after "I need to book the conference room" is about the first task, and the
+     * model sometimes records it as a second one; two of the same thing on the list, with the date on the wrong copy,
+     * is worse than one. Only tasks and events, only open ones, only when the words are alike enough that treating
+     * them as separate would be the surprise: at least two distinctive words in common and three quarters of the
+     * longer wording, comparing the label and the user's own words on each side. A retry of the same request finds
+     * the item it made the first time (by its key) and is never mistaken for a duplicate of it.
+     */
+    private suspend fun duplicateOf(userEmail: String, opKey: String, op: RecordItem): ItemRecord? {
+        if (op.kind != ItemKind.TASK && op.kind != ItemKind.EVENT) return null
+        if (structure.itemByOpKey(userEmail, opKey) != null) return null
+        val incoming = listOfNotNull(op.title, op.quote).map { SalientTokenPropagator.salientTokens(it) }.filter { it.size >= MIN_DUPLICATE_WORDS }
+        if (incoming.isEmpty()) return null
+        return structure.listRecentItems(userEmail, DUPLICATE_SCAN).firstOrNull { existing ->
+            existing.kind == op.kind && existing.status == "open" &&
+                listOfNotNull(existing.text, existing.sourceQuote).map { SalientTokenPropagator.salientTokens(it) }.any { theirs ->
+                    incoming.any { ours -> similarEnough(ours, theirs) }
+                }
+        }
+    }
+
+    private fun similarEnough(a: Set<String>, b: Set<String>): Boolean {
+        val shared = (a intersect b).size
+        return shared >= MIN_DUPLICATE_WORDS && shared.toDouble() / maxOf(a.size, b.size) >= DUPLICATE_SIMILARITY
+    }
+
+    /** The new record was the same as [existing]: add nothing, but carry over a date the user just gave, and say so plainly. */
+    private suspend fun applyDuplicate(userEmail: String, cycleSeq: Long, op: RecordItem, existing: ItemRecord, zone: ZoneId): AppliedOperation {
+        val newDue = op.dueAt?.takeIf { it != existing.dueAt }
+        val dueSet = newDue != null && structure.setDue(userEmail, cycleSeq, existing.uid, newDue)
+        val note = if (dueSet) ", and its date is now ${describeDue(newDue!!, zone)}" else ""
+        return AppliedOperation(op, true, "Already on the list: \"${existing.text}\"$note (nothing new was added)", existingUid = existing.uid)
+    }
+
+    private fun describeDue(dueAt: Long, zone: ZoneId): String {
+        val moment = java.time.Instant.ofEpochMilli(dueAt).atZone(zone)
+        val boundary = (moment.hour == 0 && moment.minute == 0) || (moment.hour == 23 && moment.minute == 59)
+        return if (boundary) moment.toLocalDate().toString() else "${moment.toLocalDate()} ${"%02d:%02d".format(moment.hour, moment.minute)}"
+    }
+
+    /**
      * A correction never overwrites: the corrected statement becomes a new item of the same kind,
      * filed where the old one was and tied to the same entities (with the new date if it changed),
      * linked as superseding it; the old one is closed so it stops surfacing. Nothing is lost.
@@ -220,6 +270,12 @@ class HorizonOperationApplier(
             resultUid = created.uid,
             resultText = created.text,
         )
+    }
+
+    private companion object {
+        const val DUPLICATE_SCAN = 60
+        const val MIN_DUPLICATE_WORDS = 2
+        const val DUPLICATE_SIMILARITY = 0.75
     }
 
     private suspend fun labelOf(userEmail: String, uid: String): String {

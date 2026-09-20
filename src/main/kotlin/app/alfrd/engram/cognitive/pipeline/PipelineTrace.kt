@@ -217,6 +217,10 @@ data class HorizonCycleTrace(
     var nudges: NudgeTrace? = null,
     /** The nudges themselves — what the message made a candidate for the Horizon, and why. Recall of something they once said shows up here. */
     var nudged: List<NudgedItemTrace> = emptyList(),
+    /** Set when the subject changed and the pinned focus followed it: `from -> to`. */
+    var focusMoved: String? = null,
+    /** Set when the message mentioned a date and nothing was recorded, so a second, narrower question was asked: what came of it. */
+    var datedBackstop: String? = null,
     /** The pinned focus and zoom the Horizon was assembled under; null when zoomed out. */
     var focus: String? = null,
     var zoom: String? = null,

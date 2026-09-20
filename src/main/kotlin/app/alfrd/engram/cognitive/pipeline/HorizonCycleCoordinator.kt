@@ -72,6 +72,11 @@ data class HorizonCycleResult(
     val silenceQuestionAsked: Boolean = false,
     /** How many nudges this turn set, and from what — for tracing. Null when seeding didn't run or failed. */
     val seeded: HorizonSeeder.Seeded? = null,
+    /**
+     * Set only when the message mentioned a date and the interpretation model returned nothing, so a second, narrower
+     * question was put to it: what came of that (`recorded 1`, `nothing dated to record`, `failed: ...`). Null when it did not run.
+     */
+    val datedBackstop: String? = null,
 ) {
     companion object {
         fun allocationFailed(): HorizonCycleResult = HorizonCycleResult(
@@ -140,7 +145,7 @@ open class HorizonCycleCoordinator(
             when (existing.checkpoint) {
                 "completed" -> return resultFromCompleted(userEmail, existing)
                 "writes_committed" -> return resumeFromWritesCommitted(userEmail, requestId, existing, utterance)
-                "ops_planned" -> resumeFromOpsPlanned(userEmail, requestId, existing, utterance)?.let { return it }
+                "ops_planned" -> resumeFromOpsPlanned(userEmail, requestId, existing, utterance, zone)?.let { return it }
                 "facts_ingested" -> return resumeFromFactsIngested(userEmail, requestId, existing, utterance)
                 else -> { /* cycle_allocated-only, failed, or unrecognized — proceed fresh below */ }
             }
@@ -168,7 +173,22 @@ open class HorizonCycleCoordinator(
             ViewSnapshot(emptyList(), emptyList(), emptyList(), pending.emotionQuote, null, zone)
         }
         val interpretStartMs = System.currentTimeMillis()
-        val interpretOutcome = interpreter.interpret(utterance, snapshot, ZonedDateTime.now(zone))
+        var interpretOutcome = interpreter.interpret(utterance, snapshot, ZonedDateTime.now(zone))
+        // A message with a date that produced nothing is the one miss that silently costs a reminder, so it gets one
+        // more, narrower look. Never when the message is a question, or when it answers something Alfrd just asked.
+        var datedBackstop: String? = null
+        if (interpretOutcome is InterpretOutcome.NoOperation && pending == PendingInterpretation.NONE &&
+            !utterance.trimEnd().endsWith("?") && DateHints.hasDate(utterance)
+        ) {
+            when (val second = interpreter.interpretDated(utterance, snapshot, ZonedDateTime.now(zone))) {
+                is InterpretOutcome.Operations -> { interpretOutcome = second; datedBackstop = "recorded ${second.operations.size}" }
+                is InterpretOutcome.NoOperation -> datedBackstop = "nothing dated to record"
+                is InterpretOutcome.LlmFailure -> {
+                    logger.warn("runCycle: dated second look failed for userEmail=$userEmail: ${second.reason}")
+                    datedBackstop = "failed: ${second.reason}"
+                }
+            }
+        }
         val interpretLatencyMs = System.currentTimeMillis() - interpretStartMs
 
         if (interpretOutcome is InterpretOutcome.LlmFailure) {
@@ -181,6 +201,8 @@ open class HorizonCycleCoordinator(
             userEmail, requestId, cycleSeq, utterance, plan, interpretOutcome, interpretLatencyMs,
             projectNames = snapshot.containers.filter { it.kind == app.alfrd.engram.cognitive.pipeline.horizon.ContainerKind.PROJECT }.map { it.name },
             silenceAsked = silenceAsked,
+            zone = zone,
+            datedBackstop = datedBackstop,
         )
     }
 
@@ -194,8 +216,10 @@ open class HorizonCycleCoordinator(
         interpretLatencyMs: Long,
         projectNames: List<String>,
         silenceAsked: Boolean = false,
+        zone: ZoneId = ZoneId.systemDefault(),
+        datedBackstop: String? = null,
     ): HorizonCycleResult {
-        val applied = operationApplier.apply(userEmail, cycleSeq, requestId, plan)
+        val applied = operationApplier.apply(userEmail, cycleSeq, requestId, plan, zone)
         val created = applied.filter { it.applied && it.resultUid != null }
         // `writes_committed` means every operation landed. If one failed the row stays at `ops_planned`,
         // so a retry of this same request re-applies the stored plan (idempotently) instead of losing it.
@@ -230,6 +254,7 @@ open class HorizonCycleCoordinator(
             projectNames = projectNames,
             silenceQuestionAsked = silenceAsked,
             seeded = seeded,
+            datedBackstop = datedBackstop,
         )
     }
 
@@ -338,14 +363,14 @@ open class HorizonCycleCoordinator(
     }
 
     /** The stored plan replayed — never a second model call. Null if the stored plan is missing or unreadable, so the caller proceeds as a fresh cycle. */
-    private suspend fun resumeFromOpsPlanned(userEmail: String, requestId: String, existing: ProcessedRequestRecord, utterance: String): HorizonCycleResult? {
+    private suspend fun resumeFromOpsPlanned(userEmail: String, requestId: String, existing: ProcessedRequestRecord, utterance: String, zone: ZoneId): HorizonCycleResult? {
         val plan = OperationPlanCodec.decode(existing.opsPlan) ?: run {
             logger.warn("runCycle: ops_planned row for requestId=$requestId has no readable plan — treating as a fresh cycle")
             return null
         }
         return applyPropagateAssemble(
             userEmail, requestId, existing.cycleSeq, utterance, plan,
-            InterpretOutcome.Operations(plan, emptyList(), 0), 0, projectNames = emptyList(),
+            InterpretOutcome.Operations(plan, emptyList(), 0), 0, projectNames = emptyList(), zone = zone,
         )
     }
 

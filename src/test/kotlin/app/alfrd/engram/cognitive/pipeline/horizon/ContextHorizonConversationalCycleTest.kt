@@ -668,4 +668,60 @@ class ContextHorizonConversationalCycleTest {
 
         assertFalse(quiet(pipeline.processForDebug("Still thinking.", "s1", email, requestId = "req-3")), "'in 2 days' became 'tomorrow'")
     }
+
+    // ── The focus follows the subject; the reply says so ──────────────────────
+
+    @Test
+    fun `talking about another project moves the focus, the reply is told, and nothing is lost`() = runBlocking {
+        val email = "follow-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val demo = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Meridian demo")!!
+        val garden = structureStore.createContainer(email, 1, ContainerKind.PROJECT, "Garden redesign")!!
+        structureStore.createItem(email, 0, ItemKind.TASK, "Book the conference room", projectUid = demo.uid)
+        structureStore.createItem(email, 0, ItemKind.TASK, "Choose the plants", projectUid = garden.uid)
+        structureStore.setFocus(email, 1, demo.uid, FocusMode.PINNED)
+        val pipeline = buildPipeline(TestLlmClient { request -> if (request.isInterpretation) opsResponse() else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0) })
+
+        val stay = pipeline.processForDebug("What is the weather like?", "s1", email, requestId = "req-1")
+        assertNull(stay.trace.horizonCycle!!.focusMoved)
+        assertTrue(stay.trace.horizonCycle!!.horizonAfterPropagation.any { it.text == "Book the conference room" })
+
+        val moved = pipeline.processForDebug("How is the garden redesign going?", "s1", email, requestId = "req-2")
+
+        val cycle = moved.trace.horizonCycle!!
+        assertEquals("Meridian demo -> Garden redesign", cycle.focusMoved)
+        assertTrue(cycle.focus!!.startsWith("Garden redesign"))
+        assertTrue(cycle.horizonAfterPropagation.any { it.text == "Choose the plants" }, "the new subject's items are in view the same turn")
+        assertTrue(cycle.horizonAfterPropagation.none { it.text == "Book the conference room" })
+        assertTrue(promptOf(cycle).contains("Focus moved from \"Meridian demo\" to \"Garden redesign\""), "the reply is told, so a wrong guess is visible and correctable")
+
+        val back = pipeline.processForDebug("Back to the meridian demo please", "s1", email, requestId = "req-3")
+        assertEquals("Garden redesign -> Meridian demo", back.trace.horizonCycle!!.focusMoved)
+        assertTrue(back.trace.horizonCycle!!.horizonAfterPropagation.any { it.text == "Book the conference room" }, "refocusing brings everything back")
+    }
+
+    @Test
+    fun `saying a task twice leaves one task, and the reply is told it was already there`() = runBlocking {
+        val email = "twice-${UUID.randomUUID()}@test.alfrd.internal"
+        seedUser(email)
+        val llmClient = TestLlmClient { request ->
+            if (request.isInterpretation) {
+                when {
+                    request.interpretedMessage.startsWith("I need to book the conference room") ->
+                        opsResponse(op("record_item", "kind" to "task", "quote" to "I need to book the conference room", "title" to "Book the conference room for the demo"))
+                    request.interpretedMessage.startsWith("I'll do the room booking tomorrow") ->
+                        opsResponse(op("record_item", "kind" to "task", "quote" to "I'll do the room booking tomorrow", "title" to "Book the conference room", "due" to "2099-01-02"))
+                    else -> opsResponse()
+                }
+            } else LlmResponse(text = "Okay.", latencyMs = 5, retryCount = 0)
+        }
+        val pipeline = buildPipeline(llmClient)
+
+        pipeline.processForDebug("I need to book the conference room for the demo.", "s1", email, requestId = "req-1")
+        val again = pipeline.processForDebug("I'll do the room booking tomorrow.", "s1", email, requestId = "req-2")
+
+        assertEquals(1, structureStore.listRecentItems(email, 20).count { it.kind == ItemKind.TASK }, "one task, not two")
+        assertTrue(promptOf(again.trace.horizonCycle!!).contains("Already on the list: \"Book the conference room for the demo\""), promptOf(again.trace.horizonCycle!!))
+        assertTrue(again.trace.horizonCycle!!.horizonAfterPropagation.count { it.text.contains("conference room") } == 1)
+    }
 }

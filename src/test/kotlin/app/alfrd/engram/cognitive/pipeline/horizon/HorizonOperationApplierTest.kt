@@ -366,6 +366,96 @@ class HorizonOperationApplierTest {
         assertEquals(listOf(false, true), results.map { it.applied })
     }
 
+    // ── The same thing recorded twice ────────────────────────────────────────
+
+    private val tomorrow = 1_900_000_000_000L
+
+    @Test
+    fun `a task that is the same as one already open adds nothing, and carries over the date just given`() = runBlocking {
+        val user = newUser()
+        val first = apply(user, RecordItem(ItemKind.TASK, "I need to book the conference room for the demo", title = "Book the conference room for the demo")).single()
+
+        val again = apply(user, RecordItem(ItemKind.TASK, "I'll do the room booking tomorrow", title = "Book the conference room", dueAt = tomorrow)).single()
+
+        assertTrue(again.applied)
+        assertNull(again.resultUid, "nothing was created")
+        assertEquals(first.resultUid, again.existingUid)
+        assertTrue(again.summary.startsWith("Already on the list: \"Book the conference room for the demo\""), again.summary)
+        assertTrue(again.summary.contains("its date is now"), again.summary)
+        assertEquals(1, structure.listRecentItems(user, 20).count { it.kind == ItemKind.TASK })
+        assertEquals(tomorrow, structure.getItem(user, first.resultUid!!)!!.dueAt, "the date landed on the task that already existed")
+    }
+
+    @Test
+    fun `no date to carry over says only that it is already there`() = runBlocking {
+        val user = newUser()
+        apply(user, RecordItem(ItemKind.TASK, "Renew my passport before December", title = "Renew passport before December"))
+
+        val again = apply(user, RecordItem(ItemKind.TASK, "I really should renew my passport before December", title = "Renew passport before December")).single()
+
+        assertTrue(again.summary.contains("nothing new was added") && !again.summary.contains("its date is now"), again.summary)
+        assertEquals(1, structure.listRecentItems(user, 20).size)
+    }
+
+    @Test
+    fun `tasks that only share a word or two are separate things`() = runBlocking {
+        val user = newUser()
+        apply(user, RecordItem(ItemKind.TASK, "Book the conference room for the demo", title = "Book the conference room for the demo"))
+
+        val flights = apply(user, RecordItem(ItemKind.TASK, "Book the flights for the demo", title = "Book the flights for the demo")).single()
+        val table = apply(user, RecordItem(ItemKind.TASK, "Book a table at the Italian place", title = "Book a table at the Italian place")).single()
+
+        assertNotNull(flights.resultUid)
+        assertNotNull(table.resultUid)
+        assertEquals(3, structure.listRecentItems(user, 20).size)
+    }
+
+    @Test
+    fun `a task that was finished is not a duplicate of the new one, and neither is another kind or another user's`() = runBlocking {
+        val user = newUser()
+        val other = newUser()
+        val done = apply(user, RecordItem(ItemKind.TASK, "Send the invoice to Acme", title = "Send the invoice to Acme")).single()
+        structure.resolve(user, 2, done.resultUid!!)
+        apply(other, RecordItem(ItemKind.TASK, "Water the tomato plants", title = "Water the tomato plants"))
+
+        val again = apply(user, RecordItem(ItemKind.TASK, "Send the invoice to Acme", title = "Send the invoice to Acme")).single()
+        val theirs = apply(user, RecordItem(ItemKind.TASK, "Water the tomato plants", title = "Water the tomato plants")).single()
+        val asEvent = apply(user, RecordItem(ItemKind.EVENT, "Send the invoice to Acme", title = "Send the invoice to Acme")).single()
+
+        assertNotNull(again.resultUid, "finished, so it is new work")
+        assertNotNull(theirs.resultUid, "someone else's list is not this user's")
+        assertNotNull(asEvent.resultUid, "a task and an event are different things")
+    }
+
+    @Test
+    fun `an event stated again is the same event, but facts are never merged`() = runBlocking {
+        val user = newUser()
+        apply(user, RecordItem(ItemKind.EVENT, "My sister's birthday is on the 22nd", title = "Sister's birthday", dueAt = tomorrow, about = listOf("sister")))
+
+        val again = apply(user, RecordItem(ItemKind.EVENT, "Remind me about my sister's birthday", title = "Sister's birthday", dueAt = tomorrow)).single()
+        val factA = apply(user, RecordItem(ItemKind.FACT, "My dog is called Newton")).single()
+        val factB = apply(user, RecordItem(ItemKind.FACT, "My dog is called Newton")).single()
+
+        assertTrue(again.summary.startsWith("Already on the list"), again.summary)
+        assertTrue(!again.summary.contains("its date is now"), "same date, nothing to change: ${again.summary}")
+        assertEquals(1, structure.listRecentItems(user, 20).count { it.kind == ItemKind.EVENT })
+        assertNotNull(factA.resultUid)
+        assertNotNull(factB.resultUid)
+    }
+
+    @Test
+    fun `a retry of the request that made an item is never mistaken for a duplicate of it`() = runBlocking {
+        val user = newUser()
+        val plan = listOf(RecordItem(ItemKind.TASK, "Book the conference room for the demo", title = "Book the conference room for the demo"))
+
+        val first = applier.apply(user, 1, "req-same", plan).single()
+        val retry = applier.apply(user, 1, "req-same", plan).single()
+
+        assertEquals(first.resultUid, retry.resultUid)
+        assertNull(retry.existingUid)
+        assertTrue(retry.summary.startsWith("Recorded task"), retry.summary)
+    }
+
     // ── The snapshot the model is shown ──────────────────────────────────────
 
     @Test

@@ -1007,6 +1007,8 @@ open class CognitivePipeline(
                     silenceQuestionAsked = hcr.silenceQuestionAsked,
                     nudges = hcr.seeded?.let { NudgeTrace(it.touched, it.mentionedContainers, it.mentionedEntities, it.mentionedItems, it.pruned) },
                     nudged = hcr.seeded?.nudges?.map { NudgedItemTrace(it.uid, it.source, it.weight, it.label) } ?: emptyList(),
+                    focusMoved = hcr.seeded?.focusMove?.let { "${it.fromName} -> ${it.toName}" },
+                    datedBackstop = hcr.datedBackstop,
                     focus = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.focus?.let { "${it.name} (${it.kind})" },
                     zoom = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.zoom?.name?.lowercase(),
                     containers = (hcr.assembleOutcome as? AssembleOutcome.Assembled)?.horizon?.containers

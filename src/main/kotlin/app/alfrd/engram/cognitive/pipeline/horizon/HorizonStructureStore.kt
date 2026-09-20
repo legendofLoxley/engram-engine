@@ -236,6 +236,9 @@ interface HorizonStructureStore {
 
     suspend fun getItem(userEmail: String, uid: String): ItemRecord?
 
+    /** The item this user's request created under [opKey] (`requestId:index`), if it did — how a retry recognizes its own earlier write. */
+    suspend fun itemByOpKey(userEmail: String, opKey: String): ItemRecord?
+
     /** The items filed directly under project [projectUid] (never nested projects), oldest first. Empty for a project the user doesn't own. */
     suspend fun itemsIn(userEmail: String, projectUid: String): List<ItemRecord>
 
@@ -605,6 +608,10 @@ class ArcadeHorizonStructureStore(
 
     override suspend fun getItem(userEmail: String, uid: String): ItemRecord? = read("getItem", null) {
         HorizonOwnership.findPhraseOwnedByUser(db, userEmail, uid)?.toItemRecord()
+    }
+
+    override suspend fun itemByOpKey(userEmail: String, opKey: String): ItemRecord? = read("itemByOpKey", null) {
+        findOwnedItemByOpKey(userEmail, "$userEmail|$opKey")?.toItemRecord()
     }
 
     override suspend fun itemsIn(userEmail: String, projectUid: String): List<ItemRecord> = read("itemsIn", emptyList()) {
