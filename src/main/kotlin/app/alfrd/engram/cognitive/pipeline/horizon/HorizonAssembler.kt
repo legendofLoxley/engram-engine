@@ -78,11 +78,10 @@ interface HorizonAssembler {
      * underlying query and defensively again after — never surfaced as `JustAsserted` or any other
      * classification it would otherwise get by falling through.
      *
-     * **Reactivation candidacy is independently bounded, not restricted to the open/fresh pools.**
-     * A `relevant_to` edge can target a phrase that never appears in either pool below (e.g. a very
-     * old open item ranked below those pools' own `LIMIT`, or a resolved item being reactivated);
-     * such a target is still found and admitted as a candidate, via its own independently bounded
-     * query — see [ArcadeHorizonAssembler.queryActiveReactivations].
+     * **Reactivation candidacy is independently bounded, not restricted to the pools.**
+     * A `relevant_to` edge can target a phrase that never appears in a pool (e.g. a very old item,
+     * or a resolved item being reactivated); such a target is still found and admitted as a
+     * candidate, via its own independently bounded query — see [ArcadeHorizonAssembler.queryActiveReactivations].
      */
     suspend fun assemble(
         userEmail: String,
@@ -222,21 +221,20 @@ class ArcadeHorizonAssembler(
                         focusRef = selection.focus
                         zoomLevel = selection.zoom
                     } else {
-                        // Bounded over-fetch pools — cost is a function of poolLimit and sourceUids
-                        // (small, one per source type per user), not total graph size. The
-                        // open-status branch is confirmed (by direct execution-plan inspection, not
-                        // timing alone — see debugOpenPoolExecutionSteps and its test) to use the
-                        // ASSERTS[status] index rather than a full type scan.
+                        // Bounded over-fetch pool — cost is a function of poolLimit and sourceUids
+                        // (small, one per source type per user), not total graph size. What is open,
+                        // in focus, mentioned or due is the selector's to find (below); the pools here
+                        // are only what the selector cannot see: what was just said this cycle and
+                        // what Hermes or the environment recently reported.
                         val poolLimit = budget.maxItems * HorizonLimits.CANDIDATE_POOL_OVERFETCH
-                        val openPool = queryAsserts(sourceUids, statusFilter = "open", cycleSeqFilter = null, currentCycleSeq = currentCycleSeq, limit = poolLimit)
-                        val freshPool = queryAsserts(sourceUids, statusFilter = null, cycleSeqFilter = currentCycleSeq, currentCycleSeq = currentCycleSeq, limit = poolLimit)
-                        moreCandidatesAvailable = openPool.size >= poolLimit || freshPool.size >= poolLimit
+                        val freshPool = queryAsserts(sourceUids, cycleSeqFilter = currentCycleSeq, currentCycleSeq = currentCycleSeq, limit = poolLimit)
+                        moreCandidatesAvailable = freshPool.size >= poolLimit
 
                         // Bounded-recency Actor-attributed evidence pool — see
-                        // SurfacingReason.RecentActorEvidence. Independent of open/fresh: an event
+                        // SurfacingReason.RecentActorEvidence. Independent of the fresh pool: an event
                         // written at an earlier cycle would otherwise vanish from the Horizon the
-                        // moment its own cycle passes (it is neither open-status nor this cycle's
-                        // content), which is exactly the gap this pool closes. Same minCycle window
+                        // moment its own cycle passes (it is not this cycle's content), which is
+                        // exactly the gap this pool closes. Same minCycle window
                         // activeReactivation already uses — computed once below and reused, not a
                         // second independent knob.
                         val minCycleForActorPool = currentCycleSeq - activeRelevanceCycles
@@ -249,8 +247,7 @@ class ArcadeHorizonAssembler(
                         moreCandidatesAvailable = moreCandidatesAvailable || environmentPool.size >= poolLimit
 
                         val byUid = LinkedHashMap<String, RawCandidate>()
-                        for (c in openPool) byUid[c.phraseUid] = c
-                        for (c in freshPool) byUid.putIfAbsent(c.phraseUid, c)
+                        for (c in freshPool) byUid[c.phraseUid] = c
                         for (c in actorEvidencePool) byUid.putIfAbsent(c.phraseUid, c)
                         for (c in environmentPool) byUid.putIfAbsent(c.phraseUid, c)
 
@@ -270,28 +267,30 @@ class ArcadeHorizonAssembler(
                             byUid[targetUid] = extra
                         }
 
-                        // Defense in depth alongside the SQL-level exclusion in queryAsserts: any
-                        // candidate whose original assertion or last status change is somehow ahead
-                        // of the cycle being assembled (a caller sequencing bug, or a write that
-                        // bypassed HorizonGraphStore) is dropped here too, rather than being
-                        // misclassified as JustAsserted/DormantOpen. Runs after the reactivation
-                        // merge so an independently-fetched candidate gets the same guard.
-                        byUid.entries.removeAll { (_, c) ->
-                            c.cycleSeq > currentCycleSeq || (c.statusCycleSeq != null && c.statusCycleSeq > currentCycleSeq)
-                        }
-
                         // ── Selection: what the graph and the clock say deserves a place ──
-                        // Focus, nudges, spreading, deadlines and explicit attention, from HorizonSelector;
-                        // the pools above keep contributing what they always did (just said, reactivated,
-                        // reported by Hermes, still open), now as components of one score.
+                        // Focus, nudges, spreading, deadlines, explicit attention and what is still open,
+                        // from HorizonSelector; the pools above keep contributing what only they can see
+                        // (just said, reactivated, reported by Hermes), now as components of one score.
                         val selection = HorizonSelector(db, policy).select(userEmail, currentCycleSeq, now, freshPool.map { it.phraseUid })
-                        if (selection.truncated) moreCandidatesAvailable = true
+                        // More was offered than the pool takes, or the selector's own scans hit a bound: say so, never silently.
+                        if (selection.truncated || selection.activations.size > poolLimit) moreCandidatesAvailable = true
                         val selectorPicks = selection.activations.values.sortedByDescending { it.score }.take(poolLimit)
                         for (pick in selectorPicks) {
                             if (byUid.containsKey(pick.uid)) continue
                             // Ownership is proved here: an item is admitted only if one of the user's own Sources asserts it.
                             queryAssertsForPhrase(sourceUids, pick.uid)?.let { byUid[pick.uid] = it }
                         }
+                        // Defense in depth alongside the SQL-level exclusion in queryAsserts: any
+                        // candidate whose original assertion or last status change is somehow ahead
+                        // of the cycle being assembled (a caller sequencing bug, or a write that
+                        // bypassed HorizonGraphStore) is dropped here, rather than being
+                        // misclassified as JustAsserted/DormantOpen. Runs after every source has
+                        // been merged — the pools, reactivations and the selector's picks — so
+                        // whichever way a candidate arrived, it gets the same guard.
+                        byUid.entries.removeAll { (_, c) ->
+                            c.cycleSeq > currentCycleSeq || (c.statusCycleSeq != null && c.statusCycleSeq > currentCycleSeq)
+                        }
+
                         val states = HorizonSelector(db, policy).loadStates(byUid.keys)
                         val actorUids = actorEvidencePool.map { it.phraseUid }.toSet()
                         val envUids = environmentPool.map { it.phraseUid }.toSet()
@@ -487,32 +486,16 @@ class ArcadeHorizonAssembler(
     private data class AssertsQuery(val sql: String, val params: Map<String, Any>)
 
     /**
-     * [currentCycleSeq] is always required and bounds every branch — future evidence (whose
-     * `cycleSeq` for the fresh-pool branch, or `statusCycleSeq` for the open-status branch, is
-     * ahead of the cycle being assembled) is excluded at the query level. [toHorizonItem] repeats
-     * this exclusion defensively so a caller bug elsewhere can't smuggle future evidence through.
+     * The `ASSERTS` query for what was asserted in exactly one cycle. [currentCycleSeq] bounds it: future evidence
+     * is excluded at the query level, and [rank]'s caller repeats the exclusion defensively so a caller bug
+     * elsewhere can't smuggle future evidence through.
      */
-    private fun buildAssertsQuery(
-        sourceUids: List<String>, statusFilter: String?, cycleSeqFilter: Long?, currentCycleSeq: Long, limit: Int,
-    ): AssertsQuery {
+    private fun buildAssertsQuery(sourceUids: List<String>, cycleSeqFilter: Long?, currentCycleSeq: Long, limit: Int): AssertsQuery {
         val conditions = mutableListOf("@out.uid IN :sourceUids")
         val params = mutableMapOf<String, Any>("sourceUids" to sourceUids, "limit" to limit, "currentCycleSeq" to currentCycleSeq)
-        val orderBy: String
-        if (statusFilter != null) {
-            // Open-status pool: ordered and bounded by the RECENCY OF THE STATUS ITSELF
-            // (statusCycleSeq), not the phrase's original assertion — an item reopened recently
-            // must sort ahead of one that has simply been open longer. Distinct from cycleSeq per
-            // the class doc; conflating them previously ordered by the wrong recency signal.
-            conditions += "status = :status"
-            conditions += "statusCycleSeq <= :currentCycleSeq"
-            params["status"] = statusFilter
-            orderBy = "ORDER BY statusCycleSeq DESC"
-        } else {
-            orderBy = ""
-        }
         if (cycleSeqFilter != null) {
-            // Fresh pool: exact match already bounds this to currentCycleSeq itself — no separate
-            // future-exclusion needed, an equality filter can't select a future value.
+            // An exact match already bounds this to currentCycleSeq itself — no separate future-exclusion
+            // needed, an equality filter can't select a future value.
             conditions += "cycleSeq = :cycleSeq"
             params["cycleSeq"] = cycleSeqFilter
         }
@@ -521,32 +504,9 @@ class ArcadeHorizonAssembler(
                    timestamp, cycleSeq, statusCycleSeq, status, kindMetadata
             FROM ASSERTS
             WHERE ${conditions.joinToString(" AND ")}
-            $orderBy
             LIMIT :limit
         """.trimIndent()
         return AssertsQuery(sql, params)
-    }
-
-    /**
-     * Test-only: runs the exact SQL/params [queryAsserts] would for the open-status pool, and
-     * returns the flattened list of `getType()`/`getName()` from the resulting
-     * [com.arcadedb.query.sql.executor.ExecutionPlan] (walked recursively through
-     * `getSubSteps()`). Lets a test assert on real query-plan evidence — e.g. a
-     * `FetchFromIndexStep` — instead of inferring index use from timing alone.
-     */
-    internal fun debugOpenPoolExecutionSteps(sourceUids: List<String>, currentCycleSeq: Long, limit: Int): List<String> {
-        val query = buildAssertsQuery(sourceUids, statusFilter = "open", cycleSeqFilter = null, currentCycleSeq = currentCycleSeq, limit = limit)
-        return db.query("sql", query.sql, query.params).use { rs ->
-            while (rs.hasNext()) rs.next() // the plan is only fully populated once the result is produced
-            val plan = rs.getExecutionPlan().orElse(null) ?: return@use listOf("<no execution plan available>")
-            val steps = mutableListOf<String>()
-            fun walk(step: com.arcadedb.query.sql.executor.ExecutionStep) {
-                steps += "${step.getType()}: ${step.getDescription()}"
-                step.subSteps.forEach { walk(it) }
-            }
-            plan.steps.forEach { walk(it) }
-            steps
-        }
     }
 
     private fun rowToRawCandidate(row: Map<String, Any?>): RawCandidate? {
@@ -563,11 +523,9 @@ class ArcadeHorizonAssembler(
         )
     }
 
-    private fun queryAsserts(
-        sourceUids: List<String>, statusFilter: String?, cycleSeqFilter: Long?, currentCycleSeq: Long, limit: Int,
-    ): List<RawCandidate> {
+    private fun queryAsserts(sourceUids: List<String>, cycleSeqFilter: Long?, currentCycleSeq: Long, limit: Int): List<RawCandidate> {
         if (sourceUids.isEmpty()) return emptyList()
-        val query = buildAssertsQuery(sourceUids, statusFilter, cycleSeqFilter, currentCycleSeq, limit)
+        val query = buildAssertsQuery(sourceUids, cycleSeqFilter, currentCycleSeq, limit)
         return db.query("sql", query.sql, query.params).use { rs ->
             val out = mutableListOf<RawCandidate>()
             while (rs.hasNext()) out += rowToRawCandidate(rs.next().toMap()) ?: continue
@@ -660,8 +618,8 @@ class ArcadeHorizonAssembler(
 
     /**
      * Active `relevant_to` reactivations within `[minCycle, currentCycleSeq]` for [userEmail],
-     * bounded by [limit] — **independently** of [ArcadeHorizonAssembler.assemble]'s open/fresh
-     * candidate pools, not restricted to phrases they already selected. A target ranked below those
+     * bounded by [limit] — **independently** of [ArcadeHorizonAssembler.assemble]'s candidate
+     * pools, not restricted to phrases they already selected. A target outside those
      * pools' own `LIMIT` (e.g. a very old open item, or a resolved item being reactivated) would
      * otherwise never be found: restricting this lookup to an already-bounded candidate set (a prior
      * version of this method) silently missed exactly that case.
@@ -741,13 +699,10 @@ class ArcadeHorizonAssembler(
     /**
      * Turns one candidate into an item with a score and the reasons behind it. The pools contribute
      * what they always did — something just said, reactivated by a fresh `relevant_to` link, reported
-     * from outside the conversation, still open and belonging to no project — each as one component
-     * with its own strength; [selection]'s focus, nudge, spread, deadline and pinned components are
-     * added to those, and the item's score is them combined (each adds, none can pass 1). Which one is
-     * named as *the* reason is the strongest, ties going to the more specific.
-     *
-     * An open item filed under a project gets no baseline: whether it is in view is decided by whether
-     * the project is, not by its being open.
+     * from outside the conversation — each as one component with its own strength; [selection]'s focus,
+     * nudge, spread, deadline, pinned and still-open components are added to those, and the item's score
+     * is them combined (each adds, none can pass 1). Which one is named as *the* reason is the strongest,
+     * ties going to the more specific.
      */
     private fun rank(
         c: RawCandidate,
@@ -763,7 +718,6 @@ class ArcadeHorizonAssembler(
         if (reactivation != null) parts += ScoreComponent("reactivation", policy.reactivationActivation, "linked to \"${reactivation.triggeringPhraseText.text.take(60)}\"")
         if (c.cycleSeq == currentCycleSeq) parts += ScoreComponent("justAsserted", policy.justAssertedActivation, null)
         if ((fromActor || fromEnvironment) && c.cycleSeq != currentCycleSeq) parts += ScoreComponent("peripheral", policy.peripheralActivation, null)
-        if (c.status == "open" && state?.container == null && c.cycleSeq != currentCycleSeq) parts += ScoreComponent("baseline", policy.unfiledOpenActivation, "still open")
         if (activation != null) parts += activation.components
         if (parts.isEmpty()) return null
 

@@ -56,6 +56,8 @@ data class HorizonPolicy(
     val pinnedItemActivation: Double = 1.0,
     /** An open item that belongs to no project, with nothing else drawing it in — it doesn't have a container to be out of view with. */
     val unfiledOpenActivation: Double = 0.4,
+    /** How many of the most recently changed open, unfiled items get that baseline; the rest are not lost, they just are not put forward until something else draws them in. */
+    val openBaselineItems: Int = 24,
     /** Recent evidence reported by Hermes or the environment, outside anything the user said. */
     val peripheralActivation: Double = 0.6,
 

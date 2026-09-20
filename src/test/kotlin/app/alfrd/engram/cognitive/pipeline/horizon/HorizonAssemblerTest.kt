@@ -48,8 +48,12 @@ class HorizonAssemblerTest {
         }
     }
 
-    /** Seeds a User + conversational Source→ASSERTS→Phrase with an explicit cycleSeq stamped on the ASSERTS edge. */
-    private fun seedConversationalPhraseWithCycle(db: Database, email: String, text: String, cycleSeq: Long): String {
+    /**
+     * Seeds a User + conversational Source→ASSERTS→Phrase with an explicit cycleSeq stamped on the ASSERTS edge.
+     * With [openedAt] it is an open task, as the interpretation stage records one: a `Task` vertex owned by the user,
+     * its status set at that cycle on both the vertex (what selection reads to find what is still open) and the edge.
+     */
+    private fun seedConversationalPhraseWithCycle(db: Database, email: String, text: String, cycleSeq: Long, openedAt: Long? = null): String {
         val now = System.currentTimeMillis()
         val phraseUid = UUID.randomUUID().toString()
         db.transaction {
@@ -79,13 +83,14 @@ class HorizonAssemblerTest {
                 }
                 userVertex.modify().newEdge("TRUSTS", sourceVertex, false).apply { set("scores", "[]"); save() }
             }
-            val phraseVertex = db.newVertex("Phrase").apply {
+            val phraseVertex = db.newVertex(if (openedAt != null) "Task" else "Phrase").apply {
                 set("uid", phraseUid)
                 set("text", text)
                 set("hash", phraseUid)
                 set("visibility", "private")
                 set("createdAt", now)
                 set("updatedAt", now)
+                if (openedAt != null) { set("ownerEmail", email); set("status", "open") }
                 save()
             }
             // Ordinary conversational ingestion (DatabaseEngramClient.ingest(), untouched this
@@ -97,14 +102,19 @@ class HorizonAssemblerTest {
                 set("timestamp", now)
                 set("scores", """[{"type":"trust","perspective":"user","value":0.7}]""")
                 set("cycleSeq", cycleSeq)
+                if (openedAt != null) {
+                    set("status", "open")
+                    set("statusHistory", """[{"state":"open","at":$now}]""")
+                    set("statusCycleSeq", openedAt)
+                }
                 save()
             }
         }
         return phraseUid
     }
 
-    private fun seedConversationalPhraseWithCycle(email: String, text: String, cycleSeq: Long): String =
-        seedConversationalPhraseWithCycle(dbManager.getDatabase(), email, text, cycleSeq)
+    private fun seedConversationalPhraseWithCycle(email: String, text: String, cycleSeq: Long, openedAt: Long? = null): String =
+        seedConversationalPhraseWithCycle(dbManager.getDatabase(), email, text, cycleSeq, openedAt)
 
     /** Seeds a User + Actor-attributed Source→ASSERTS→Phrase (status=null, so it only ever surfaces via JustAsserted/RecentActorEvidence — never DormantOpen) with an explicit cycleSeq. */
     private fun seedActorEventPhraseWithCycle(email: String, text: String, cycleSeq: Long, sourceType: String = ACTOR_OBSERVATION_SOURCE_TYPE): String {
@@ -194,9 +204,8 @@ class HorizonAssemblerTest {
         // before the assertions below run, proving classification is cycle-identity based, not
         // wall-clock-gap based.
         val arxUid = seedConversationalPhraseWithCycle(
-            email, "Getting Alfrd running on Arx is a priority for me — I keep meaning to get to it.", cycleSeq = 1,
+            email, "Getting Alfrd running on Arx is a priority for me — I keep meaning to get to it.", cycleSeq = 1, openedAt = 1,
         )
-        assertTrue(store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN))
 
         val afterTurn1 = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val arxAtTurn1 = afterTurn1.items.single { it.sourceRefs.first().phraseUid == arxUid }
@@ -272,8 +281,7 @@ class HorizonAssemblerTest {
     @Test
     fun `reactivation decays by cycle count, not wall-clock time`() = runBlocking {
         val email = "horizon-lifecycle-${UUID.randomUUID()}@test.alfrd.internal"
-        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1, openedAt = 1)
         val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:x", text = "event")!!
         store.markRelevant(email, cycleSeq = 1, fromPhraseUid = eventUid, toPhraseUid = arxUid)
 
@@ -293,9 +301,8 @@ class HorizonAssemblerTest {
     @Test
     fun `a status change in a later cycle does not make an old phrase read as JustAsserted`() = runBlocking {
         val email = "horizon-cycle-identity-${UUID.randomUUID()}@test.alfrd.internal"
-        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
         // Status is set FOUR cycles after the phrase's own original assertion.
-        store.markAssertionStatus(email, cycleSeq = 5, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1, openedAt = 5)
 
         val horizon = assembler.assemble(email, currentCycleSeq = 5).expectSuccess()
         val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
@@ -325,8 +332,7 @@ class HorizonAssemblerTest {
     @Test
     fun `an open item whose status was marked in a future cycle is excluded until that cycle arrives`() = runBlocking {
         val email = "horizon-future-status-${UUID.randomUUID()}@test.alfrd.internal"
-        val openUid = seedConversationalPhraseWithCycle(email, "Old open item.", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = openUid, status = AssertionStatus.OPEN)
+        val openUid = seedConversationalPhraseWithCycle(email, "Old open item.", cycleSeq = 1, openedAt = 1)
         // Simulate an out-of-order write bypassing the store's own guard (e.g. a bad migration):
         // push statusCycleSeq into the future directly.
         val db = dbManager.getDatabase()
@@ -348,8 +354,7 @@ class HorizonAssemblerTest {
     @Test
     fun `an awaited write is always visible to the very next assemble call`() = runBlocking {
         val email = "horizon-consistency-${UUID.randomUUID()}@test.alfrd.internal"
-        val phraseUid = seedConversationalPhraseWithCycle(email, "some fact", cycleSeq = 1)
-        assertTrue(store.markAssertionStatus(email, cycleSeq = 1, phraseUid = phraseUid, status = AssertionStatus.OPEN))
+        val phraseUid = seedConversationalPhraseWithCycle(email, "some fact", cycleSeq = 1, openedAt = 1)
 
         val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         assertTrue(horizon.items.any { it.sourceRefs.first().phraseUid == phraseUid && it.status == AssertionStatus.OPEN })
@@ -390,8 +395,7 @@ class HorizonAssemblerTest {
         // Arx is asserted at cycle 1; assemble() below runs at cycle 3, so absent the concurrent
         // write it reads as DormantOpen(1) — distinct from JustAsserted, so the assertion below
         // actually distinguishes "excluded" from "not excluded" rather than being trivially true.
-        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1, openedAt = 1)
         val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:concurrency", text = "event")!!
         // No relevant_to edge yet — the concurrent writer below creates it mid-assembly.
 
@@ -468,8 +472,7 @@ class HorizonAssemblerTest {
     fun `assemble never surfaces another user's phrase even via a store-bypassing raw edge`() = runBlocking {
         val emailA = "horizon-xread-a-${UUID.randomUUID()}@test.alfrd.internal"
         val emailB = "horizon-xread-b-${UUID.randomUUID()}@test.alfrd.internal"
-        val arxUidA = seedConversationalPhraseWithCycle(emailA, "User A's private open intention.", cycleSeq = 1)
-        store.markAssertionStatus(emailA, cycleSeq = 1, phraseUid = arxUidA, status = AssertionStatus.OPEN)
+        val arxUidA = seedConversationalPhraseWithCycle(emailA, "User A's private open intention.", cycleSeq = 1, openedAt = 1)
         val attackerPhraseB = seedConversationalPhraseWithCycle(emailB, "User B's private attack-payload phrase.", cycleSeq = 1)
 
         val db = dbManager.getDatabase()
@@ -556,11 +559,9 @@ class HorizonAssemblerTest {
         // oldest-by-statusCycleSeq one (the reactivation target) ranks 4th and is excluded from the
         // open pool's top-3 (ORDER BY statusCycleSeq DESC LIMIT 3).
         val budget = HorizonBudget(maxItems = 1, itemCount = 0, truncated = false)
-        val targetUid = seedConversationalPhraseWithCycle(email, "old target item", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = targetUid, status = AssertionStatus.OPEN)
+        val targetUid = seedConversationalPhraseWithCycle(email, "old target item", cycleSeq = 1, openedAt = 1)
         (2..4).forEach { i ->
-            val uid = seedConversationalPhraseWithCycle(email, "filler open item $i", cycleSeq = i.toLong())
-            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "filler open item $i", cycleSeq = i.toLong(), openedAt = i.toLong())
         }
 
         // Test setup sanity check: confirm the target is genuinely excluded from the bounded pool
@@ -604,11 +605,9 @@ class HorizonAssemblerTest {
         // deterministically pick 3 of B's higher-cycleSeq edges and never even reach A's.
         val budget = HorizonBudget(maxItems = 1, itemCount = 0, truncated = false)
 
-        val targetUidA = seedConversationalPhraseWithCycle(emailA, "A's old target item", cycleSeq = 1)
-        store.markAssertionStatus(emailA, cycleSeq = 1, phraseUid = targetUidA, status = AssertionStatus.OPEN)
+        val targetUidA = seedConversationalPhraseWithCycle(emailA, "A's old target item", cycleSeq = 1, openedAt = 1)
         (2..4).forEach { i ->
-            val uid = seedConversationalPhraseWithCycle(emailA, "A's filler open item $i", cycleSeq = i.toLong())
-            store.markAssertionStatus(emailA, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(emailA, "A's filler open item $i", cycleSeq = i.toLong(), openedAt = i.toLong())
         }
         val triggerUidA = seedConversationalPhraseWithCycle(emailA, "A's fresh trigger", cycleSeq = 2)
         assertTrue(store.markRelevant(emailA, cycleSeq = 2, fromPhraseUid = triggerUidA, toPhraseUid = targetUidA))
@@ -656,8 +655,7 @@ class HorizonAssemblerTest {
         val email = "horizon-byte-enforce-${UUID.randomUUID()}@test.alfrd.internal"
         val budget = HorizonBudget(maxItems = 5, itemCount = 0, truncated = false)
         val uids = (1..5).map { i ->
-            val uid = seedConversationalPhraseWithCycle(email, "moderately long open item text number $i", cycleSeq = i.toLong())
-            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "moderately long open item text number $i", cycleSeq = i.toLong(), openedAt = i.toLong())
             uid
         }
 
@@ -694,8 +692,7 @@ class HorizonAssemblerTest {
     @Test
     fun `assemble returns an explicit BudgetExceeded when even zero items fits the byte budget, never an oversized snapshot`() = runBlocking {
         val email = "horizon-byte-exceeded-${UUID.randomUUID()}@test.alfrd.internal"
-        val uid = seedConversationalPhraseWithCycle(email, "an item", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = uid, status = AssertionStatus.OPEN)
+        val uid = seedConversationalPhraseWithCycle(email, "an item", cycleSeq = 1, openedAt = 1)
 
         val assemblerImpl = assembler as ArcadeHorizonAssembler
         assemblerImpl.testByteBudgetOverride = 10 // even an empty ContextHorizon's JSON metadata exceeds this
@@ -765,8 +762,7 @@ class HorizonAssemblerTest {
         // Distinct cycleSeq per item avoids ORDER BY ties, keeping which items get kept vs.
         // omitted deterministic.
         (1..10).forEach { i ->
-            val uid = seedConversationalPhraseWithCycle(email, "Open item number $i", cycleSeq = i.toLong())
-            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "Open item number $i", cycleSeq = i.toLong(), openedAt = i.toLong())
         }
 
         val budget = HorizonBudget(maxItems = 3, itemCount = 0, truncated = false)
@@ -792,8 +788,7 @@ class HorizonAssemblerTest {
     fun `long text is truncated and marked, full text stays recoverable by uid`() = runBlocking {
         val email = "horizon-truncation-${UUID.randomUUID()}@test.alfrd.internal"
         val longText = "x".repeat(HorizonLimits.MAX_ITEM_TEXT_LENGTH + 50)
-        val phraseUid = seedConversationalPhraseWithCycle(email, longText, cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = phraseUid, status = AssertionStatus.OPEN)
+        val phraseUid = seedConversationalPhraseWithCycle(email, longText, cycleSeq = 1, openedAt = 1)
 
         val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val item = horizon.items.single { it.sourceRefs.first().phraseUid == phraseUid }
@@ -808,8 +803,7 @@ class HorizonAssemblerTest {
     @Test
     fun `a long triggering phrase's text is also truncated, not inlined unbounded`() = runBlocking {
         val email = "horizon-truncation-trigger-${UUID.randomUUID()}@test.alfrd.internal"
-        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val arxUid = seedConversationalPhraseWithCycle(email, "Arx priority.", cycleSeq = 1, openedAt = 1)
         val longEventText = "y".repeat(HorizonLimits.MAX_ITEM_TEXT_LENGTH + 50)
         val eventUid = store.ingestEnvironmentSignal(email, cycleSeq = 1, sourceName = "environment:x", text = longEventText)!!
         store.markRelevant(email, cycleSeq = 1, fromPhraseUid = eventUid, toPhraseUid = arxUid)
@@ -848,8 +842,7 @@ class HorizonAssemblerTest {
         // whose own triggering text is also over the cap.
         val overflowCount = HorizonBudget.DEFAULT.maxItems + HorizonLimits.OMITTED_SAMPLE_CAP + 5
         val uids = (1..overflowCount).map { i ->
-            val uid = seedConversationalPhraseWithCycle(email, "$longText-item-$i", cycleSeq = i.toLong())
-            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "$longText-item-$i", cycleSeq = i.toLong(), openedAt = i.toLong())
             uid
         }
         val eventUid = store.ingestEnvironmentSignal(
@@ -914,53 +907,81 @@ class HorizonAssemblerTest {
     /**
      * A timing comparison alone can't distinguish "uses the index" from "just happens to be fast
      * enough at this N" — this asserts on the actual [com.arcadedb.query.sql.executor.ExecutionPlan]
-     * ArcadeDB produces for the real open-item query, via
-     * [ArcadeHorizonAssembler.debugOpenPoolExecutionSteps], which runs the exact same SQL/params
-     * [ArcadeHorizonAssembler] itself uses.
+     * ArcadeDB produces for the query the selector runs to find a user's open items (the same SQL as
+     * `HorizonSelector.openUnfiledItems`), so a change to the schema's index can't quietly turn it into
+     * a full type scan.
      */
     @Test
-    fun `the open-item query's execution plan shows an index-based fetch, not a full type scan`() = runBlocking {
+    fun `the open-item scan's execution plan shows an index-based fetch, not a full type scan`() = runBlocking {
         val email = "horizon-plan-${UUID.randomUUID()}@test.alfrd.internal"
-        seedManyOpenItemsInOneTransaction(dbManager.getDatabase(), email, count = 200)
+        seedManyOpenTasksInOneTransaction(dbManager.getDatabase(), email, count = 200)
 
-        val sourceUids = HorizonOwnership.trustedSourceUids(dbManager.getDatabase(), email)
-        assertTrue(sourceUids.isNotEmpty(), "test setup: the seeded user must have a trusted source")
-
-        val steps = (assembler as ArcadeHorizonAssembler)
-            .debugOpenPoolExecutionSteps(sourceUids, currentCycleSeq = 1_000_000, limit = 36)
+        val steps = dbManager.getDatabase().query("sql", "SELECT FROM Task WHERE ownerEmail = :e AND status = 'open' LIMIT 500", mapOf("e" to email)).use { rs ->
+            while (rs.hasNext()) rs.next() // the plan is only fully populated once the result is produced
+            val plan = rs.getExecutionPlan().orElse(null) ?: return@use listOf("<no execution plan available>")
+            val out = mutableListOf<String>()
+            fun walk(step: com.arcadedb.query.sql.executor.ExecutionStep) {
+                out += "${step.getType()}: ${step.getDescription()}"
+                step.subSteps.forEach { walk(it) }
+            }
+            plan.steps.forEach { walk(it) }
+            out
+        }
         val planDescription = steps.joinToString(" | ")
 
-        // Confirmed by direct inspection: ArcadeDB's plan for this query is
-        // "FetchFromIndexStep: + FETCH FROM INDEX ASSERTS[status] status = :status" followed by
-        // GetValueFromIndexEntryStep/FilterStep/FilterByTypeStep/OrderByStep/LimitExecutionStep —
-        // the remaining conditions (@out.uid IN ..., statusCycleSeq <= ...) are applied as a filter
-        // over the index-selected rows, not a scan of the whole ASSERTS type. Checking for the
-        // specific index name (not just "any index step") rules out a false positive from some
-        // unrelated index appearing incidentally in the plan.
         assertTrue(
-            steps.any { it.contains("FetchFromIndexStep") && it.contains("ASSERTS[status]") },
-            "expected a FetchFromIndexStep naming the ASSERTS[status] index; got: $planDescription",
+            steps.any { it.contains("FetchFromIndexStep") && it.contains("Task[") && it.contains("ownerEmail") },
+            "expected a FetchFromIndexStep on the Task (ownerEmail, status) index; got: $planDescription",
         )
         assertFalse(
             steps.any { it.contains("FetchFromTypeExecutionStep") },
-            "plan includes a full type-scan step (FetchFromTypeExecutionStep) — the status index is not actually being used: $planDescription",
+            "plan includes a full type-scan step (FetchFromTypeExecutionStep) — the index is not actually being used: $planDescription",
         )
     }
 
     @Test
-    fun `open-item query does not regress into an unindexed full scan at 5000+ edges`() = runBlocking {
+    fun `open-item selection does not regress into an unindexed full scan at 5000 open tasks`() = runBlocking {
         val baselineEmail = "horizon-scale-baseline-${UUID.randomUUID()}@test.alfrd.internal"
-        seedManyOpenItemsInOneTransaction(dbManager.getDatabase(), baselineEmail, count = 20)
+        seedManyOpenTasksInOneTransaction(dbManager.getDatabase(), baselineEmail, count = 20)
         val baselineMs = measureTimeMillis { assembler.assemble(baselineEmail, currentCycleSeq = 1_000_000).expectSuccess() }
 
         val scaleEmail = "horizon-scale-large-${UUID.randomUUID()}@test.alfrd.internal"
-        seedManyOpenItemsInOneTransaction(dbManager.getDatabase(), scaleEmail, count = 5_000)
+        seedManyOpenTasksInOneTransaction(dbManager.getDatabase(), scaleEmail, count = 5_000)
         val scaleMs = measureTimeMillis { assembler.assemble(scaleEmail, currentCycleSeq = 1_000_000).expectSuccess() }
 
         assertTrue(
             scaleMs < baselineMs * 50 + 2_000,
-            "open-item query took ${scaleMs}ms at 5000 edges vs ${baselineMs}ms at 20 — looks like an unindexed full scan",
+            "assembling took ${scaleMs}ms with 5000 open tasks vs ${baselineMs}ms with 20 — looks like an unindexed full scan",
         )
+        val h = (assembler.assemble(scaleEmail, currentCycleSeq = 1_000_000) as AssembleOutcome.Assembled).horizon
+        assertEquals(HorizonBudget.DEFAULT.maxItems, h.items.size, "still fills the budget, from the most recently changed")
+        assertTrue(h.moreCandidatesAvailable, "and says plainly that more exists than was looked at")
+    }
+
+    /** Bulk-seeds [count] open, unfiled tasks on one conversational Source in a single transaction — test setup, not what's being measured. */
+    private fun seedManyOpenTasksInOneTransaction(db: Database, email: String, count: Int) {
+        val now = System.currentTimeMillis()
+        db.transaction {
+            val userVertex = db.newVertex("User").apply {
+                set("uid", UUID.randomUUID().toString()); set("username", email.substringBefore("@")); set("email", email)
+                set("tier", -1); set("createdAt", now); set("updatedAt", now); save()
+            }
+            val sourceVertex = db.newVertex("Source").apply {
+                set("uid", UUID.randomUUID().toString()); set("name", "conversation:$email"); set("type", "conversation"); set("metadata", "{}"); save()
+            }
+            userVertex.newEdge("TRUSTS", sourceVertex, false).apply { set("scores", "[]"); save() }
+            repeat(count) { i ->
+                val uid = UUID.randomUUID().toString()
+                val task = db.newVertex("Task").apply {
+                    set("uid", uid); set("text", "Open task number $i"); set("hash", uid); set("visibility", "private")
+                    set("createdAt", now + i); set("updatedAt", now + i); set("ownerEmail", email); set("status", "open"); save()
+                }
+                sourceVertex.newEdge("ASSERTS", task, false).apply {
+                    set("context", "conversation"); set("timestamp", now); set("scores", "[]")
+                    set("status", "open"); set("statusHistory", """[{"state":"open","at":$now}]"""); set("cycleSeq", i.toLong()); save()
+                }
+            }
+        }
     }
 
     /** Bulk-seeds [count] open-status phrases on one Source in a single transaction — test setup, not what's being measured. */
@@ -1014,8 +1035,7 @@ class HorizonAssemblerTest {
     fun `listCandidates pages through the full open-item set with no gaps or duplicates`() = runBlocking {
         val email = "horizon-paging-${UUID.randomUUID()}@test.alfrd.internal"
         val seededUids = (1..25).map { i ->
-            val uid = seedConversationalPhraseWithCycle(email, "Open item $i", cycleSeq = i.toLong())
-            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "Open item $i", cycleSeq = i.toLong(), openedAt = i.toLong())
             uid
         }.toSet()
 
@@ -1052,8 +1072,7 @@ class HorizonAssemblerTest {
         }
         // 5 INTENTION (open) items at older cycles land on a LATER raw page.
         val intentionUids = (1..5).map { i ->
-            val uid = seedConversationalPhraseWithCycle(email, "intention $i", cycleSeq = i.toLong())
-            store.markAssertionStatus(email, cycleSeq = i.toLong(), phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "intention $i", cycleSeq = i.toLong(), openedAt = i.toLong())
             uid
         }.toSet()
 
@@ -1076,8 +1095,7 @@ class HorizonAssemblerTest {
     fun `listCandidates pagination is stable across a cycleSeq tie via the phraseUid tiebreaker`() = runBlocking {
         val email = "horizon-paging-tie-${UUID.randomUUID()}@test.alfrd.internal"
         val uids = (1..2).map {
-            val uid = seedConversationalPhraseWithCycle(email, "tied item $it", cycleSeq = 1)
-            store.markAssertionStatus(email, cycleSeq = 1, phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "tied item $it", cycleSeq = 1, openedAt = 1)
             uid
         }.toSet()
 
@@ -1107,8 +1125,7 @@ class HorizonAssemblerTest {
         var localAssembler: HorizonAssembler = ArcadeHorizonAssembler(manager.getDatabase())
 
         val email = "horizon-restart-${UUID.randomUUID()}@test.alfrd.internal"
-        val arxUid = seedConversationalPhraseWithCycle(manager.getDatabase(), email, "Arx priority.", cycleSeq = 1)
-        localStore.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val arxUid = seedConversationalPhraseWithCycle(manager.getDatabase(), email, "Arx priority.", cycleSeq = 1, openedAt = 1)
         val eventUid = localStore.ingestEnvironmentSignal(email, cycleSeq = 2, sourceName = "environment:x", text = "event")!!
         localStore.markRelevant(email, cycleSeq = 2, fromPhraseUid = eventUid, toPhraseUid = arxUid)
 
@@ -1144,8 +1161,7 @@ class HorizonAssemblerTest {
     fun `an explicit user statement carries verbatim text and explicit provenance, no inferred reason`() = runBlocking {
         val email = "horizon-provenance-${UUID.randomUUID()}@test.alfrd.internal"
         val text = "Getting Alfrd running on Arx is a priority for me."
-        val arxUid = seedConversationalPhraseWithCycle(email, text, cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = arxUid, status = AssertionStatus.OPEN)
+        val arxUid = seedConversationalPhraseWithCycle(email, text, cycleSeq = 1, openedAt = 1)
 
         val horizon = assembler.assemble(email, currentCycleSeq = 1).expectSuccess()
         val item = horizon.items.single { it.sourceRefs.first().phraseUid == arxUid }
@@ -1158,11 +1174,9 @@ class HorizonAssemblerTest {
     @Test
     fun `returns text and cycleSeq for open items only, never non-open ones`() = runBlocking {
         val email = "horizon-open-candidates-${UUID.randomUUID()}@test.alfrd.internal"
-        val openUid = seedConversationalPhraseWithCycle(email, "Getting Alfrd running on Arx is a priority for me.", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = openUid, status = AssertionStatus.OPEN)
+        val openUid = seedConversationalPhraseWithCycle(email, "Getting Alfrd running on Arx is a priority for me.", cycleSeq = 1, openedAt = 1)
         val plainFactUid = seedConversationalPhraseWithCycle(email, "My dog's name is Newton.", cycleSeq = 2)
-        val resolvedUid = seedConversationalPhraseWithCycle(email, "The delivery arrived.", cycleSeq = 3)
-        store.markAssertionStatus(email, cycleSeq = 3, phraseUid = resolvedUid, status = AssertionStatus.OPEN)
+        val resolvedUid = seedConversationalPhraseWithCycle(email, "The delivery arrived.", cycleSeq = 3, openedAt = 3)
         store.markAssertionStatus(email, cycleSeq = 4, phraseUid = resolvedUid, status = AssertionStatus.RESOLVED)
 
         val candidates = assembler.listOpenCandidatesWithText(email)
@@ -1183,8 +1197,7 @@ class HorizonAssemblerTest {
         // assemble() call would necessarily drop some — the target of this test is deliberately
         // the LOWEST-priority one (earliest cycle, statusCycleSeq-ordered last).
         val uids = (1..15L).map { cycle ->
-            val uid = seedConversationalPhraseWithCycle(email, "Open item number $cycle with distinctivewordxyz$cycle", cycleSeq = cycle)
-            store.markAssertionStatus(email, cycleSeq = cycle, phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "Open item number $cycle with distinctivewordxyz$cycle", cycleSeq = cycle, openedAt = cycle)
             uid
         }
         val lowestPriorityUid = uids.first() // cycleSeq=1, oldest statusCycleSeq — ranked last by assemble()
@@ -1202,8 +1215,7 @@ class HorizonAssemblerTest {
     fun `is bounded by its own limit parameter`() = runBlocking {
         val email = "horizon-open-candidates-bounded-${UUID.randomUUID()}@test.alfrd.internal"
         (1..10L).forEach { cycle ->
-            val uid = seedConversationalPhraseWithCycle(email, "Open item $cycle", cycleSeq = cycle)
-            store.markAssertionStatus(email, cycleSeq = cycle, phraseUid = uid, status = AssertionStatus.OPEN)
+            val uid = seedConversationalPhraseWithCycle(email, "Open item $cycle", cycleSeq = cycle, openedAt = cycle)
         }
 
         val candidates = assembler.listOpenCandidatesWithText(email, limit = 3)
@@ -1215,10 +1227,8 @@ class HorizonAssemblerTest {
     fun `never leaks another user's open items`() = runBlocking {
         val emailA = "horizon-open-candidates-a-${UUID.randomUUID()}@test.alfrd.internal"
         val emailB = "horizon-open-candidates-b-${UUID.randomUUID()}@test.alfrd.internal"
-        val uidA = seedConversationalPhraseWithCycle(emailA, "A's private open item", cycleSeq = 1)
-        store.markAssertionStatus(emailA, cycleSeq = 1, phraseUid = uidA, status = AssertionStatus.OPEN)
-        val uidB = seedConversationalPhraseWithCycle(emailB, "B's private open item", cycleSeq = 1)
-        store.markAssertionStatus(emailB, cycleSeq = 1, phraseUid = uidB, status = AssertionStatus.OPEN)
+        val uidA = seedConversationalPhraseWithCycle(emailA, "A's private open item", cycleSeq = 1, openedAt = 1)
+        val uidB = seedConversationalPhraseWithCycle(emailB, "B's private open item", cycleSeq = 1, openedAt = 1)
 
         val candidatesForA = assembler.listOpenCandidatesWithText(emailA)
 
@@ -1263,8 +1273,7 @@ class HorizonAssemblerTest {
     @Test
     fun `RecentActorEvidence ranks below JustAsserted and ActiveReactivation but above DormantOpen`() = runBlocking {
         val email = "actor-evidence-priority-${UUID.randomUUID()}@test.alfrd.internal"
-        val dormantUid = seedConversationalPhraseWithCycle(email, "An old open intention", cycleSeq = 1)
-        store.markAssertionStatus(email, cycleSeq = 1, phraseUid = dormantUid, status = AssertionStatus.OPEN)
+        val dormantUid = seedConversationalPhraseWithCycle(email, "An old open intention", cycleSeq = 1, openedAt = 1)
         val actorUid = seedActorEventPhraseWithCycle(email, "Recent Actor evidence", cycleSeq = 9)
         val freshUid = seedConversationalPhraseWithCycle(email, "Just said this", cycleSeq = 10)
 

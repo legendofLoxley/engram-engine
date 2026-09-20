@@ -189,7 +189,7 @@ interface HorizonStructureStore {
      * Marks a task, event or question `resolved` (or `open` again when [resolved] is false), or a
      * project `done`/`active`. False for any other target or one the user doesn't own. Records
      * `resolvedAt` when resolving; a no-op if it is already in the requested state. For a task or
-     * question the legacy `ASSERTS.status` the current Horizon reads is kept in step (see [createItem]).
+     * question the `ASSERTS.status` copy is kept in step too (see [createItem]).
      */
     suspend fun resolve(userEmail: String, cycleSeq: Long, targetUid: String, resolved: Boolean = true): Boolean
 
@@ -375,9 +375,9 @@ class ArcadeHorizonStructureStore(
                 set("timestamp", now)
                 set("scores", """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
-                // Legacy dual-write, removed with the legacy Horizon pools: today's assembler decides
-                // "open" from ASSERTS.status, so a task or question must carry it or it would vanish
-                // from the Horizon until the selector replaces those pools.
+                // Kept in step with the vertex's own `status`: selection reads the vertex, but propagation
+                // (which items a new report may be linked to) and how an item's status is worded in the
+                // reply's prompt still read the edge. Once those read the vertex, this copy can go.
                 if (kind == ItemKind.TASK || kind == ItemKind.QUESTION) applyLegacyStatus(this, "open", cycleSeq, now)
                 save()
             }
@@ -461,7 +461,7 @@ class ArcadeHorizonStructureStore(
                 save()
             }
             if (target.typeName == "Task" || target.typeName == "Question") {
-                // Keep the legacy ASSERTS.status the current Horizon reads in step — see createItem.
+                // Keep the ASSERTS.status copy in step — see createItem.
                 HorizonOwnership.ownedAssertsEdges(db, userEmail, targetUid).forEach { edge ->
                     val mutable = edge.modify()
                     applyLegacyStatus(mutable, if (resolved) "resolved" else "open", cycleSeq, now)
@@ -709,9 +709,9 @@ class ArcadeHorizonStructureStore(
     // ── Plumbing ─────────────────────────────────────────────────────────────
 
     /**
-     * Sets the legacy `status`/`statusHistory`/`statusCycleSeq` on an ASSERTS edge — the exact shape
-     * [ArcadeHorizonGraphStore.markAssertionStatus] writes — so today's Horizon assembler, which
-     * reads open/resolved from there, sees a task or question the way it saw an intention.
+     * Sets `status`/`statusHistory`/`statusCycleSeq` on an ASSERTS edge — the exact shape
+     * [ArcadeHorizonGraphStore.markAssertionStatus] writes — so what still reads open/resolved from the edge
+     * (propagation's candidates, the status shown with an item) sees a task or question as it always saw an intention.
      */
     private fun applyLegacyStatus(edge: com.arcadedb.graph.MutableEdge, state: String, cycleSeq: Long, now: Long) {
         val history = legacyHistory(edge.get("statusHistory") as? String) + StatusHistoryEntry(state, now)

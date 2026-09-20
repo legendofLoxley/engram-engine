@@ -74,7 +74,7 @@ class LocalLlmClientTest {
         enqueueChat("""{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"model":"m"}""")
 
         val tool = ToolDefinition(
-            name = "assert_open_intention",
+            name = "apply_operations",
             description = "Record an open intention.",
             inputSchema = buildJsonObject {
                 put("type", "object")
@@ -87,7 +87,7 @@ class LocalLlmClientTest {
         val toolsArray = sentBody["tools"]?.jsonArray
         assertTrue(toolsArray != null && toolsArray.isNotEmpty(), "request must carry a tools array when LlmRequest.tools is non-empty")
         val firstFunction = toolsArray!![0].jsonObject["function"]!!.jsonObject
-        assertEquals("assert_open_intention", firstFunction["name"]?.jsonPrimitive?.content)
+        assertEquals("apply_operations", firstFunction["name"]?.jsonPrimitive?.content)
         assertEquals("Record an open intention.", firstFunction["description"]?.jsonPrimitive?.content)
         assertEquals("object", firstFunction["parameters"]?.jsonObject?.get("type")?.jsonPrimitive?.content)
     }
@@ -132,16 +132,16 @@ class LocalLlmClientTest {
     fun `a tool_calls response is mapped to ToolCall with parsed JSON arguments`() = runBlocking {
         enqueueChat(
             """{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"",
-              "tool_calls":[{"type":"function","function":{"name":"assert_open_intention",
+              "tool_calls":[{"type":"function","function":{"name":"apply_operations",
               "arguments":"{\"quote\":\"prepare a demo\",\"is_first_person_and_not_negated\":true}"}}]}}],
               "model":"m"}"""
         )
 
-        val tool = ToolDefinition(name = "assert_open_intention", description = "d", inputSchema = buildJsonObject { put("type", "object") })
+        val tool = ToolDefinition(name = "apply_operations", description = "d", inputSchema = buildJsonObject { put("type", "object") })
         val response = client().complete(LlmRequest(prompt = "I need to prepare a demo.", tools = listOf(tool)))
 
         assertEquals(1, response.toolCalls.size)
-        assertEquals("assert_open_intention", response.toolCalls[0].name)
+        assertEquals("apply_operations", response.toolCalls[0].name)
         assertEquals("prepare a demo", response.toolCalls[0].input["quote"]?.jsonPrimitive?.content)
         assertEquals(true, response.toolCalls[0].input["is_first_person_and_not_negated"]?.jsonPrimitive?.content?.toBoolean())
     }

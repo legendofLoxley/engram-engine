@@ -224,7 +224,7 @@ class LlmClientTest {
 
     @Test
     fun `toolCalls survive the retry wrapper's copy(retryCount = attempt)`() = runTest {
-        val toolCall = ToolCall(name = "assert_open_intention", input = kotlinx.serialization.json.buildJsonObject { put("quote", kotlinx.serialization.json.JsonPrimitive("x")) })
+        val toolCall = ToolCall(name = "apply_operations", input = kotlinx.serialization.json.buildJsonObject { put("quote", kotlinx.serialization.json.JsonPrimitive("x")) })
         val client = fakeLlmClient { attempt ->
             if (attempt == 0) throw RuntimeException("transient")
             LlmResponse(text = "", toolCalls = listOf(toolCall), latencyMs = 5, retryCount = 0)
