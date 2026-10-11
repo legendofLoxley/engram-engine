@@ -75,7 +75,7 @@ data class NotionTableSetConfig(
                 dataSourceId = dataSourceId(obj.requiredString("dataSourceId", where), where),
                 access = access,
                 pageBodyAppend = obj.optionalBoolean("pageBodyAppend", where) ?: false,
-                idempotencyKeyProperty = obj.optionalString("idempotencyKeyProperty"),
+                idempotencyKeyProperty = idempotencyKeyProperty(obj, where),
                 allowIncomingRelations = obj.optionalBoolean("allowIncomingRelations", where) ?: (access == TableAccess.READ_WRITE),
             )
         }
@@ -87,11 +87,24 @@ data class NotionTableSetConfig(
             return NotionReadablePage(obj.requiredString("name", where), id)
         }
 
+        /** Absent means the table has not opted in. Present but blank, null or not a string is a mistake, and must not quietly turn the protection off. */
+        private fun idempotencyKeyProperty(obj: JsonObject, where: String): String? {
+            if (!obj.containsKey("idempotencyKeyProperty")) return null
+            return obj.optionalString("idempotencyKeyProperty")
+                ?: throw NotionConfigException("$where.idempotencyKeyProperty must be a non-empty string when present; leave it out to opt out")
+        }
+
+        /** The whole value must be a data source id, bare or as an exact `collection://` reference. Text around an id is not stripped off. */
+        private val DATA_SOURCE_ID = Regex("(?:collection://)?([0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12})")
+
         private fun dataSourceId(raw: String, where: String): String {
             if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) {
                 throw NotionConfigException("$where.dataSourceId must be a data source id (bare, or a collection:// reference), not a URL: a URL names a database or a page")
             }
-            return normalizeNotionId(raw) ?: throw NotionConfigException("$where.dataSourceId is not a Notion id")
+            val exact = DATA_SOURCE_ID.matchEntire(raw)
+            if (exact != null) return normalizeNotionId(exact.groupValues[1])!!
+            if (normalizeNotionId(raw) == null) throw NotionConfigException("$where.dataSourceId is not a Notion id")
+            throw NotionConfigException("$where.dataSourceId must be a bare data source id or an exact collection:// reference; it has other text around the id, which may be a URL or a typo")
         }
     }
 }

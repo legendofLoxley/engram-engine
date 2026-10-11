@@ -140,6 +140,54 @@ class NotionTableSetConfigTest {
         rejected(json(tokenRef = "file:"))
     }
 
+    // ── Strictness that must not fail open ──────────────────────────────────
+
+    private fun oneTable(dataSourceId: String, extra: String = "") =
+        json(tables = """[{"name":"goals","dataSourceId":"$dataSourceId","access":"read-write"$extra}]""")
+
+    @Test
+    fun `a data source id with any text around it is refused rather than quietly extracted`() {
+        val bare = id(1)
+        val noDashes = bare.replace("-", "")
+        val surrounded = listOf(
+            "collections://$bare",
+            "garbage-$bare",
+            "notion.so/Some-Database-$noDashes",
+            "www.notion.so/$noDashes?v=$noDashes",
+            "$bare?v=abc",
+            "collection://$bare/",
+            "COLLECTION://$bare",
+            "${bare}x",
+            "db:$bare",
+        )
+        for (bad in surrounded) {
+            val e = rejected(oneTable(bad))
+            assertTrue(e.message!!.contains("exact collection:// reference"), "accepted or mis-reported '$bad': ${e.message}")
+        }
+    }
+
+    @Test
+    fun `the plain spellings of a data source id are all accepted and normalized`() {
+        val bare = id(1)
+        for (ok in listOf(bare, bare.replace("-", ""), bare.uppercase(), "collection://$bare", "collection://${bare.replace("-", "")}", "collection://${bare.uppercase()}")) {
+            assertEquals(bare, NotionTableSetConfig.parse(oneTable(ok)).tableSet.table("goals").dataSourceId, "rejected or mis-normalized '$ok'")
+        }
+    }
+
+    @Test
+    fun `an idempotency key property that is present but unusable is an error, not a silent opt-out`() {
+        for (bad in listOf("\"\"", "\"   \"", "123", "null", "true", "[]", "{}")) {
+            val e = rejected(oneTable(id(1), ""","idempotencyKeyProperty":$bad"""))
+            assertTrue(e.message!!.contains("tables[0].idempotencyKeyProperty must be a non-empty string"), "'$bad' was accepted or mis-reported: ${e.message}")
+        }
+    }
+
+    @Test
+    fun `leaving the idempotency key property out opts out, and a real name opts in`() {
+        assertNull(NotionTableSetConfig.parse(oneTable(id(1))).tableSet.table("goals").idempotencyKeyProperty)
+        assertEquals("Op key", NotionTableSetConfig.parse(oneTable(id(1), ""","idempotencyKeyProperty":"Op key"""")).tableSet.table("goals").idempotencyKeyProperty)
+    }
+
     @Test
     fun `a file token reference is accepted`() {
         assertEquals("file:/run/secrets/alfrd-worker", NotionTableSetConfig.parse(json(tokenRef = "file:/run/secrets/alfrd-worker")).tokenRef)

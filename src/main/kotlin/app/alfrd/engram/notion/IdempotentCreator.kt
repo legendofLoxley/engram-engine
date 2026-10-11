@@ -28,6 +28,14 @@ data class IdempotentCreateResult(val page: NotionPage, val outcome: CreateOutco
  * If it still cannot be found it rethrows the ambiguous failure and **does not create again**; the
  * caller defers, and the next [ensure] of the same key settles it.
  *
+ * **One writer per key.** Notion cannot enforce uniqueness, so [ensure] (find, then create) is not
+ * atomic. Two callers using the same key at the same time (two workers, or a worker that lost its
+ * lease but is still running) can both find nothing and both create. A query can also lag a fresh
+ * create, so an [ensure] issued immediately after a successful create may not see it. The guarantee
+ * here is only that *one* call whose outcome is unknown never becomes two rows. Callers must keep a
+ * key to a single writer: one worker per table set, and a lease that is checked before each write.
+ * An in-process lock would not cover a second process, so none is offered.
+ *
  * - [find] returns the oldest row with the key, or null.
  * - [create] writes the key itself, alongside the given properties.
  * - [ensure] is find-then-create, for callers that may be repeating work (a restart, a reclaimed lease).

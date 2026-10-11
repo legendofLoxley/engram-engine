@@ -109,6 +109,14 @@ A table opts in by naming a text (rich text) property in `idempotencyKeyProperty
 Keys are 1-200 characters, trimmed, no control characters, built from stable inputs (for example
 goal, cycle, plan version and task order) so repeating the same work yields the same key.
 
+**One writer per key.** Notion cannot enforce uniqueness, so `ensure` is find-then-create and is not
+atomic. Two callers using the same key at the same time (two workers, or a worker that lost its lease
+but is still running) can both find nothing and both create, and a query can lag a fresh create, so
+an `ensure` straight after a successful create may not see it. What the creator guarantees is that
+*one call* whose outcome is unknown never becomes two rows. Keeping a key to a single writer (one
+worker per table set, a lease checked before each write) is the caller's job; the client cannot do it
+for them, and an in-process lock would not cover a second process.
+
 `NotionDataSources.toTableSet(idempotentWrites = true)` opts the memory template's Items (`Op key`)
 and Sessions (`Key`) in. It is off by default, which keeps memory behaviour as it was.
 
