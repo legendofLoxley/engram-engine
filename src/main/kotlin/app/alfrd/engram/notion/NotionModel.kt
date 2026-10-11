@@ -178,6 +178,9 @@ open class NotionException(message: String, cause: Throwable? = null) : RuntimeE
 /** Notion answered with an error. [message] is Notion's own and is truncated; it describes the request's shape, not its content. */
 class NotionApiException(val status: Int, val code: String?, detail: String) :
     NotionException("Notion API error $status${code?.let { " ($it)" } ?: ""}: ${detail.take(MAX_DETAIL)}") {
+    /** The description, truncated the same way the message is. */
+    val detail: String = detail.take(MAX_DETAIL)
+
     private companion object { const val MAX_DETAIL = 300 }
 }
 
