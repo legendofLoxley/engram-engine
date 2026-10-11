@@ -57,6 +57,7 @@ class FakeNotionApi(
     private val pages = LinkedHashMap<String, Stored>()
     private val blocks = HashMap<String, MutableList<StoredBlock>>()
     private val faults = ArrayList<Triple<String, Throwable, Int>>()
+    private val lateFaults = ArrayList<Triple<String, Throwable, Int>>()
     private var counter = 0
 
     val requests = ArrayList<FakeRequest>()
@@ -66,6 +67,16 @@ class FakeNotionApi(
     /** Makes the next [times] calls of [operation] (`query`, `createPage`, `updatePage`, `retrievePage`, `appendBlocks`, `listBlocks`) throw [error] instead of running. The call is still recorded. */
     fun failNext(operation: String, error: Throwable, times: Int = 1) {
         faults += Triple(operation, error, times)
+    }
+
+    /**
+     * Like [failNext], but the call is applied first and the error is thrown afterwards: the write
+     * landed and the response was lost. This is the case that makes a create ambiguous. Supported for
+     * `createPage`, `updatePage` and `appendBlocks`.
+     */
+    fun failAfterApplying(operation: String, error: Throwable, times: Int = 1) {
+        require(operation in setOf("createPage", "updatePage", "appendBlocks")) { "$operation has nothing to apply" }
+        lateFaults += Triple(operation, error, times)
     }
 
     // ── Setup ────────────────────────────────────────────────────────────────
@@ -118,6 +129,7 @@ class FakeNotionApi(
         val stored = Stored(id, dataSourceId, now, truncate(now), HashMap())
         pages[id] = stored
         applyProperties(stored, source, properties)
+        throwLateFault("createPage")
         return stored.toPage()
     }
 
@@ -127,6 +139,7 @@ class FakeNotionApi(
         val source = stored.dataSourceId?.let { sources[it] } ?: throw invalid("page ${stored.id} has no properties to update")
         validate(properties, source.schema)
         applyProperties(stored, source, properties)
+        throwLateFault("updatePage")
         return stored.toPage()
     }
 
@@ -148,6 +161,7 @@ class FakeNotionApi(
         }
         this.blocks.getOrPut(parentBlockId) { ArrayList() }.addAll(added)
         if (added.isNotEmpty()) page.edited = truncate(now)
+        throwLateFault("appendBlocks")
     }
 
     override suspend fun listBlocks(parentBlockId: String, startCursor: String?, pageSize: Int): BlockPage {
@@ -171,6 +185,14 @@ class FakeNotionApi(
             if (times <= 1) faults.removeAt(index) else faults[index] = Triple(op, error, times - 1)
             throw error
         }
+    }
+
+    private fun throwLateFault(operation: String) {
+        val index = lateFaults.indexOfFirst { it.first == operation }
+        if (index < 0) return
+        val (op, error, times) = lateFaults[index]
+        if (times <= 1) lateFaults.removeAt(index) else lateFaults[index] = Triple(op, error, times - 1)
+        throw error
     }
 
     private fun truncate(at: Instant): Instant = at.truncatedTo(lastEditedGranularity)

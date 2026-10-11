@@ -89,7 +89,7 @@ class AllowlistedNotionApiTest {
     }
 
     @Test
-    fun `a page returned by a query is known afterwards, so it can be updated`() = runBlocking {
+    fun `a page returned by a query is known afterwards, so it can be updated`() = runBlocking<Unit> {
         val seeded = fake.createPage(items, mapOf("Item" to NotionValue.Title("seeded by hand"), "Kind" to NotionValue.Select("Task")))
         assertFalse(api.isKnownPage(seeded.id))
         violation { api.updatePage(seeded.id, mapOf("Tentative" to NotionValue.Checkbox(true))) }
@@ -131,14 +131,14 @@ class AllowlistedNotionApiTest {
     }
 
     @Test
-    fun `a relation to a page outside the configured tables is refused`() = runBlocking {
+    fun `a relation to a page outside the configured tables is refused`() = runBlocking<Unit> {
         val foreign = fake.createPage(template.foreignDataSourceId, mapOf("Name" to NotionValue.Title("foreign")))
         val mine = newItem("mine")
         violation { api.updatePage(mine.id, mapOf("Related" to NotionValue.Relation(listOf(foreign.id)))) }
     }
 
     @Test
-    fun `an empty relation, which clears it, needs no known target`() = runBlocking {
+    fun `an empty relation, which clears it, needs no known target`() = runBlocking<Unit> {
         val mine = newItem("mine")
         api.updatePage(mine.id, mapOf("Related" to NotionValue.Relation(emptyList())))
     }
@@ -167,7 +167,7 @@ class AllowlistedNotionApiTest {
     }
 
     @Test
-    fun `blocks of an unknown page, or of a page from a foreign table, cannot be listed`() = runBlocking {
+    fun `blocks of an unknown page, or of a page from a foreign table, cannot be listed`() = runBlocking<Unit> {
         val foreign = fake.createPage(template.foreignDataSourceId, mapOf("Name" to NotionValue.Title("foreign")))
         violation { api.listBlocks(foreign.id) }
         violation { api.listBlocks("00000000-0000-4000-8000-000000000000") }

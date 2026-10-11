@@ -2,7 +2,6 @@ package app.alfrd.engram.notion
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.io.File
 import java.time.DateTimeException
@@ -63,6 +62,26 @@ data class NotionDataSources(
 ) {
     /** The tables the adapter may read and write. The persona page is deliberately not among them. */
     val writableDataSourceIds: Set<String> get() = setOf(containers, items, entities, connections, sessions)
+
+    /**
+     * This memory template as a generic [NotionTableSet]: five read-write tables, blocks appendable
+     * to Sessions pages only (the ledger), the persona page readable and never writable.
+     *
+     * [idempotentWrites] opts Items (`Op key`) and Sessions (`Key`) in to guard-enforced idempotency
+     * keys. It is off by default, which keeps the memory behavior exactly as it was; the Notion-backed
+     * stores turn it on.
+     */
+    fun toTableSet(name: String = "alfrd-memory", idempotentWrites: Boolean = false): NotionTableSet = NotionTableSet(
+        name = name,
+        tables = listOf(
+            NotionTable("containers", containers),
+            NotionTable("items", items, idempotencyKeyProperty = NotionSchema.Items.OP_KEY.takeIf { idempotentWrites }),
+            NotionTable("entities", entities),
+            NotionTable("connections", connections),
+            NotionTable("sessions", sessions, pageBodyAppend = true, idempotencyKeyProperty = NotionSchema.Sessions.KEY.takeIf { idempotentWrites }),
+        ),
+        readablePages = listOf(NotionReadablePage("persona", personaPageId)),
+    )
 }
 
 /**
@@ -86,10 +105,14 @@ data class NotionDataSources(
  */
 data class NotionIdentityConfig(
     val identityId: String,
-    val tokenRef: String,
+    override val tokenRef: String,
     val dataSources: NotionDataSources,
     val timezone: ZoneId = ZoneId.of("UTC"),
-) {
+) : NotionSetBinding {
+
+    /** This person's memory tables as a table set named `alfrd-memory.<identityId>`, so identities can be checked against each other and against any other set. */
+    override val tableSet: NotionTableSet get() = dataSources.toTableSet(name = "alfrd-memory.$identityId")
+
     companion object {
         private val IDENTITY_ID = Regex("[A-Za-z0-9._-]{1,64}")
         private val TOP_LEVEL_KEYS = setOf("identityId", "storage", "tokenRef", "timezone", "dataSources")
@@ -139,15 +162,5 @@ data class NotionIdentityConfig(
             }
             return NotionIdentityConfig(identityId, tokenRef, parsed, timezone)
         }
-
-        private fun rejectUnknownKeys(obj: JsonObject, allowed: Set<String>, where: String) {
-            val unknown = obj.keys - allowed
-            if (unknown.isNotEmpty()) throw NotionConfigException("unknown key(s) in $where: ${unknown.sorted().joinToString(", ") { it.take(40) }}")
-        }
-
-        private fun JsonObject.optionalString(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
-
-        private fun JsonObject.requiredString(key: String): String =
-            optionalString(key) ?: throw NotionConfigException("$key is required and must be a non-empty string")
     }
 }
