@@ -223,7 +223,7 @@ class HttpNotionApiTest {
             "Container":{"id":"f","type":"relation","relation":[{"id":"$other"}],"has_more":false},
             "Related":{"id":"g","type":"relation","relation":[{"id":"$other"}],"has_more":true},
             "Created":{"id":"h","type":"created_time","created_time":"2026-10-06T12:00:00.000Z"},
-            "Calc":{"id":"i","type":"formula","formula":{"type":"string","string":"x"}}
+            "Owner":{"id":"i","type":"people","people":[{"object":"user","id":"$other"}]}
         """.trimIndent()))
         val page = api().retrievePage(pageId)
         assertEquals("GET", taken().method)
@@ -241,7 +241,8 @@ class HttpNotionApiTest {
         assertFalse(page.relationHasMore("Container"))
         assertTrue(page.relationHasMore("Related"))
         assertEquals(NotionValue.CreatedTime(Instant.parse("2026-10-06T12:00:00Z")), page.properties["Created"])
-        assertEquals(NotionValue.Unsupported("formula"), page.properties["Calc"])
+        // Formula, rollup, number, url and unique_id are modelled now (see HttpNotionApiPropertyTypesTest); people is not.
+        assertEquals(NotionValue.Unsupported("people"), page.properties["Owner"])
     }
 
     @Test

@@ -11,7 +11,9 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -184,7 +186,16 @@ class HttpNotionApi(
                     }
                 }
                 is NotionValue.Relation -> putJsonArray("relation") { value.ids.forEach { id -> add(buildJsonObject { put("id", id) }) } }
-                is NotionValue.CreatedTime, is NotionValue.Unsupported -> throw IllegalArgumentException("property '$propertyName' is read-only and cannot be written")
+                is NotionValue.NumberValue -> {
+                    val number = value.value
+                    if (number == null) put("number", JsonNull) else put("number", number)
+                }
+                is NotionValue.UrlValue -> {
+                    val url = value.value
+                    if (url == null) put("url", JsonNull) else put("url", url)
+                }
+                is NotionValue.CreatedTime, is NotionValue.Unsupported, is NotionValue.UniqueId, is NotionValue.Formula, is NotionValue.Rollup ->
+                    throw IllegalArgumentException("property '$propertyName' is a ${value.kindName} value, which Notion computes: it is read-only and cannot be written")
             }
         }
     }
@@ -279,7 +290,16 @@ class HttpNotionApi(
 
     private fun parseValue(prop: JsonObject): NotionValue = when (val type = (prop["type"] as? JsonPrimitive)?.contentOrNull) {
         "title" -> NotionValue.Title(plainText(prop["title"]))
-        "rich_text" -> NotionValue.RichText(plainText(prop["rich_text"]))
+        "rich_text" -> NotionValue.RichText(plainText(prop["rich_text"]), hrefs(prop["rich_text"]))
+        "number" -> NotionValue.NumberValue((prop["number"] as? JsonPrimitive)?.doubleOrNull)
+        "url" -> NotionValue.UrlValue((prop["url"] as? JsonPrimitive)?.contentOrNull)
+        "unique_id" -> (prop["unique_id"] as? JsonObject)?.let { id ->
+            val number = (id["number"] as? JsonPrimitive)?.longOrNull
+            if (number == null) NotionValue.Unsupported("unique_id")
+            else NotionValue.UniqueId((id["prefix"] as? JsonPrimitive)?.contentOrNull, number)
+        } ?: NotionValue.Unsupported("unique_id")
+        "formula" -> parseFormula(prop["formula"] as? JsonObject)
+        "rollup" -> parseRollup(prop["rollup"] as? JsonObject)
         "select" -> NotionValue.Select(((prop["select"] as? JsonObject)?.get("name") as? JsonPrimitive)?.contentOrNull)
         "checkbox" -> NotionValue.Checkbox((prop["checkbox"] as? JsonPrimitive)?.booleanOrNull ?: false)
         "date" -> (prop["date"] as? JsonObject)
@@ -308,6 +328,50 @@ class HttpNotionApi(
             segments = segments,
             createdTime = instant(obj["created_time"]),
         )
+    }
+
+    private fun parseFormula(formula: JsonObject?): NotionValue {
+        val type = (formula?.get("type") as? JsonPrimitive)?.contentOrNull ?: return NotionValue.Unsupported("formula")
+        return NotionValue.Formula(
+            type = type,
+            string = (formula["string"] as? JsonPrimitive)?.contentOrNull,
+            number = (formula["number"] as? JsonPrimitive)?.doubleOrNull,
+            boolean = (formula["boolean"] as? JsonPrimitive)?.booleanOrNull,
+            date = parseDate(formula["date"] as? JsonObject),
+        )
+    }
+
+    private fun parseRollup(rollup: JsonObject?): NotionValue {
+        val type = (rollup?.get("type") as? JsonPrimitive)?.contentOrNull ?: return NotionValue.Unsupported("rollup")
+        return NotionValue.Rollup(
+            type = type,
+            function = (rollup["function"] as? JsonPrimitive)?.contentOrNull,
+            number = (rollup["number"] as? JsonPrimitive)?.doubleOrNull,
+            date = parseDate(rollup["date"] as? JsonObject),
+            items = (rollup["array"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonObject)?.let(::parseValue) },
+        )
+    }
+
+    private fun parseDate(date: JsonObject?): NotionValue.DateValue? =
+        date?.let { NotionValue.DateValue((it["start"] as? JsonPrimitive)?.contentOrNull, (it["end"] as? JsonPrimitive)?.contentOrNull) }
+
+    /**
+     * The URLs attached to a rich-text array, in order and without repeats: a hyperlink's URL, a
+     * mention's `href`, and, when a page or database mention carries no `href`, a URL built from the
+     * mentioned id. A mention's `plain_text` is only its title, so this is the only way to learn where it points.
+     */
+    private fun hrefs(element: JsonElement?): List<String> = (element as? JsonArray).orEmpty().mapNotNull { run ->
+        val o = run.jsonObject
+        (o["href"] as? JsonPrimitive)?.contentOrNull
+            ?: (((o["text"] as? JsonObject)?.get("link") as? JsonObject)?.get("url") as? JsonPrimitive)?.contentOrNull
+            ?: mentionedUrl(o["mention"] as? JsonObject)
+    }.distinct()
+
+    private fun mentionedUrl(mention: JsonObject?): String? {
+        val kind = (mention?.get("type") as? JsonPrimitive)?.contentOrNull ?: return null
+        if (kind != "page" && kind != "database") return null
+        val id = (((mention[kind] as? JsonObject)?.get("id")) as? JsonPrimitive)?.contentOrNull?.let(::normalizeNotionId) ?: return null
+        return "https://www.notion.so/${id.replace("-", "")}"
     }
 
     private fun plainText(element: JsonElement?): String = (element as? JsonArray).orEmpty().joinToString("") { run ->

@@ -27,6 +27,10 @@ enum class TableAccess(val label: String) {
  *   of this one. Notion mirrors a dual relation onto the target row, so such a write also edits this
  *   table; it therefore defaults to true only for a writable table. Set it on a read-only table only
  *   after confirming the relation is one-way.
+ * - [databaseId] is the id of the database that contains this data source. It is **never sent to
+ *   Notion**; it exists so a link written as a database page (as people paste them) can be
+ *   recognized as pointing at this table. Optional, and informational: a wrong value only makes such
+ *   a link go unrecognized.
  */
 data class NotionTable(
     val name: String,
@@ -35,6 +39,7 @@ data class NotionTable(
     val pageBodyAppend: Boolean = false,
     val idempotencyKeyProperty: String? = null,
     val allowIncomingRelations: Boolean = access == TableAccess.READ_WRITE,
+    val databaseId: String? = null,
 ) {
     init {
         if (!NAME.matches(name)) throw NotionConfigException("table name must be 1-64 characters of letters, digits, '.', '_' or '-'")
@@ -48,6 +53,12 @@ data class NotionTable(
         if (idempotencyKeyProperty != null && (idempotencyKeyProperty.isBlank() || idempotencyKeyProperty.length > MAX_PROPERTY_NAME)) {
             throw NotionConfigException("table '$name' has an invalid idempotencyKeyProperty")
         }
+        if (databaseId != null && normalizeNotionId(databaseId) != databaseId) {
+            throw NotionConfigException("table '$name' needs a normalized (dashed, lowercase) database id")
+        }
+        if (databaseId != null && databaseId == dataSourceId) {
+            throw NotionConfigException("table '$name': databaseId and dataSourceId are the same id, so one of them is wrong")
+        }
     }
 
     val writable: Boolean get() = access == TableAccess.READ_WRITE
@@ -55,7 +66,7 @@ data class NotionTable(
     /** The same table with every write capability removed. Tightening is the only direction offered. */
     fun asReadOnly(): NotionTable =
         if (!writable) this
-        else NotionTable(name, dataSourceId, TableAccess.READ_ONLY, pageBodyAppend = false, idempotencyKeyProperty = null, allowIncomingRelations = false)
+        else NotionTable(name, dataSourceId, TableAccess.READ_ONLY, pageBodyAppend = false, idempotencyKeyProperty = null, allowIncomingRelations = false, databaseId = databaseId)
 
     private companion object {
         val NAME = Regex("[A-Za-z0-9._-]{1,64}")
@@ -88,6 +99,7 @@ data class NotionTableSet(
 ) {
     private val tablesByName: Map<String, NotionTable>
     private val tablesByDataSource: Map<String, NotionTable>
+    private val tablesByDatabase: Map<String, NotionTable>
 
     /** Page ids that may be read (retrieve, list blocks) and never written. */
     val readablePageIds: Set<String>
@@ -107,12 +119,16 @@ data class NotionTableSet(
         readablePages.groupBy { it.pageId }.values.firstOrNull { it.size > 1 }?.let { same ->
             throw NotionConfigException("table set '$name': readable pages ${same.joinToString(" and ") { "'${it.name}'" }} are the same page")
         }
+        tables.mapNotNull { t -> t.databaseId?.let { it to t } }.groupBy({ it.first }, { it.second }).values.firstOrNull { it.size > 1 }?.let { same ->
+            throw NotionConfigException("table set '$name': tables ${same.joinToString(" and ") { "'${it.name}'" }} have the same database id")
+        }
         val tableIds = tables.mapTo(HashSet()) { it.dataSourceId }
         readablePages.firstOrNull { it.pageId in tableIds }?.let {
             throw NotionConfigException("table set '$name': readable page '${it.name}' has the id of a table")
         }
         tablesByName = tables.associateBy { it.name }
         tablesByDataSource = tables.associateBy { it.dataSourceId }
+        tablesByDatabase = tables.mapNotNull { t -> t.databaseId?.let { it to t } }.toMap()
         readablePageIds = readablePages.mapTo(LinkedHashSet()) { it.pageId }
     }
 
@@ -121,6 +137,9 @@ data class NotionTableSet(
 
     /** The table for a data source id given in any accepted spelling, or null when it is not in this set. */
     fun tableForDataSource(dataSourceId: String): NotionTable? = normalizeNotionId(dataSourceId)?.let(tablesByDataSource::get)
+
+    /** The table whose *database* has this id, in any accepted spelling, or null. Used to recognize a link to a database page; it is never a way to address Notion. */
+    fun tableForDatabase(databaseId: String): NotionTable? = normalizeNotionId(databaseId)?.let(tablesByDatabase::get)
 
     /** The set with the named tables made read-only: for example, the PPS tables during a dry run. It can only tighten. */
     fun withReadOnly(tableNames: Collection<String>): NotionTableSet {

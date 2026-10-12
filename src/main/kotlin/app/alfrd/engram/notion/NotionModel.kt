@@ -16,10 +16,71 @@ fun normalizeNotionId(raw: String?): String? {
     return match.groupValues.drop(1).joinToString("-").lowercase()
 }
 
-/** One property value as this package reads and writes it. Types it never touches are kept only as [Unsupported] so a read never fails on them. */
+/**
+ * One property value as this package reads and writes it. Types it never touches are kept only as
+ * [Unsupported] so a read never fails on them.
+ *
+ * Values Notion assigns or computes ([CreatedTime], [UniqueId], [Formula], [Rollup], [Unsupported])
+ * are [isReadOnly]: they can be read and are never written. The guard refuses a write that carries one.
+ */
 sealed interface NotionValue {
+    /** True for a value Notion assigns or computes. It can be read; a write carrying one is refused. */
+    val isReadOnly: Boolean get() = false
+
     data class Title(val text: String) : NotionValue
-    data class RichText(val text: String) : NotionValue
+
+    /**
+     * [links] are the URLs attached to the text (a hyperlink, or the target of a page mention),
+     * in order and without repeats. They are read-only information: writing a value writes [text].
+     * A mention's text is only its title, so the URL of a mentioned page is available here and nowhere else.
+     */
+    data class RichText(val text: String, val links: List<String> = emptyList()) : NotionValue
+
+    /** [value] null is an empty number; written, it clears the property. */
+    data class NumberValue(val value: Double?) : NotionValue
+
+    /** [value] null is an empty URL; written, it clears the property. */
+    data class UrlValue(val value: String?) : NotionValue
+
+    /** An auto-increment id (`unique_id`), such as GOAL-1. Assigned by Notion. */
+    data class UniqueId(val prefix: String?, val number: Long) : NotionValue {
+        override val isReadOnly: Boolean get() = true
+
+        /** `GOAL-1` when there is a prefix, `1` when there is not. */
+        val display: String get() = if (prefix.isNullOrEmpty()) number.toString() else "$prefix-$number"
+    }
+
+    /** A formula's result. Exactly the member named by [type] is meaningful. Notion computes it, and does not return it from a data source query: read the page. */
+    data class Formula(
+        val type: String,
+        val string: String? = null,
+        val number: Double? = null,
+        val boolean: Boolean? = null,
+        val date: DateValue? = null,
+    ) : NotionValue {
+        override val isReadOnly: Boolean get() = true
+
+        /** A short rendering for reports; informational only. */
+        val display: String get() = when (type) {
+            "string" -> string.orEmpty()
+            "number" -> number?.let { if (it % 1.0 == 0.0) it.toLong().toString() else it.toString() }.orEmpty()
+            "boolean" -> boolean?.toString().orEmpty()
+            "date" -> date?.start.orEmpty()
+            else -> ""
+        }
+    }
+
+    /** A rollup's result: a [number], a [date], or the [items] of an array, per [type]. Computed by Notion; not returned from a data source query. */
+    data class Rollup(
+        val type: String,
+        val function: String? = null,
+        val number: Double? = null,
+        val date: DateValue? = null,
+        val items: List<NotionValue> = emptyList(),
+    ) : NotionValue {
+        override val isReadOnly: Boolean get() = true
+    }
+
     /** [name] null is an empty select; written, it clears the property. */
     data class Select(val name: String?) : NotionValue
     data class Checkbox(val checked: Boolean) : NotionValue
@@ -33,10 +94,18 @@ sealed interface NotionValue {
     data class Relation(val ids: List<String>, val hasMore: Boolean = false) : NotionValue
 
     /** Read-only. */
-    data class CreatedTime(val at: Instant) : NotionValue
+    data class CreatedTime(val at: Instant) : NotionValue {
+        override val isReadOnly: Boolean get() = true
+    }
 
-    data class Unsupported(val type: String) : NotionValue
+    /** A property type this package does not model. Read-only: it cannot be written. */
+    data class Unsupported(val type: String) : NotionValue {
+        override val isReadOnly: Boolean get() = true
+    }
 }
+
+/** The name of a value's kind for messages: `Formula`, `UniqueId` and so on. Never includes the value. */
+val NotionValue.kindName: String get() = this::class.simpleName ?: "value"
 
 /** A row of a data source (or a plain page, whose [dataSourceId] is null). */
 data class NotionPage(
@@ -49,6 +118,14 @@ data class NotionPage(
 ) {
     fun title(name: String): String = (properties[name] as? NotionValue.Title)?.text.orEmpty()
     fun text(name: String): String = (properties[name] as? NotionValue.RichText)?.text.orEmpty()
+
+    /** The URLs attached to a rich-text property: hyperlinks and the targets of page mentions. */
+    fun links(name: String): List<String> = (properties[name] as? NotionValue.RichText)?.links.orEmpty()
+    fun number(name: String): Double? = (properties[name] as? NotionValue.NumberValue)?.value
+    fun url(name: String): String? = (properties[name] as? NotionValue.UrlValue)?.value
+    fun uniqueId(name: String): NotionValue.UniqueId? = properties[name] as? NotionValue.UniqueId
+    fun formula(name: String): NotionValue.Formula? = properties[name] as? NotionValue.Formula
+    fun rollup(name: String): NotionValue.Rollup? = properties[name] as? NotionValue.Rollup
     fun select(name: String): String? = (properties[name] as? NotionValue.Select)?.name
     fun checkbox(name: String): Boolean = (properties[name] as? NotionValue.Checkbox)?.checked ?: false
     fun date(name: String): NotionValue.DateValue? = (properties[name] as? NotionValue.DateValue)?.takeIf { it.start != null }

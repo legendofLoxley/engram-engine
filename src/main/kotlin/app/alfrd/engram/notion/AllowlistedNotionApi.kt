@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
  * - A relation may only point at such a page, and only at a table that accepts incoming relations:
  *   Notion mirrors a dual relation onto its target, so a relation into a read-only table would edit it.
  * - Blocks are appended only to pages of tables configured for page-body appends (the memory ledger).
+ * - A write may not carry a value Notion computes (an auto-increment id, a created time, a formula
+ *   or a rollup, or a property type this package does not model).
  * - A table that opted in to an idempotency key must receive it on every create, and it can never be
  *   changed afterwards.
  * - Readable pages (the persona page) can be retrieved and listed and are never writable: they are
@@ -54,6 +56,7 @@ class AllowlistedNotionApi(
     override suspend fun createPage(dataSourceId: String, properties: Map<String, NotionValue>): NotionPage {
         val table = requireConfiguredTable(dataSourceId, "create")
         requireWritable(table, "create")
+        requireNoComputedValues(properties, "create")
         requireIdempotencyKey(table, properties)
         requireRelationTargetsAccept(properties, "create")
         return remember(withNotFoundHint(table) { delegate.createPage(table.dataSourceId, properties) }, "create")
@@ -62,6 +65,7 @@ class AllowlistedNotionApi(
     override suspend fun updatePage(pageId: String, properties: Map<String, NotionValue>): NotionPage {
         val (id, table) = requireKnownPage(pageId, "update")
         requireWritable(table, "update")
+        requireNoComputedValues(properties, "update")
         requireKeyUnchanged(table, properties)
         requireRelationTargetsAccept(properties, "update")
         return remember(delegate.updatePage(id, properties), "update")
@@ -104,6 +108,15 @@ class AllowlistedNotionApi(
         val table = knownPages[id]?.let(tables::get)
             ?: throw NotionGuardViolation("$operation refused: page $id was not returned from a configured table")
         return id to table
+    }
+
+    /** Notion assigns or computes these (auto-increment ids, created time, formulas, rollups), and rejects a write to them. Refuse it here, naming the property and the kind, never the value. */
+    private fun requireNoComputedValues(properties: Map<String, NotionValue>, operation: String) {
+        for ((name, value) in properties) {
+            if (value.isReadOnly) {
+                throw NotionGuardViolation("$operation refused: property '$name' is a ${value.kindName} value, which Notion computes, so it cannot be written")
+            }
+        }
     }
 
     private fun requireIdempotencyKey(table: NotionTable, properties: Map<String, NotionValue>) {
