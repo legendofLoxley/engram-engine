@@ -7,6 +7,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 
 // ── Records ──────────────────────────────────────────────────────────────────
@@ -101,7 +102,10 @@ fun NotionValue.DateValue?.toInstant(): Instant? {
     }
 }
 
-fun dateTimeValue(at: Instant?): NotionValue.DateValue = NotionValue.DateValue(at?.let { OffsetDateTime.ofInstant(it, ZoneOffset.UTC).toString() })
+/** Notion's own datetime format (`2026-10-12T10:02:00.000+00:00`). `OffsetDateTime.toString()` would drop the seconds when they are zero. */
+private val NOTION_DATETIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSxxx")
+
+fun dateTimeValue(at: Instant?): NotionValue.DateValue = NotionValue.DateValue(at?.let { NOTION_DATETIME.format(OffsetDateTime.ofInstant(it, ZoneOffset.UTC)) })
 
 private fun NotionPage.int(property: String): Int? = number(property)?.let { if (it % 1.0 == 0.0) it.toInt() else null }
 

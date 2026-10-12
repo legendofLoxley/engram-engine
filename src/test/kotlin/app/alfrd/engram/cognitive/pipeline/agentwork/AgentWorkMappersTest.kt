@@ -73,6 +73,13 @@ class AgentWorkMappersTest {
     }
 
     @Test
+    fun `a moment is written in Notion's own format, seconds included even when they are zero`() {
+        assertEquals("2026-10-12T10:02:00.000+00:00", dateTimeValue(Instant.parse("2026-10-12T10:02:00Z")).start)
+        assertEquals("2026-10-12T10:02:30.250+00:00", dateTimeValue(Instant.parse("2026-10-12T10:02:30.250Z")).start)
+        assertEquals("2026-10-12T00:00:00.000+00:00", dateTimeValue(Instant.parse("2026-10-12T00:00:00Z")).start)
+    }
+
+    @Test
     fun `a moment is written as a UTC datetime that reads back to the same moment`() {
         val at = Instant.parse("2026-10-12T10:15:30Z")
         val written = dateTimeValue(at)
