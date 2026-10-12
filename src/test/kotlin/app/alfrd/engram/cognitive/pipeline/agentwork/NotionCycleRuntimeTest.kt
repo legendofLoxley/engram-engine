@@ -259,4 +259,42 @@ class NotionCycleRuntimeTest {
             scope.cancel()
         }
     }
+
+    // ── The assembled stack ──────────────────────────────────────────────────
+
+    @Test
+    fun `the assembled client refuses a write to any PPS table, Goals and Escalations before a request is made`() = runBlocking {
+        val runtime = running(env(configFile(tokenFile().path)))
+        val api = runtime.api ?: error("the runtime must expose its client to tests")
+        val anyId = "11111111-1111-4111-8111-111111111111"
+        for (table in listOf("questions", "claims", "sources", "evidence", "goals", "escalations")) {
+            val dataSourceId = Regex(""""name":\s*"$table",\s*"dataSourceId":\s*"([0-9a-f-]+)"""").find(committed)!!.groupValues[1]
+            val refused = runCatching { api.createPage(dataSourceId, mapOf("Title" to app.alfrd.engram.notion.NotionValue.Title("x"))) }.exceptionOrNull()
+            assertTrue(refused is app.alfrd.engram.notion.NotionGuardViolation, "$table: expected the guard to refuse a create, got $refused")
+        }
+        val refusedUpdate = runCatching { api.updatePage(anyId, mapOf("Status" to app.alfrd.engram.notion.NotionValue.Select("Done"))) }.exceptionOrNull()
+        assertTrue(refusedUpdate is app.alfrd.engram.notion.NotionGuardViolation, "got $refusedUpdate")
+        assertEquals(0, server.requestCount, "a refused write must never reach Notion")
+    }
+
+    @Test
+    fun `a 429 from Notion is retried after its Retry-After and the poll still succeeds`() = runBlocking {
+        val waits = mutableListOf<Long>()
+        val startup = NotionCycleRuntime.fromEnvironment(
+            env = env(configFile(tokenFile().path)), llmClient = AgentWorkFixture.readPlan("a"), baseUrl = server.url("/").toString(),
+            limiter = RequestLimiter(100_000.0, 100_000),
+            retryPolicy = RetryPolicy(maxAttempts = 3, baseDelayMs = 1, maxDelayMs = 1, jitter = { 0 }),
+            sleep = { waits += it },
+        )
+        val runtime = (startup as NotionCycleStartup.Running).runtime
+        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "2").setHeader("Content-Type", "application/json").setBody("""{"object":"error","status":429,"code":"rate_limited","message":"slow down"}"""))
+        emptyResults()
+
+        runtime.channel.pollOnce()
+
+        assertEquals(0, runtime.channel.snapshot().consecutiveFailures, "the retry must have recovered the poll: ${runtime.channel.snapshot()}")
+        assertEquals(2, server.requestCount)
+        assertTrue(waits.any { it >= 2_000 }, "the wait must honor Retry-After (2s), saw $waits")
+        assertEquals(1, runtime.retriesMade)
+    }
 }

@@ -5,6 +5,7 @@ import app.alfrd.engram.cognitive.providers.local.LocalLlmClient
 import app.alfrd.engram.notion.AllowlistedNotionApi
 import app.alfrd.engram.notion.EnvAndFileSecretResolver
 import app.alfrd.engram.notion.HttpNotionApi
+import app.alfrd.engram.notion.NotionApi
 import app.alfrd.engram.notion.NotionConfigException
 import app.alfrd.engram.notion.RateLimitedNotionApi
 import app.alfrd.engram.notion.RequestLimiter
@@ -55,6 +56,8 @@ class NotionCycleRuntime(
     val traces: CycleTraceStore,
     val info: NotionCycleInfo,
     private val rateLimited: RateLimitedNotionApi,
+    /** The guarded client the processor uses, exposed to tests so they can check what the assembled stack refuses. Nothing outside this package and its tests touches it. */
+    internal val api: NotionApi? = null,
 ) {
     val requestsMade: Long get() = rateLimited.requestsMade
     val retriesMade: Long get() = rateLimited.retriesMade
@@ -133,7 +136,7 @@ class NotionCycleRuntime(
                 readWriteTables = tables.filter { it.access == TableAccess.READ_WRITE }.map { it.name }.sorted(),
                 readOnlyTables = tables.filter { it.access == TableAccess.READ_ONLY }.map { it.name }.sorted(),
             )
-            return NotionCycleStartup.Running(NotionCycleRuntime(channel, traces, info, rateLimited))
+            return NotionCycleStartup.Running(NotionCycleRuntime(channel, traces, info, rateLimited, guarded))
         }
 
         /**
