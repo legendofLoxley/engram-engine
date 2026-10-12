@@ -14,6 +14,7 @@ import app.alfrd.engram.notion.NotionValue
 import app.alfrd.engram.notion.RateLimitedNotionApi
 import app.alfrd.engram.notion.RequestLimiter
 import app.alfrd.engram.notion.RetryPolicy
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.time.Instant
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class CycleProcessorTest {
 
     private val set = AgentWorkConfig.load("deploy/config/notion-agent-worker.json").tableSet
