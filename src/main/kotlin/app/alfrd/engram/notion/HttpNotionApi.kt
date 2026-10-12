@@ -104,6 +104,36 @@ class HttpNotionApi(
         return BlockPage(blocks, nextCursor(json))
     }
 
+    /**
+     * The data sources this token can see, by id and title only (`POST /v1/search`, filtered to data
+     * sources). For the live probe: "which of the tables I expect can the token reach, and what else
+     * can it reach?". It is deliberately **not** on [NotionApi]: the guard stands between planner
+     * code and the workspace, and a listing of everything shared with the integration is not
+     * something planner code should be able to ask for. It returns metadata, no rows and no content.
+     */
+    suspend fun searchDataSources(maxPages: Int = 5): List<VisibleDataSource> {
+        val found = ArrayList<VisibleDataSource>()
+        var cursor: String? = null
+        repeat(maxPages) {
+            val body = buildJsonObject {
+                putJsonObject("filter") { put("property", "object"); put("value", "data_source") }
+                cursor?.let { put("start_cursor", it) }
+                put("page_size", NotionApi.MAX_PAGE_SIZE)
+            }
+            val json = send("POST", "/v1/search", body)
+            (json["results"] as? JsonArray).orEmpty().forEach { element ->
+                val obj = element as? JsonObject ?: return@forEach
+                if ((obj["object"] as? JsonPrimitive)?.contentOrNull != "data_source") return@forEach
+                val id = (obj["id"] as? JsonPrimitive)?.contentOrNull?.let(::normalizeNotionId) ?: return@forEach
+                val title = plainText(obj["title"])
+                found += VisibleDataSource(id, title.trim())
+            }
+            cursor = nextCursor(json)
+            if (cursor == null) return found
+        }
+        return found
+    }
+
     // ── Transport ────────────────────────────────────────────────────────────
 
     private suspend fun send(method: String, path: String, body: JsonObject?): JsonObject {
@@ -397,3 +427,6 @@ class HttpNotionApi(
             .build()
     }
 }
+
+/** A data source as `POST /v1/search` lists it: its id (normalized, dashed) and title. Nothing else about it is read. */
+data class VisibleDataSource(val id: String, val title: String)
