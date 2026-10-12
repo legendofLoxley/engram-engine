@@ -79,6 +79,23 @@ class LinkedContextReaderTest {
     }
 
     @Test
+    fun `an allowed page id outside the path of the url does not make the link allowed`() {
+        val memo = source("Oct 6 Board memo")
+        val context = read(sourcesDatabaseUrl)
+        val id = memo.id.replace("-", "")
+
+        assertTrue(context.allowed.allows("https://www.notion.so/$id"))
+        assertTrue(context.allowed.allows("https://www.notion.so/Board-memo-$id?pvs=4"))
+        // The id is somewhere other than the path: none of these addresses the allowed page.
+        assertFalse(context.allowed.allows("https://$id@www.notion.so/unrelated-page"), "user-info")
+        assertFalse(context.allowed.allows("https://www.notion.so/unrelated-page#$id"), "fragment")
+        assertFalse(context.allowed.allows("https://www.notion.so/unrelated-page?x=$id"), "query")
+        assertFalse(context.allowed.allows("https://www.notion.so/unrelated-page?p=$id"), "peek parameter")
+        // And a URL with user-info is refused even when its path is right.
+        assertFalse(context.allowed.allows("https://user:pw@www.notion.so/$id"), "user-info with the right path")
+    }
+
+    @Test
     fun `a row the goal did not link, and a url nobody supplied, are not allowed`() {
         source("Listed", url = "https://example.org/listed.pdf")
         val context = read(sourcesDatabaseUrl)

@@ -16,6 +16,9 @@ import app.alfrd.engram.notion.RequestLimiter
 import app.alfrd.engram.notion.RetryPolicy
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.advanceTimeBy
@@ -613,6 +616,76 @@ class CycleProcessorTest {
         assertEquals("Done", cycleRow(c.id).select("Status"))
         assertTrue(fake.requests.count { it.operation == "updatePage" } >= 5, "claim, two heartbeats, progress and finish should all have been written")
         assertTrue(results.single() is TickResult.Finished)
+    }
+
+    @Test
+    fun `a heartbeat still in flight when the cycle finishes cannot put the lease back on a finished cycle`() = runTest {
+        val c = cycle(goal().id)
+        val gate = CompletableDeferred<Unit>()
+        // A heartbeat is a write of Lease Until alone. Once its request is on the wire it cannot be recalled,
+        // hence NonCancellable: it lands whenever the gate opens, as a slow Notion response would.
+        val slowHeartbeat = object : NotionApi by api {
+            override suspend fun updatePage(pageId: String, properties: Map<String, NotionValue>): NotionPage {
+                val heartbeat = properties.keys == setOf("Lease Until") && (properties["Lease Until"] as? NotionValue.DateValue)?.start != null
+                if (heartbeat) withContext(NonCancellable) { gate.await() }
+                return api.updatePage(pageId, properties)
+            }
+        }
+        val model = object : LlmClient {
+            override suspend fun complete(request: LlmRequest): LlmResponse {
+                delay(50_000)
+                return LlmResponse("", toolCalls = listOf(ToolCall(CyclePlanDirector.TOOL_NAME, ScriptedLlm.planOf(read("Read A")))), latencyMs = 50_000, retryCount = 0)
+            }
+        }
+        val p = CycleProcessor(
+            slowHeartbeat, set, CyclePlanDirector(model), traces, "arx-1", { base.plusMillis(currentTime) },
+            leaseDuration = Duration.ofMinutes(2), heartbeatInterval = Duration.ofSeconds(40), sleep = {},
+        )
+
+        var results: List<TickResult> = emptyList()
+        val job = launch { results = p.runOnce() }
+        advanceTimeBy(45_000); runCurrent() // the heartbeat fired at 40s and is parked on the gate
+        advanceTimeBy(10_000); runCurrent() // the model has answered; the plan is written and the cycle is ready to finish
+        gate.complete(Unit)                 // the slow heartbeat response now lands
+        advanceTimeBy(5_000); runCurrent()
+        job.join()
+
+        assertEquals("Done", cycleRow(c.id).select("Status"))
+        assertNull(cycleRow(c.id).date("Lease Until"), "a finished cycle must not hold a lease")
+        assertTrue(results.single() is TickResult.Finished)
+    }
+
+    @Test
+    fun `a heartbeat that comes due while the cycle is being finished writes nothing afterwards`() = runTest {
+        val c = cycle(goal().id)
+        val gate = CompletableDeferred<Unit>()
+        // The finish write (the only one that sets Finished) is held open, as a slow Notion would hold it.
+        val slowFinish = object : NotionApi by api {
+            override suspend fun updatePage(pageId: String, properties: Map<String, NotionValue>): NotionPage {
+                if (properties.containsKey("Finished")) withContext(NonCancellable) { gate.await() }
+                return api.updatePage(pageId, properties)
+            }
+        }
+        val model = object : LlmClient {
+            override suspend fun complete(request: LlmRequest): LlmResponse {
+                delay(38_000)
+                return LlmResponse("", toolCalls = listOf(ToolCall(CyclePlanDirector.TOOL_NAME, ScriptedLlm.planOf(read("Read A")))), latencyMs = 38_000, retryCount = 0)
+            }
+        }
+        val p = CycleProcessor(
+            slowFinish, set, CyclePlanDirector(model), traces, "arx-1", { base.plusMillis(currentTime) },
+            leaseDuration = Duration.ofMinutes(2), heartbeatInterval = Duration.ofSeconds(40), sleep = {},
+        )
+
+        val job = launch { p.runOnce() }
+        advanceTimeBy(39_000); runCurrent() // the model answered at 38s and the finish write is open
+        advanceTimeBy(3_000); runCurrent()  // 42s: the heartbeat came due at 40s and is waiting behind the finish
+        gate.complete(Unit)
+        advanceTimeBy(5_000); runCurrent()
+        job.join()
+
+        assertEquals("Done", cycleRow(c.id).select("Status"))
+        assertNull(cycleRow(c.id).date("Lease Until"), "a heartbeat that was waiting behind the finish must not write after it")
     }
 
     // ── The trace ────────────────────────────────────────────────────────────

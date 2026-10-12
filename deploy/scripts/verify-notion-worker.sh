@@ -207,7 +207,10 @@ else
   skip "engram-dev.service process environment: service not running or not readable"
 fi
 
-if command -v journalctl >/dev/null 2>&1 && journalctl -u engram-dev.service --since "-1 day" --no-pager -q 2>/dev/null | head -c 1 | grep -q .; then
+# `head -c 1` closes the pipe after one byte and journalctl then dies of SIGPIPE; under pipefail that makes the
+# whole test "false" for a journal that is readable and non-empty, which would skip the leak scan below.
+# pipefail is switched off inside the subshell so the test answers only "is there any output".
+if command -v journalctl >/dev/null 2>&1 && ( set +o pipefail; journalctl -u engram-dev.service --since "-1 day" --no-pager -q 2>/dev/null | head -c 1 | grep -q . ); then
   if leaks_from journalctl -u engram-dev.service --since "-1 day" --no-pager -q; then fail "the token value appears in the last day of engram-dev.service logs"; else pass "the token value is not in the last day of engram-dev.service logs"; fi
 else
   skip "service journal: not readable by this user or empty"

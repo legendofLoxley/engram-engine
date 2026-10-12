@@ -119,6 +119,14 @@ class AgentWorkTablesTest {
     }
 
     @Test
+    fun `a read-only table that accepts incoming relations is refused, because the relation would be mirrored onto its rows`() {
+        for (name in listOf(AgentWorkTables.GOALS, AgentWorkTables.ESCALATIONS) + AgentWorkTables.PPS) {
+            val e = rejected { AgentWorkTables.requireDryRunShape(withTable(name) { it.copy(allowIncomingRelations = true) }) }
+            assertTrue(e.message!!.contains("incoming relations") && e.message!!.contains(name), "$name: ${e.message}")
+        }
+    }
+
+    @Test
     fun `a ninth table is refused even when it is read-only, so the writable-set check is not what stops it`() {
         val extra = NotionTable("extra", "99999999-9999-4999-8999-999999999999", TableAccess.READ_ONLY)
         val e = rejected { AgentWorkTables.requireDryRunShape(set.copy(tables = set.tables + extra)) }

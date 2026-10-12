@@ -167,6 +167,39 @@ class CyclePlanDirectorTest {
     }
 
     @Test
+    fun `cancellation is not a model failure and propagates, so the cycle is left Running for a later reclaim`() {
+        val llm = ScriptedLlm { throw kotlinx.coroutines.CancellationException("the poll was cancelled") }
+        val thrown = runCatching { propose(llm) }.exceptionOrNull()
+        assertTrue(thrown is kotlinx.coroutines.CancellationException, "expected cancellation to propagate, got $thrown")
+    }
+
+    @Test
+    fun `a table and an outside link the goal names are shown to the model, since the validator allows them`() {
+        val table = "https://www.notion.so/6e9ea25de7334d899d7a52783509ff54"
+        val outside = "https://example.org/the-whole-ledger.pdf"
+        val prompt = PlanPromptBuilder.build(
+            input(
+                context = context(
+                    rows = listOf(memoRow),
+                    outcomes = listOf(LinkOutcome.TableListed(table, "sources", 1, truncated = false), LinkOutcome.External(outside)),
+                ),
+            ),
+        )
+        val section = prompt.substringAfter("LINKS YOU MAY USE").substringBefore("LINKS ON THE GOAL")
+        assertTrue(section.contains(table) && section.contains("table: sources"), section)
+        assertTrue(section.contains(outside) && section.contains("outside link"), section)
+        assertTrue(section.contains(memoRow.pageUrl), "rows are still listed: $section")
+    }
+
+    @Test
+    fun `a goal whose only link is an outside url does not say it links to nothing`() {
+        val outside = "https://example.org/only-link.pdf"
+        val prompt = PlanPromptBuilder.build(input(context = context(rows = emptyList(), outcomes = listOf(LinkOutcome.External(outside)))))
+        assertTrue(prompt.contains(outside))
+        assertFalse(prompt.contains("this goal links to no readable page"), prompt)
+    }
+
+    @Test
     fun `an answer with no tool call, a wrong tool, or no task list is rejected with a code`() {
         assertEquals("no_tool_call", propose(ScriptedLlm { LlmResponse("I would plan this...", latencyMs = 1, retryCount = 0) }).rejectedReason)
         assertEquals("no_tool_call", propose(ScriptedLlm.answering(ScriptedLlm.planOf(), name = "some_other_tool")).rejectedReason)

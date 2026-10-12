@@ -59,6 +59,13 @@ object AgentWorkTables {
         if (set.readablePages.isNotEmpty()) {
             throw NotionConfigException("this increment reads no page that is not a row of a configured table")
         }
+        // A relation is replaced as a whole and Notion mirrors it onto the other table's row. A read-only table
+        // that accepts incoming relations would therefore be written to, through the table that points at it.
+        set.tables.firstOrNull { it.access == TableAccess.READ_ONLY && it.allowIncomingRelations }?.let {
+            throw NotionConfigException(
+                "table '${it.name}' is read-only but allows incoming relations; a relation written from another table would be mirrored onto its rows",
+            )
+        }
     }
 }
 

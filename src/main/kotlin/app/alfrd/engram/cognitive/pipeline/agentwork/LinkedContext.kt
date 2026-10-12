@@ -28,7 +28,7 @@ class AllowedLinks(pageIds: Set<String>, externalUrls: Set<String>) {
 
     fun allows(url: String): Boolean {
         val trimmed = url.trim()
-        if (isNotionUrl(trimmed)) return normalizeNotionId(trimmed)?.let { it in pages } == true
+        if (isNotionUrl(trimmed)) return pageIdInPath(trimmed)?.let { it in pages } == true
         return canonicalExternal(trimmed)?.let { it in external } == true
     }
 
@@ -38,6 +38,17 @@ class AllowedLinks(pageIds: Set<String>, externalUrls: Set<String>) {
         fun isNotionUrl(url: String): Boolean {
             val host = hostOf(url) ?: return false
             return host == "notion.so" || host.endsWith(".notion.so") || host == "notion.com" || host.endsWith(".notion.com") || host.endsWith(".notion.site")
+        }
+
+        /**
+         * The page id a Notion URL addresses: the one in its **path**. An id in the user-info
+         * (`https://<id>@www.notion.so/other`), the fragment or the query does not address that page, so it
+         * must not make the link look allowed. A URL with user-info is refused outright.
+         */
+        fun pageIdInPath(url: String): String? {
+            val uri = parse(url) ?: return null
+            if (uri.rawUserInfo != null) return null
+            return normalizeNotionId(uri.rawPath)
         }
 
         /** `https` or `http` only; scheme and host lowercased; no fragment; no trailing slash. Null for anything else. */

@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.ToolDefinition
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -72,6 +73,9 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
                     temperature = 0.2,
                 ),
             )
+        } catch (e: CancellationException) {
+            // Shutdown or a cancelled poll is not a model failure: let it propagate so the cycle is left Running for a later reclaim.
+            throw e
         } catch (e: Exception) {
             val latencyMs = System.currentTimeMillis() - startMs
             // Class name only: an exception message from a provider could echo a prompt.
@@ -198,6 +202,17 @@ object PlanPromptBuilder {
 
             val context = input.context
             appendLine("LINKS YOU MAY USE (target_links must be copied exactly from this list):")
+            // The goal's own links first (at most a dozen): a table or an outside URL the goal names is allowed by
+            // the validator, so the model has to be able to see it. Rows come after and are cut first if room runs out.
+            var goalLinks = 0
+            for (outcome in context.outcomes) {
+                when (outcome) {
+                    is LinkOutcome.TableListed -> appendLine("- ${outcome.link}  [table: ${outcome.table}, ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more not listed" else ""}]")
+                    is LinkOutcome.External -> appendLine("- ${outcome.link}  [outside link on the goal]")
+                    else -> continue
+                }
+                goalLinks++
+            }
             val budgetForRows = MAX_CHARS - length - 1_500
             var used = 0
             var shown = 0
@@ -213,7 +228,7 @@ object PlanPromptBuilder {
                 shown++
             }
             if (shown < context.rows.size) appendLine("(${context.rows.size - shown} more rows not shown: out of room)")
-            if (context.rows.isEmpty()) appendLine("(none: this goal links to no readable page, so tasks have no links)")
+            if (context.rows.isEmpty() && goalLinks == 0) appendLine("(none: this goal links to no readable page, so tasks have no links)")
             appendLine()
 
             val skipped = context.skipped

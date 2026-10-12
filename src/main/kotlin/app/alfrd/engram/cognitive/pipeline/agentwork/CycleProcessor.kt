@@ -13,6 +13,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
@@ -57,6 +59,18 @@ class CycleProcessor(
     private val reader = LinkedContextReader(api, tableSet)
     private val taskCreator = IdempotentCreator(api, tableSet.table(AgentWorkTables.AGENT_TASKS), sleep)
 
+    /**
+     * Orders the heartbeat against the terminal write of the same cycle. Both are `PATCH`es of one page; if
+     * a heartbeat is still in flight when the cycle finishes, it could land after the finish and put a future
+     * lease back on a Done or Failed cycle. [finish] takes this lock, so it waits for a heartbeat in flight,
+     * and sets [released] so none starts after it.
+     */
+    private class LeaseGuard {
+        val mutex = Mutex()
+        var released = false
+    }
+
+    private val leaseGuards = ConcurrentHashMap<String, LeaseGuard>()
     private val attempts = ConcurrentHashMap<String, Int>()
     private val reportedIgnored = ConcurrentHashMap.newKeySet<String>()
 
@@ -159,11 +173,14 @@ class CycleProcessor(
             logger.info("notion-cycles: claimed cycle {} goal {} reclaim={} attempt={}", label ?: cycle.pageId, goal?.displayId ?: "?", selected.reclaim, attempt)
 
             return coroutineScope {
+                val guard = LeaseGuard().also { leaseGuards[claimed.pageId] = it }
                 val heartbeat = launch {
                     while (isActive) {
                         delay(heartbeatInterval.toMillis())
                         try {
-                            api.updatePage(claimed.pageId, CycleMapper.heartbeat(clock().plus(leaseDuration)))
+                            guard.mutex.withLock {
+                                if (!guard.released) api.updatePage(claimed.pageId, CycleMapper.heartbeat(clock().plus(leaseDuration)))
+                            }
                         } catch (e: NotionException) {
                             logger.warn("notion-cycles: heartbeat for cycle {} failed: {}", label ?: claimed.pageId, e::class.java.simpleName)
                         }
@@ -173,6 +190,7 @@ class CycleProcessor(
                     work(claimed, goal, trace)
                 } finally {
                     heartbeat.cancel()
+                    leaseGuards.remove(claimed.pageId)
                 }
             }
         } catch (e: CancellationException) {
@@ -341,7 +359,15 @@ class CycleProcessor(
     // ── Finishing and describing ─────────────────────────────────────────────
 
     private suspend fun finish(cycle: Cycle, trace: CyclePlanTrace, status: CycleStatus, summary: String): TickResult {
-        api.updatePage(cycle.pageId, CycleMapper.finish(status, clock(), summary))
+        val guard = leaseGuards[cycle.pageId]
+        if (guard == null) {
+            api.updatePage(cycle.pageId, CycleMapper.finish(status, clock(), summary))
+        } else {
+            guard.mutex.withLock {
+                guard.released = true
+                api.updatePage(cycle.pageId, CycleMapper.finish(status, clock(), summary))
+            }
+        }
         attempts.remove(cycle.pageId)
         trace.outcome = status.label.lowercase()
         trace.summary = summary
