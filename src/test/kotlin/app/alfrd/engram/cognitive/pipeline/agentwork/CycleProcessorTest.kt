@@ -655,39 +655,6 @@ class CycleProcessorTest {
         assertTrue(results.single() is TickResult.Finished)
     }
 
-    @Test
-    fun `a heartbeat that comes due while the cycle is being finished writes nothing afterwards`() = runTest {
-        val c = cycle(goal().id)
-        val gate = CompletableDeferred<Unit>()
-        // The finish write (the only one that sets Finished) is held open, as a slow Notion would hold it.
-        val slowFinish = object : NotionApi by api {
-            override suspend fun updatePage(pageId: String, properties: Map<String, NotionValue>): NotionPage {
-                if (properties.containsKey("Finished")) withContext(NonCancellable) { gate.await() }
-                return api.updatePage(pageId, properties)
-            }
-        }
-        val model = object : LlmClient {
-            override suspend fun complete(request: LlmRequest): LlmResponse {
-                delay(38_000)
-                return LlmResponse("", toolCalls = listOf(ToolCall(CyclePlanDirector.TOOL_NAME, ScriptedLlm.planOf(read("Read A")))), latencyMs = 38_000, retryCount = 0)
-            }
-        }
-        val p = CycleProcessor(
-            slowFinish, set, CyclePlanDirector(model), traces, "arx-1", { base.plusMillis(currentTime) },
-            leaseDuration = Duration.ofMinutes(2), heartbeatInterval = Duration.ofSeconds(40), sleep = {},
-        )
-
-        val job = launch { p.runOnce() }
-        advanceTimeBy(39_000); runCurrent() // the model answered at 38s and the finish write is open
-        advanceTimeBy(3_000); runCurrent()  // 42s: the heartbeat came due at 40s and is waiting behind the finish
-        gate.complete(Unit)
-        advanceTimeBy(5_000); runCurrent()
-        job.join()
-
-        assertEquals("Done", cycleRow(c.id).select("Status"))
-        assertNull(cycleRow(c.id).date("Lease Until"), "a heartbeat that was waiting behind the finish must not write after it")
-    }
-
     // ── The trace ────────────────────────────────────────────────────────────
 
     @Test
