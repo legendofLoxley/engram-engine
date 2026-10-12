@@ -13,10 +13,17 @@
 #   2. it lies outside the git checkout and is not tracked
 #   3. THE JVM CAN READ IT AS THE SERVICE USER, in the same way the service runs: a transient
 #      systemd unit (same manager, same SELinux domain transition as engram-dev.service) runs the
-#      probe's --check-token mode. This is the check that matters under SELinux enforcing; an
-#      interactive shell (unconfined_t) proves nothing about it, so without root this check is
-#      downgraded to a WARN rather than passed.
-#   4. no AVC denial was logged for that read
+#      probe's --check-token mode. The JVM is started THROUGH /usr/bin/bash, as engram-dev.service
+#      starts it: systemd exec'ing a binary under /home directly is denied for init_t
+#      ({ execute } on a gconf_home_t/user_home_t file, exit 203/EXEC) while the same binary
+#      started by bash is allowed, so a direct launch fails for a reason that says nothing about
+#      the token. This is the check that matters under SELinux enforcing; an interactive shell
+#      (unconfined_t) proves nothing about it, so without root this check is downgraded to a WARN
+#      rather than passed.
+#   4. no AVC denial was logged for that launch: for the JVM binary, the probe jar or the token
+#      file (a denial on the binary or the jar means the token was never reached, so matching only
+#      the token file's name misses exactly the failure that check 3 reports). If ausearch itself
+#      cannot run, this FAILs rather than reporting a pass it did not earn.
 #   5. it lies under no Hermes mount: the configured Hermes home and workspace, the WebUI home, and
 #      the Source of every mount of every running container
 #   6. the token value is in no running container's environment or mounts config, not in the
@@ -26,7 +33,7 @@
 # Exit status: 0 when nothing FAILed (WARNs and SKIPs are printed and counted), 1 otherwise.
 #
 # Overrides (for another box or for testing): REPO_DIR, NOTION_TOKEN_FILE, SERVICE_USER,
-# EXPECT_OWNER, JAVA_BIN, PROBE_CLASSPATH, NOTION_WORKER_CONFIG, HERMES_DEV_HOME_DIR,
+# EXPECT_OWNER, JAVA_BIN, BASH_BIN, PROBE_CLASSPATH, NOTION_WORKER_CONFIG, HERMES_DEV_HOME_DIR,
 # HERMES_DEV_WORKSPACE_DIR, WEBUI_DEV_DIR.
 set -euo pipefail
 set +x  # never trace: a traced line could show the token
@@ -37,6 +44,7 @@ TOKEN_FILE="${NOTION_TOKEN_FILE:-$WEBUI_DEV_DIR/.notion-worker-token}"
 SERVICE_USER="${SERVICE_USER:-halo}"
 EXPECT_OWNER="${EXPECT_OWNER:-$SERVICE_USER:$SERVICE_USER}"
 JAVA_BIN="${JAVA_BIN:-/home/halo/.local/jdks/jdk-21.0.12.1+1/bin/java}"
+BASH_BIN="${BASH_BIN:-/usr/bin/bash}"
 PROBE_CLASSPATH="${PROBE_CLASSPATH:-$REPO_DIR/build/libs/engram-engine.jar}"
 CONFIG="${NOTION_WORKER_CONFIG:-$REPO_DIR/deploy/config/notion-agent-worker.json}"
 HERMES_HOME_DIR="${HERMES_DEV_HOME_DIR:-/home/halo/development/hermes-dev/home}"
@@ -92,6 +100,10 @@ fi
 
 probe_args=(-cp "$PROBE_CLASSPATH" app.alfrd.engram.scripts.NotionWorkerProbeKt --check-token --config "$CONFIG")
 read_started="$(date '+%Y-%m-%d %H:%M:%S')"
+# ausearch -ts takes TWO arguments, a date in the locale's own format ("10/12/2026" in en_US) and a
+# time. An ISO date is rejected with "Invalid start date", and that exit status (1) is the same as
+# "no matches", which is why the AVC check below inspects ausearch's output, not its status.
+audit_date="$(date '+%x')"; audit_time="$(date '+%T')"
 if [ ! -x "$JAVA_BIN" ]; then
   skip "JVM read: $JAVA_BIN is not executable"
 elif [ ! -r "$PROBE_CLASSPATH" ]; then
@@ -99,11 +111,13 @@ elif [ ! -r "$PROBE_CLASSPATH" ]; then
 else
   jvm_out=""; jvm_rc=0
   if [ "$(id -u)" = "0" ] && command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    jvm_out="$(systemd-run --quiet --wait --pipe --collect --uid="$SERVICE_USER" "$JAVA_BIN" "${probe_args[@]}" 2>&1)" || jvm_rc=$?
-    mode_note="transient systemd unit as $SERVICE_USER"
+    # Through bash, like engram-dev.service: `exec "$@"` replaces bash with the JVM, so the JVM is the
+    # unit's main process; systemd never exec's the JDK itself (see check 3 in the header).
+    jvm_out="$(systemd-run --quiet --wait --pipe --collect --uid="$SERVICE_USER" "$BASH_BIN" -c 'exec "$@"' bash "$JAVA_BIN" "${probe_args[@]}" 2>&1)" || jvm_rc=$?
+    mode_note="transient systemd unit as $SERVICE_USER, started through $BASH_BIN"
   elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    jvm_out="$(sudo -n systemd-run --quiet --wait --pipe --collect --uid="$SERVICE_USER" "$JAVA_BIN" "${probe_args[@]}" 2>&1)" || jvm_rc=$?
-    mode_note="transient systemd unit as $SERVICE_USER (via sudo)"
+    jvm_out="$(sudo -n systemd-run --quiet --wait --pipe --collect --uid="$SERVICE_USER" "$BASH_BIN" -c 'exec "$@"' bash "$JAVA_BIN" "${probe_args[@]}" 2>&1)" || jvm_rc=$?
+    mode_note="transient systemd unit as $SERVICE_USER, started through $BASH_BIN (via sudo)"
   else
     jvm_out="$("$JAVA_BIN" "${probe_args[@]}" 2>&1)" || jvm_rc=$?
     mode_note="interactive shell"
@@ -118,16 +132,33 @@ else
     fail "JVM could NOT read the token ($mode_note, exit $jvm_rc): $(printf '%s' "$jvm_out" | grep -v '^$' | head -3 | tr '\n' ' ')"
   fi
 
-  # ── 4. AVC denials for that read ───────────────────────────────────────────
+  # ── 4. AVC denials for that launch ─────────────────────────────────────────
+  # Any denial in the window whose target is the JVM binary, the probe jar or the token file (or whose
+  # command is the JVM). Matching only the token file's name missed a denied { execute } on the JDK,
+  # which stops the launch before the token is ever read. Audit lines carry names, contexts and
+  # permissions, never file contents, so printing a few of them cannot show the token.
   can_root=0
   if [ "$(id -u)" = "0" ] || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }; then can_root=1; fi
   if command -v ausearch >/dev/null 2>&1 && [ "$can_root" -eq 1 ]; then
     run_root() { if [ "$(id -u)" = "0" ]; then "$@"; else sudo -n "$@"; fi; }
-    denials="$(run_root ausearch -m AVC,USER_AVC -ts "$read_started" 2>/dev/null | grep -c 'notion-worker-token' || true)"
-    if [ "${denials:-0}" -gt 0 ]; then
-      fail "$denials SELinux denial(s) mention .notion-worker-token since $read_started (see: ausearch -m AVC -ts '$read_started')"
+    java_name="$(basename "$JAVA_BIN")"; jar_name="$(basename "$PROBE_CLASSPATH")"; token_name="$(basename "$TOKEN_FILE")"
+    ausearch_out="$(run_root ausearch -m AVC,USER_AVC -ts "$audit_date" "$audit_time" 2>&1 || true)"
+    # ausearch prints audit records ("type=..."), "----"/"time->" separators and "<no matches>"; anything
+    # else is its own complaint (a bad -ts value, a bad option), and its exit status cannot tell that
+    # apart from "no matches".
+    ausearch_err="$(printf '%s\n' "$ausearch_out" | grep -v -E '^(type=|----|time->|<no matches>|$)' | head -1 || true)"
+    if [ -n "$ausearch_err" ]; then
+      fail "AVC check could not run (ausearch said: $ausearch_err)"
     else
-      pass "no SELinux denial mentions .notion-worker-token since $read_started"
+      denied="$(printf '%s\n' "$ausearch_out" | grep 'denied' \
+        | grep -F -e "name=\"$java_name\"" -e "name=\"$jar_name\"" -e "name=\"$token_name\"" \
+                  -e "comm=\"($java_name)\"" -e "comm=\"$java_name\"" || true)"
+      if [ -n "$denied" ]; then
+        fail "$(printf '%s\n' "$denied" | wc -l) SELinux denial(s) for $java_name, $jar_name or $token_name since $read_started (see: ausearch -m AVC -ts $audit_date $audit_time)"
+        printf '%s\n' "$denied" | sed -E 's/audit\([0-9.:]+\)//; s/^type=[A-Z_]+ msg= *//' | head -3 | sed 's/^/        /'
+      else
+        pass "no SELinux denial for $java_name, $jar_name or $token_name since $read_started"
+      fi
     fi
   else
     skip "AVC check: ausearch or root not available"
