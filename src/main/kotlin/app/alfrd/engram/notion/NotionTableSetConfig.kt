@@ -41,7 +41,7 @@ data class NotionTableSetConfig(
 
     companion object {
         private val TOP_LEVEL_KEYS = setOf("setName", "tokenRef", "tables", "readablePages")
-        private val TABLE_KEYS = setOf("name", "dataSourceId", "access", "pageBodyAppend", "idempotencyKeyProperty", "allowIncomingRelations")
+        private val TABLE_KEYS = setOf("name", "dataSourceId", "databaseId", "access", "pageBodyAppend", "idempotencyKeyProperty", "allowIncomingRelations")
         private val PAGE_KEYS = setOf("name", "pageId")
 
         fun parse(json: String): NotionTableSetConfig {
@@ -77,6 +77,7 @@ data class NotionTableSetConfig(
                 pageBodyAppend = obj.optionalBoolean("pageBodyAppend", where) ?: false,
                 idempotencyKeyProperty = idempotencyKeyProperty(obj, where),
                 allowIncomingRelations = obj.optionalBoolean("allowIncomingRelations", where) ?: (access == TableAccess.READ_WRITE),
+                databaseId = databaseId(obj, where),
             )
         }
 
@@ -93,6 +94,18 @@ data class NotionTableSetConfig(
             return obj.optionalString("idempotencyKeyProperty")
                 ?: throw NotionConfigException("$where.idempotencyKeyProperty must be a non-empty string when present; leave it out to opt out")
         }
+
+        /** Absent means the table has no database id recorded. Present, it must be exactly a bare id: a `collection://` reference names a data source, and a URL may name anything. */
+        private fun databaseId(obj: JsonObject, where: String): String? {
+            if (!obj.containsKey("databaseId")) return null
+            val raw = obj.optionalString("databaseId")
+                ?: throw NotionConfigException("$where.databaseId must be a non-empty string when present; leave it out if unknown")
+            val exact = BARE_ID.matchEntire(raw)
+                ?: throw NotionConfigException("$where.databaseId must be a bare database id (not a URL, and not a collection:// reference)")
+            return normalizeNotionId(exact.value)!!
+        }
+
+        private val BARE_ID = Regex("[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}")
 
         /** The whole value must be a data source id, bare or as an exact `collection://` reference. Text around an id is not stripped off. */
         private val DATA_SOURCE_ID = Regex("(?:collection://)?([0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12})")

@@ -30,7 +30,7 @@ class NotionSetRegistry(bindings: List<NotionSetBinding>) {
             tokenOwner.put(binding.tokenRef, set)?.let { other ->
                 throw NotionConfigException("table sets '$other' and '$set' share a token reference; each set needs its own token")
             }
-            val ids = binding.tableSet.tables.map { it.dataSourceId } + binding.tableSet.readablePages.map { it.pageId }
+            val ids = binding.tableSet.tables.flatMap { listOfNotNull(it.dataSourceId, it.databaseId) } + binding.tableSet.readablePages.map { it.pageId }
             for (id in ids) {
                 idOwner.put(id, set)?.let { other ->
                     throw NotionConfigException("table sets '$other' and '$set' both include $id; a table or page belongs to one set")

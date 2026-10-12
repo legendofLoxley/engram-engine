@@ -7,6 +7,8 @@ import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
+import app.alfrd.engram.api.configureDebugNotionCycleRoutes
+import app.alfrd.engram.cognitive.pipeline.agentwork.bootstrapNotionCycles
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
 import app.alfrd.engram.api.configureOnboardingRoutes
@@ -35,6 +37,10 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.routing.*
 import io.ktor.server.http.content.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
@@ -111,6 +117,14 @@ fun main() {
     lateinit var sessionManager: SessionManager
     sessionManager = SessionManager(factory = { CognitivePipelineFactory.create(db, sessionManager) })
 
+    // The Director's Notion input channel (Queued cycles -> dry-run plan). Off unless NOTION_WORKER_CONFIG
+    // is set; a bad configuration is logged and leaves it off, never stops the engine. Cancelling the
+    // scope on shutdown leaves a cycle that is mid-plan Running with a lease that runs out, which is
+    // exactly what the next process reclaims.
+    val notionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val notionStartup = bootstrapNotionCycles(notionScope)
+    Runtime.getRuntime().addShutdownHook(Thread { notionScope.cancel() })
+
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
     // Defaults to Ktor's own default (0.0.0.0) so production/container behavior is unchanged;
     // set HOST=127.0.0.1 for a loopback-only local run.
@@ -160,6 +174,7 @@ fun main() {
             configureDebugActorEventRoutes(db)
             configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
             configureDebugHermesActivityRoutes(db, hermesActiveAssignments)
+            configureDebugNotionCycleRoutes(notionStartup)
             log.info("debug-converse endpoint enabled")
         }
         routing {

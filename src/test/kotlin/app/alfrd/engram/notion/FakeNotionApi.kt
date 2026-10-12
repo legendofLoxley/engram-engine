@@ -12,7 +12,16 @@ sealed interface FakeProperty {
     data object RichText : FakeProperty
     data object Checkbox : FakeProperty
     data object Date : FakeProperty
+    data object Number : FakeProperty
+    data object Url : FakeProperty
     data class Select(val options: Set<String>) : FakeProperty
+
+    /** An auto-increment id (`GOAL-1`, `GOAL-2`, ...). Assigned on create, never writable. */
+    data class UniqueId(val prefix: String) : FakeProperty
+
+    /** Computed by Notion: never writable, and, as in the real API, left out of a query's results and present in a page read. Tests set the value with [FakeNotionApi.setComputed]. */
+    data object Formula : FakeProperty
+    data object Rollup : FakeProperty
 
     /** [dual] names the property on the target that mirrors this one; Notion keeps the pair in step, and so does the fake. */
     data class Relation(val target: String, val dual: String?) : FakeProperty
@@ -59,6 +68,7 @@ class FakeNotionApi(
     private val faults = ArrayList<Triple<String, Throwable, Int>>()
     private val lateFaults = ArrayList<Triple<String, Throwable, Int>>()
     private var counter = 0
+    private val uniqueIds = HashMap<Pair<String, String>, Long>()
 
     val requests = ArrayList<FakeRequest>()
 
@@ -91,6 +101,16 @@ class FakeNotionApi(
         sources[id] = Source(id, schema)
     }
 
+    /** Sets what a formula or rollup property of [pageId] evaluates to. Notion computes these; a test stands in for the computation. */
+    fun setComputed(pageId: String, property: String, value: NotionValue) {
+        val stored = pages[pageId] ?: error("no such page $pageId")
+        val kind = stored.dataSourceId?.let { sources[it]?.schema?.get(property) } ?: error("no property $property on page $pageId")
+        require((kind == FakeProperty.Formula && value is NotionValue.Formula) || (kind == FakeProperty.Rollup && value is NotionValue.Rollup)) {
+            "$property is not a ${value.kindName.lowercase()} property"
+        }
+        stored.properties[property] = value
+    }
+
     /** A plain page (not a row of any data source), such as the persona page. */
     fun createPlainPage(paragraphs: List<String> = emptyList()): String {
         val id = newId()
@@ -118,7 +138,7 @@ class FakeNotionApi(
         val offset = startCursor?.let(::decodeCursor) ?: 0
         val slice = matching.drop(offset).take(pageSize)
         val next = if (offset + slice.size < matching.size) encodeCursor(offset + slice.size) else null
-        return QueryPage(slice.map { it.toPage() }, next)
+        return QueryPage(slice.map { it.toPage(forQuery = true) }, next)
     }
 
     override suspend fun createPage(dataSourceId: String, properties: Map<String, NotionValue>): NotionPage {
@@ -129,6 +149,7 @@ class FakeNotionApi(
         val stored = Stored(id, dataSourceId, now, truncate(now), HashMap())
         pages[id] = stored
         applyProperties(stored, source, properties)
+        assignUniqueIds(stored, source)
         throwLateFault("createPage")
         return stored.toPage()
     }
@@ -205,27 +226,55 @@ class FakeNotionApi(
         FakeProperty.RichText -> NotionValue.RichText("")
         FakeProperty.Checkbox -> NotionValue.Checkbox(false)
         FakeProperty.Date -> NotionValue.DateValue(null)
+        FakeProperty.Number -> NotionValue.NumberValue(null)
+        FakeProperty.Url -> NotionValue.UrlValue(null)
         is FakeProperty.Select -> NotionValue.Select(null)
         is FakeProperty.Relation -> NotionValue.Relation(emptyList())
+        is FakeProperty.UniqueId -> NotionValue.UniqueId(kind.prefix, 0)
+        FakeProperty.Formula -> NotionValue.Formula("string")
+        FakeProperty.Rollup -> NotionValue.Rollup("array")
     }
 
-    private fun Stored.toPage(): NotionPage {
+    /** [forQuery] mimics the real API: a data source query does not return formula or rollup values, a page read does. */
+    private fun Stored.toPage(forQuery: Boolean = false): NotionPage {
         val schema = dataSourceId?.let { sources[it]?.schema }.orEmpty()
         val props = LinkedHashMap<String, NotionValue>()
-        for ((name, kind) in schema) props[name] = properties[name] ?: defaultValue(kind)
+        for ((name, kind) in schema) {
+            props[name] = when {
+                forQuery && kind == FakeProperty.Formula -> NotionValue.Unsupported("formula")
+                forQuery && kind == FakeProperty.Rollup -> NotionValue.Unsupported("rollup")
+                else -> properties[name] ?: defaultValue(kind)
+            }
+        }
         return NotionPage(id, dataSourceId, created, edited, props, archived)
+    }
+
+    private fun assignUniqueIds(stored: Stored, source: Source) {
+        for ((name, kind) in source.schema) {
+            if (kind is FakeProperty.UniqueId) {
+                val next = (uniqueIds[source.id to name] ?: 0L) + 1
+                uniqueIds[source.id to name] = next
+                stored.properties[name] = NotionValue.UniqueId(kind.prefix, next)
+            }
+        }
     }
 
     private fun validate(properties: Map<String, NotionValue>, schema: Map<String, FakeProperty>) {
         for ((name, value) in properties) {
             val kind = schema[name] ?: throw invalid("$name is not a property that exists.")
+            if (kind is FakeProperty.UniqueId || kind == FakeProperty.Formula || kind == FakeProperty.Rollup) {
+                throw invalid("$name is computed by Notion and cannot be edited.")
+            }
             val ok = when (kind) {
                 FakeProperty.Title -> value is NotionValue.Title
                 FakeProperty.RichText -> value is NotionValue.RichText
                 FakeProperty.Checkbox -> value is NotionValue.Checkbox
                 FakeProperty.Date -> value is NotionValue.DateValue
+                FakeProperty.Number -> value is NotionValue.NumberValue
+                FakeProperty.Url -> value is NotionValue.UrlValue
                 is FakeProperty.Select -> value is NotionValue.Select
                 is FakeProperty.Relation -> value is NotionValue.Relation
+                is FakeProperty.UniqueId, FakeProperty.Formula, FakeProperty.Rollup -> false
             }
             if (!ok) throw invalid("$name is expected to be ${kind.javaClass.simpleName.lowercase()}.")
             if (kind is FakeProperty.Select && value is NotionValue.Select && value.name != null && value.name !in kind.options) {
@@ -354,6 +403,9 @@ class FakeNotionApi(
         is NotionValue.Select -> value.name.orEmpty()
         is NotionValue.DateValue -> value.start.orEmpty()
         is NotionValue.Checkbox -> if (value.checked) "1" else "0"
+        is NotionValue.NumberValue -> value.value?.let { "%020.6f".format(it + 1.0e9) }.orEmpty()
+        is NotionValue.UniqueId -> "%020d".format(value.number)
+        is NotionValue.UrlValue -> value.value.orEmpty()
         else -> ""
     }
 

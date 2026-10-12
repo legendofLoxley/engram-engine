@@ -13,7 +13,7 @@ mock HTTP server only; section 4 lists what a live call must still confirm.
 
 ```
 NotionTableSet(name, tables, readablePages)
-NotionTable(name, dataSourceId, access, pageBodyAppend, idempotencyKeyProperty, allowIncomingRelations)
+NotionTable(name, dataSourceId, access, pageBodyAppend, idempotencyKeyProperty, allowIncomingRelations, databaseId)
 ```
 
 | Field | Meaning |
@@ -22,6 +22,7 @@ NotionTable(name, dataSourceId, access, pageBodyAppend, idempotencyKeyProperty, 
 | `pageBodyAppend` | Blocks may be appended to this table's pages (the memory ledger in Sessions). Off by default. Writable tables only. |
 | `idempotencyKeyProperty` | Opt in to idempotent creates (section 3). Off by default. Writable tables only. |
 | `allowIncomingRelations` | A row of another table may be given a relation to a row of this one. Defaults to true for read-write, false for read-only. |
+| `databaseId` | Optional. The id of the database that holds this data source, when something links to the database and not to the data source (a goal's Target Links do). It is never sent to Notion as an id to query; it only lets the Director recognise a link to this table. It must differ from `dataSourceId`, and the registry counts it when it checks sets for overlap. |
 | `readablePages` | Plain pages (such as the persona page) that can be read and never written. |
 
 The allowlist is static: it is fixed when the guard is built. Which rows a particular goal may touch
@@ -149,7 +150,9 @@ The guard turns a 404 on a configured table into a message that names the table 
 for a database id used in place of a data source id, and that the integration must be connected to the
 database. That message is tested against the fake only.
 
-**Not verifiable without a live call** (nothing in this repository has run against real Notion):
+**Not verifiable without a live call** (nothing in this repository has run against real Notion;
+`app.alfrd.engram.scripts.NotionWorkerProbe` is the read-only probe that checks items 1 to 4 below and
+prints what it saw; see `deploy/README.md`, "Notion input channel"):
 
 1. That the UUID in a `collection://` reference is accepted as-is by `/v1/data_sources/{id}`. The
    evidence is the Notion MCP tool descriptions, which describe a `data_source_id` as "the ID of the
@@ -168,7 +171,56 @@ database. That message is tested against the fake only.
 
 ## 5. Property types
 
-The client reads and writes title, rich text, select, checkbox, date and relation properties
-(and reads created time). Every other property type is read as `Unsupported` and cannot be written.
-Fields such as numbers, URLs, the native Status type, multi-select, people and formulas are not
-handled yet; a consumer that needs them needs value types added first.
+| Notion type | In the client | Write |
+|---|---|---|
+| title, rich text, select, checkbox, date, relation | `Title`, `RichText`, `Select`, `Checkbox`, `DateValue`, `Relation` | yes |
+| number | `NumberValue(Double?)` | yes |
+| url | `UrlValue(String?)` | yes |
+| auto-increment id | `UniqueId(prefix, number)`; `display` is `GOAL-1` | **no** |
+| formula | `Formula(type, string, number, boolean, date)` | **no** |
+| rollup | `Rollup(type, function, number, date, items)` | **no** |
+| created time | `CreatedTime` | **no** |
+| anything else (people, files, multi-select, status, …) | `Unsupported` | **no** |
+
+**Read-only values are refused twice.** `NotionValue.isReadOnly` is true for the "no" rows, and both
+`HttpNotionApi` (it will not serialise one) and `AllowlistedNotionApi` (`requireNoComputedValues`, on
+create and on update) reject a write that carries one, with a message that names the property and its
+kind. Notion would reject the write anyway; refusing it first means a bug in a mapper is caught in
+tests, not by a 400 against production.
+
+**Formula and rollup values are informational, and arrive per page.** The database query endpoint
+does not return them; a page read does. Do not decide anything from them, and do not expect them in a
+`query` result. (The live probe reports which properties appear only on a page read.)
+
+**Rich text carries the URLs it contains.** `RichText.links` holds a run's hyperlink and, for a page or
+database mention, the URL built from the mentioned id. A mention's `plain_text` is only its title, so
+without this the destination of a mention is lost. This is how the Director learns what a goal's
+Target Links point at.
+
+**Numbers are `Double`.** Notion's number is a double, so a count or an Order read back is a `Double` and
+is converted deliberately (`toInt()`); a whole number is not guaranteed to look like one in JSON.
+
+**Times written to Notion** use millisecond precision with an explicit offset. `OffsetDateTime.toString()`
+drops zero seconds (`10:02Z`), which Notion does not read as a time of day.
+
+## 6. The Agent Work + PPS set
+
+`deploy/config/notion-agent-worker.json` is the one worked example of a non-memory set: eight tables,
+two of them writable.
+
+| Table | Access | Notes |
+|---|---|---|
+| Goals, Escalations | read-only | Read in this increment; the Director never writes them |
+| Cycles | read-write | Claimed, heartbeated and finished by the Director |
+| Agent Tasks | read-write | Created with an idempotency key (`Op key`) |
+| PPS Questions, Claims, Sources, Evidence | read-only | The guard, not planner code, keeps this increment from writing the ledger |
+
+`AgentWorkTables.requireDryRunShape` refuses a configuration that makes anything else writable, that
+drops a table, or that adds a readable page. Loosening the dry run is therefore an edit to that check
+in a later increment, not a one-line change to a JSON file. A relation property is replaced as a
+whole, so no dual relation is ever written into a read-only table (a rewrite could silently remove
+links the guard cannot see): the Director writes the relation from the Agent Tasks side only.
+
+The token is `tokenRef: "file:/…/.notion-worker-token"`. It is a different token from any read-only
+Notion token used for Hermes ingestion and from every alfrd memory set's token; the registry refuses a
+shared reference, and `verifyDistinctTokens` refuses two references that resolve to one secret.
