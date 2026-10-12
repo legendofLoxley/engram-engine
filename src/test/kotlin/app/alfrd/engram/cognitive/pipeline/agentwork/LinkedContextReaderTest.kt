@@ -105,6 +105,23 @@ class LinkedContextReaderTest {
     // ── A page that is not a row is reported and skipped ─────────────────────
 
     @Test
+    fun `the reader itself skips a row of a table outside the set, even if the client hands it one`() {
+        // The guard normally refuses such a page before the reader sees it. This reader is built on the raw fake,
+        // so the check under test is the reader's own: defence in depth, not the guard.
+        val otherTable = fake.defineDataSource(mapOf("Name" to app.alfrd.engram.notion.FakeProperty.Title))
+        val stranger = runBlocking { fake.createPage(otherTable, mapOf("Name" to NotionValue.Title("SECRET-OTHER-TABLE-ROW"))) }
+        val link = notionPageUrl(stranger.id)
+
+        val context = runBlocking { LinkedContextReader(fake, set).read(goal(link)) }
+
+        val skipped = context.skipped.single()
+        assertEquals(SkipReason.NOT_A_CONFIGURED_ROW, skipped.reason)
+        assertTrue(context.rows.isEmpty())
+        assertFalse(context.allowed.allows(link))
+        assertFalse(context.outcomes.toString().contains("SECRET-OTHER-TABLE-ROW"))
+    }
+
+    @Test
     fun `a page that is not a row of a configured table is reported and skipped, and nothing from it is kept`() {
         val howItWorks = fake.createPlainPage(listOf("The locking protocol: SECRET-LEDGER-RULES"))
         val link = notionPageUrl(howItWorks)

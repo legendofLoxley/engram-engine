@@ -119,6 +119,13 @@ class AgentWorkTablesTest {
     }
 
     @Test
+    fun `a ninth table is refused even when it is read-only, so the writable-set check is not what stops it`() {
+        val extra = NotionTable("extra", "99999999-9999-4999-8999-999999999999", TableAccess.READ_ONLY)
+        val e = rejected { AgentWorkTables.requireDryRunShape(set.copy(tables = set.tables + extra)) }
+        assertTrue(e.message!!.contains("does not use") && e.message!!.contains("extra"), e.message)
+    }
+
+    @Test
     fun `no table may accept page-body appends and no free-standing page may be readable`() {
         rejected { AgentWorkTables.requireDryRunShape(withTable(AgentWorkTables.CYCLES) { it.copy(pageBodyAppend = true) }) }
         rejected {

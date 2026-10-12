@@ -57,6 +57,16 @@ class HttpNotionApiPropertyTypesTest {
         return api().retrievePage(pageId)
     }
 
+    @Test
+    fun `a text run whose hyperlink arrives without an href still yields its link`() = runBlocking {
+        val page = read(
+            """"Notes":{"id":"n","type":"rich_text","rich_text":[
+                {"type":"text","plain_text":"see here","text":{"content":"see here","link":{"url":"https://example.org/a"}}}]}""",
+        )
+        assertEquals("see here", page.text("Notes"))
+        assertEquals(listOf("https://example.org/a"), page.links("Notes"))
+    }
+
     // ── Writing ──────────────────────────────────────────────────────────────
 
     @Test
