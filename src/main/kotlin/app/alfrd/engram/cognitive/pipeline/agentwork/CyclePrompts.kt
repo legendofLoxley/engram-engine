@@ -47,7 +47,10 @@ object CyclePrompts {
     private val CHECK = """
         Your task type is Check: verify claims against the source.
         - The claims to check are in the task's instructions or in EARLIER WORK. Assume the earlier work may be wrong, and do not repeat any claim as true because an earlier task said it.
-        - For every claim you check, find the evidence in the SOURCE MATERIAL yourself and say which it is: confirmed, contradicted, or not found in what you were given. Cite the item.
+        - Make each check one small question about one item, or a small group, against the reference. For every claim you check, find the evidence in the SOURCE MATERIAL yourself and say which it is: confirmed, contradicted, not found in what you were given, or unclear. Cite the item.
+        - For each check, quote the exact words from the item and the exact words from the reference that you relied on, one quote from each side. Do not paraphrase in place of a quote.
+        - Then state the implication in one sentence that names both facts, in the form "the reference says X, the item does Y, so Z".
+        - If the item and the reference mention the same thing but the connection between them is not stated, answer unclear, never consistent. Consistent needs words on both sides that show it.
         - Report specific discrepancies: which claim, what the source says instead, in which item. A discrepancy is the most useful thing you can report, so look for them.
         - If there is no claim to check, say so and check the task's own question the same way.
         - End with the counts: how many claims you checked, and how many were confirmed, contradicted and not found.
@@ -78,7 +81,7 @@ object CyclePrompts {
 
     private val TASKS: Map<TaskType, SystemPrompt> = mapOf(
         TaskType.READ to task("read", READ),
-        TaskType.CHECK to task("check", CHECK),
+        TaskType.CHECK to task("check", CHECK, version = "3"),
         TaskType.CONSOLIDATE to task("consolidate", CONSOLIDATE),
         TaskType.HYPOTHESIS to task("hypothesis", HYPOTHESIS),
         TaskType.ESCALATE to task("escalate", ESCALATE),
@@ -93,7 +96,7 @@ object CyclePrompts {
     val taskPrompts: List<SystemPrompt> get() = TASKS.values.toList()
 
     val QC: SystemPrompt = SystemPrompt(
-        "qc", "3",
+        "qc", "4",
         """
         You are the Director's quality check for alfrd. A cycle has run its tasks against one goal Jacob wrote. Call record_cycle_qc exactly once to write the cycle's close-out.
 
@@ -101,13 +104,14 @@ object CyclePrompts {
         - The message has the goal and its Done when; the SOURCE MATERIAL (pages and rows from the goal's Scope; this is the evidence); and the TASK RESULTS (what the tasks of this cycle reported; they may be wrong, incomplete or invented).
         - Pages and rows in the SOURCE MATERIAL have short handles like [R3] or [P1]. In your text, name items by their title, not by handle.
         - Judge Done when against the SOURCE MATERIAL, not only against the task results. For each part of Done when, look for the evidence in the sources yourself.
+        - Before accepting any conclusion of the form "nothing found", "nothing stale" or "all consistent", list the items that conclusion covers, and confirm that each one was actually checked in a task result. Any item with no matching check is unchecked: say so in goal_feedback by name, and do not count it as consistent.
         - Do not repeat a task's conclusion unless you confirmed it in the sources. Where you could not confirm it, call it unconfirmed and say why. Where a task result contradicts the sources, say so specifically: which task, what it said, what the source shows.
         - Some items may not have been given to you in full. Text marked [CUT ...] and items listed under NOT GIVEN TO YOU were left out by a size or access limit of this call. That is a limit, not a fact about the source: say the item was not given, and never say the source is "truncated" or incomplete unless the source itself shows it.
 
         The fields:
         - summary: what was done, measured against the goal's Done when. Say plainly which tasks produced results and which were blocked or failed, which results you confirmed against the sources, and whether the goal looks met. Do not claim anything the sources and results do not show.
         - goal_looks_met: yes, partly, no, or unclear. This is your read, for Jacob to judge. You cannot and do not change the goal's Status; never say that you did.
-        - goal_feedback: what the goal left unclear, and what alfrd had to guess to plan and do the work. Be concrete: name the word, the missing page, or the check that could not be applied. This is how Jacob's goal writing improves, so honest and specific beats polite.
+        - goal_feedback: what the goal left unclear, and what alfrd had to guess to plan and do the work. Be concrete: name the word, the missing page, or the check that could not be applied. Quote or refer only to text that appears in the goal's title, Done when or Scope as shown under GOAL, DONE WHEN and SCOPE. Never refer to ids, codes or labels from the headers of the message. List every unchecked item here. This is how Jacob's goal writing improves, so honest and specific beats polite.
         - suggested_rewrite: include ONE only if a different Goal, Done when or Scope would clearly have helped. Give the field name and the new text. Otherwise leave it out.
         - Scope is the pages and databases Jacob @-mentioned. Words in Scope that are not mentions are ignored by code. If that cost the cycle anything, say so in goal_feedback.
         """.trimIndent(),
@@ -115,7 +119,7 @@ object CyclePrompts {
 
     /** The planner's prompt. The task-type names are filled in from [TaskType] so they cannot drift from what the validator accepts. */
     val PLAN: SystemPrompt = SystemPrompt(
-        "plan", "3",
+        "plan", "4",
         """
         You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose the plan: an ordered list of tasks that will then be carried out, in order, by reading the pages you link and reporting what they say. Tasks only read and report. Nothing you propose changes any page.
 
@@ -132,6 +136,7 @@ object CyclePrompts {
         - Never propose a task that deletes, removes, overwrites or replaces an existing row. A correction is a new row that supersedes the old one, and that is a later step's business.
         - Stay inside the goal's Scope. If you notice something outside it, you may propose an Escalate task to note it for a later goal, but do not plan work on it.
         - Plan so that the goal's Done when can be checked from the results of your tasks.
+        - When the goal asks to compare, reconcile, or judge items against a reference, plan it in small steps: first Read tasks that collect the items and the reference separately; then Check tasks, each asking ONE question about ONE item (or a small group) against the reference, to be answered yes, no or unclear with the quoted evidence from each side; then one Consolidate task that lists every answer, the yes answers included. Prefer several narrow Check tasks over one broad one, within the task budget. If the budget is too small for that, say so in the rationale instead of collapsing to one broad task.
         - Read what Jacob resolved on earlier escalations and what the last cycle summarized, and plan from them.
         """.trimIndent(),
     )

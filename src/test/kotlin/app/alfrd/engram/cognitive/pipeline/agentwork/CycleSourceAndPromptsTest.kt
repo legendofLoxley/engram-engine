@@ -280,7 +280,7 @@ class CycleSourceAndPromptsTest {
     @Test
     fun `Check verifies against the source, assumes earlier work may be wrong, and reports discrepancies`() {
         val text = CyclePrompts.forTask(TaskType.CHECK).text
-        for (rule in listOf("Assume the earlier work may be wrong", "find the evidence in the SOURCE MATERIAL yourself", "confirmed, contradicted, or not found", "Report specific discrepancies", "do not repeat any claim as true because an earlier task said it")) {
+        for (rule in listOf("Assume the earlier work may be wrong", "find the evidence in the SOURCE MATERIAL yourself", "confirmed, contradicted, not found in what you were given, or unclear", "Report specific discrepancies", "do not repeat any claim as true because an earlier task said it")) {
             assertTrue(text.contains(rule), "missing: $rule")
         }
     }
@@ -338,10 +338,30 @@ class CycleSourceAndPromptsTest {
     }
 
     @Test
+    fun `the planner breaks a comparison into narrow checks, and says so in the rationale when the budget is too small`() {
+        val plan = CyclePrompts.PLAN.text
+        for (rule in listOf("compare, reconcile, or judge items against a reference", "Read tasks that collect the items and the reference separately", "ONE question about ONE item", "yes, no or unclear with the quoted evidence from each side", "one Consolidate task that lists every answer, the yes answers included", "Prefer several narrow Check tasks over one broad one", "say so in the rationale instead of collapsing to one broad task")) {
+            assertTrue(plan.contains(rule), "missing: $rule")
+        }
+    }
+
+    @Test
+    fun `Check quotes both sides, states the implication, and answers unclear when the link is not stated`() {
+        val text = CyclePrompts.forTask(TaskType.CHECK).text
+        for (rule in listOf("one small question about one item", "quote the exact words from the item and the exact words from the reference", "so Z", "answer unclear, never consistent", "Consistent needs words on both sides")) assertTrue(text.contains(rule), "missing: $rule")
+    }
+
+    @Test
+    fun `QC tests a nothing-found conclusion item by item and keeps its feedback to the goal's own words`() {
+        val text = CyclePrompts.QC.text
+        for (rule in listOf("list the items that conclusion covers", "actually checked in a task result", "unchecked: say so in goal_feedback by name", "only to text that appears in the goal's title, Done when or Scope", "Never refer to ids, codes or labels from the headers", "List every unchecked item here")) assertTrue(text.contains(rule), "missing: $rule")
+    }
+
+    @Test
     fun `each prompt has a name, a version and a pinned fingerprint, so editing the text without bumping the version fails here`() {
         val pinned = mapOf(
-            "plan" to ("3" to "5605550f25f7"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("2" to "e0f9d3df301a"), "task.consolidate" to ("2" to "8797d5f3b38d"),
-            "task.hypothesis" to ("2" to "53cb43937922"), "task.escalate" to ("2" to "0161f4860f97"), "qc" to ("3" to "f05582d26ffb"),
+            "plan" to ("4" to "f2619334a133"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("3" to "ee86c7f9cb26"), "task.consolidate" to ("2" to "8797d5f3b38d"),
+            "task.hypothesis" to ("2" to "53cb43937922"), "task.escalate" to ("2" to "0161f4860f97"), "qc" to ("4" to "e1dfd574b228"),
         )
         assertEquals(pinned.keys, CyclePrompts.all.map { it.name }.toSet())
         for (p in CyclePrompts.all) {
@@ -361,7 +381,7 @@ class CycleSourceAndPromptsTest {
         val model = Recording().apply { plan = tasks("Read it" to "Read", "Check it" to "Check", "Gather" to "Consolidate") }
         val (trace, _) = run(model)
 
-        assertEquals(PromptRef("plan", "3", CyclePrompts.PLAN.fingerprint), trace.model!!.given!!.prompt)
+        assertEquals(PromptRef("plan", "4", CyclePrompts.PLAN.fingerprint), trace.model!!.given!!.prompt)
         assertEquals(listOf("task.read", "task.check", "task.consolidate"), trace.execution.map { it.given!!.prompt.name })
         assertEquals(CyclePrompts.QC.ref, trace.qc!!.given!!.prompt)
         assertEquals(listOf(emptyList(), listOf(1), listOf(1, 2)), trace.execution.map { it.given!!.earlierTasks })
@@ -385,7 +405,7 @@ class CycleSourceAndPromptsTest {
         val json = Json.encodeToString(CyclePlanTrace.serializer(), trace)
         assertFalse(json.contains("ALPHA-SECRET-TEXT"), "row text must never reach the trace")
         assertFalse(json.contains("Findings: "), "nor a task's own words")
-        assertTrue(json.contains("\"name\":\"task.check\"") && json.contains("\"version\":\"2\"") && json.contains("\"fingerprint\""))
+        assertTrue(json.contains("\"name\":\"task.check\"") && json.contains("\"version\":\"3\"") && json.contains("\"fingerprint\""))
     }
 
     @Test
