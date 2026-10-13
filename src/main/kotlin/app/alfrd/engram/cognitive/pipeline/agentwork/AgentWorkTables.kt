@@ -51,6 +51,12 @@ object AgentWorkTables {
 
     val READABLE_PAGES: Set<String> = setOf(PERSONA_PAGE)
 
+    /**
+     * Other plain pages the Director may read (never write) are listed in the same `readablePages` allowlist, by id,
+     * under a name that starts with this prefix. The Persona page stays required; nothing else can be listed.
+     */
+    const val READING_PAGE_PREFIX = "reading-"
+
     /** The text property on Agent Tasks that makes a create idempotent: `cycle:<Cycle ID>:v<Plan Version>:o<Order>`. */
     const val OP_KEY_PROPERTY = "Op key"
 
@@ -81,10 +87,12 @@ object AgentWorkTables {
             throw NotionConfigException("no table may accept page-body appends in this increment")
         }
         val pages = set.readablePages.map { it.name }.toSet()
-        if (pages != READABLE_PAGES) {
+        val stray = pages.filter { it !in READABLE_PAGES && !it.startsWith(READING_PAGE_PREFIX) }
+        if (PERSONA_PAGE !in pages || stray.isNotEmpty()) {
             throw NotionConfigException(
-                "table set '${set.name}' must allowlist exactly the page(s) ${READABLE_PAGES.sorted().joinToString(", ")} for reading; " +
-                    "allowlisted now: ${pages.sorted().joinToString(", ").ifEmpty { "none" }}",
+                "table set '${set.name}' must allowlist the page '$PERSONA_PAGE' for reading, plus any reading pages named '$READING_PAGE_PREFIX…'; " +
+                    "allowlisted now: ${pages.sorted().joinToString(", ").ifEmpty { "none" }}" +
+                    (if (stray.isEmpty()) "" else " (not allowed: ${stray.sorted().joinToString(", ")})"),
             )
         }
         // A relation is replaced as a whole and Notion mirrors it onto the other table's row. A read-only table

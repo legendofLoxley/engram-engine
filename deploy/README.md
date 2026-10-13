@@ -564,6 +564,8 @@ It reacts to `Queued` rows and to a `Running` cycle whose lease ran out; it crea
 
 If the plan endpoint is unreachable, times out or errors, the default endpoint serves the plan call (with its own 180 s and 8000 tokens). It is never silent: the trace on `/debug/notion-cycles` carries a `fallback` record (`model.fallback`: endpoint, exception class, time to fail), and the cycle's Summary gets the line `Plan served by fallback endpoint (...)`. Every call's `answer` in the trace also records the base URL (`endpoint`) and model name (`model`) that served it; each call's `latencyMs` is beside it. `/debug/notion-cycles` shows the configured plan endpoint under the channel's setup (`planEndpoint`, `planTimeoutSeconds`, `planMaxTokens`).
 
+**Letting the Director read another page.** Add `{ "name": "reading-<short-name>", "pageId": "<32 hex characters>" }` to `readablePages` in `deploy/config/notion-agent-worker.json` (the same allowlist as the Persona page), connect the integration to the page, and restart `engram-dev`. The page is then readable when a goal's Scope mentions it and is never writable; a mentioned page that is not listed is skipped, and the message names the `readablePages` allowlist. Only the listed ids are readable.
+
 The channel needs the Director's local model (`LLM_PROVIDER=local`, already set by `run-engram-dev.sh`).
 Without it the channel does not start and says so in the journal (`notion-cycles: NOT RUNNING`) and on
 `/debug/notion-cycles`: claiming cycles it cannot plan would turn Jacob's `Queued` rows into `Failed`

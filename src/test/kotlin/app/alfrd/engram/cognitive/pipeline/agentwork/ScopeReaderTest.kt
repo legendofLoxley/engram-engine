@@ -125,6 +125,22 @@ class ScopeReaderTest {
     }
 
     @Test
+    fun `a listed reading page can be mentioned and read`() {
+        val context = read(pageMention(t.essayExcerptPageId, "Test material: essay excerpt"))
+        val read = context.outcomes.single() as ScopeOutcome.PageRead
+        assertEquals("reading-essay-excerpt", read.label)
+        assertTrue(context.allowed.allows(url(t.essayExcerptPageId)))
+        assertEquals("Test material: essay excerpt", context.row(t.essayExcerptPageId)!!.title)
+    }
+
+    @Test
+    fun `the refusal of an unlisted page names the allowlist`() {
+        val stranger = f.fake.createPlainPage(listOf("private notes"))
+        val skipped = read(pageMention(stranger, "Private notes")).outcomes.single() as ScopeOutcome.Skipped
+        assertTrue(skipped.detail!!.contains("readablePages allowlist"), skipped.detail)
+    }
+
+    @Test
     fun `a plain page that is not allowlisted is skipped without being read, and is not in scope`() {
         val stranger = f.fake.createPlainPage(listOf("private notes"))
         val context = read(pageMention(stranger, "Private notes"))

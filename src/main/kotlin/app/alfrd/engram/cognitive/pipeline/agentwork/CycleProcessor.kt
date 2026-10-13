@@ -362,7 +362,7 @@ class CycleProcessor(
     private suspend fun failUnreadableScope(cycle: Cycle, goal: Goal, trace: CyclePlanTrace, context: ScopeContext): TickResult {
         val reasons = context.skipped.joinToString("; ") { "${it.mention.title.ifBlank { it.mention.id }}: ${it.reason.name.lowercase().replace('_', ' ')}" }
         val summary = "Cycle failed: none of the ${goal.scope.mentions.size} page or database mention${if (goal.scope.mentions.size == 1) "" else "s"} in the goal's Scope could be read ($reasons). Nothing was planned and nothing else was written."
-        val feedback = "Scope mentioned things the Director cannot read: $reasons. A mentioned page must be a row of one of the configured tables or the allowlisted Persona page, and the integration must be connected to it; a mentioned database must be one of the configured tables.\n\n" +
+        val feedback = "Scope mentioned things the Director cannot read: $reasons. A mentioned page must be a row of one of the configured tables or a page on the readablePages allowlist in the worker configuration (the Persona page and any reading pages; to let the Director read another page, its id must be added there), and the integration must be connected to it; a mentioned database must be one of the configured tables.\n\n" +
             "Suggested rewrite of Scope: mention pages and databases from alfrd memory, or the Agent Work and PPS tables."
         return finish(cycle, trace, CycleStatus.FAILED, summary, feedback = feedback)
     }

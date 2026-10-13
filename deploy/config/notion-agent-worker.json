@@ -18,6 +18,7 @@
     { "name": "memory-template-changes",  "dataSourceId": "f661f9c4-4fae-450c-9693-12de515b7762", "databaseId": "a9b02cef806a4de5a89a86047112c452", "access": "read-only" }
   ],
   "readablePages": [
-    { "name": "persona", "pageId": "3f1d0721d4e481d588c6f320f5fa25f8" }
+    { "name": "persona", "pageId": "3f1d0721d4e481d588c6f320f5fa25f8" },
+    { "name": "reading-essay-excerpt", "pageId": "3f8d0721d4e481deb87bec779d10acfc" }
   ]
 }

@@ -37,6 +37,8 @@ class NotionWorkerProbeTest {
     private val personaId: String = Regex(""""name":\s*"persona",\s*"pageId":\s*"([0-9a-f]+)"""").find(committed)!!.groupValues[1].let { normalize(it) }
 
     // Behavior knobs the dispatcher reads.
+    /** The other allowlisted (reading) pages in the committed configuration. */
+    private val readingIds: List<String> = Regex(""""name":\s*"reading-[^"]*",\s*"pageId":\s*"([0-9a-f]+)"""").findAll(committed).map { normalize(it.groupValues[1]) }.toList()
     private var personaMissing = false
     private var missing: Set<String> = emptySet()
     private var databaseIdAccepted = false
@@ -97,6 +99,9 @@ class NotionWorkerProbeTest {
             }
             return json(404, """{"object":"error","status":404,"code":"object_not_found","message":"unknown"}""")
         }
+        if (request.method == "GET" && path.removePrefix("/v1/pages/") in readingIds) {
+            return json(200, """{"object":"page","id":"${path.removePrefix("/v1/pages/")}","created_time":"2026-10-06T12:00:00.000Z","last_edited_time":"$lastEdited","archived":false,"parent":{"type":"page_id","page_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd"},"properties":{"title":{"id":"title","type":"title","title":[{"plain_text":"SENSITIVE PERSONA TITLE","text":{"content":"SENSITIVE PERSONA TITLE"}}]}}}""")
+        }
         if (request.method == "GET" && path == "/v1/pages/$personaId") {
             return if (personaMissing) json(404, """{"object":"error","status":404,"code":"object_not_found","message":"Could not find page with ID: $personaId."}""")
             else json(200, """{"object":"page","id":"$personaId","created_time":"2026-10-06T12:00:00.000Z","last_edited_time":"$lastEdited","archived":false,"parent":{"type":"page_id","page_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd"},"properties":{"title":{"id":"title","type":"title","title":[{"plain_text":"SENSITIVE PERSONA TITLE","text":{"content":"SENSITIVE PERSONA TITLE"}}]}}}""")
@@ -141,7 +146,7 @@ class NotionWorkerProbeTest {
     fun `all fourteen data sources and the Persona page reachable exits zero and reports each assumption`() {
         val result = probe()
         assertEquals(NotionWorkerProbe.OK, result.status, result.text)
-        assertEquals(15, Regex("VISIBLE").findAll(result.text).count(), result.text)
+        assertEquals(16, Regex("VISIBLE").findAll(result.text).count(), result.text)
         assertTrue(Regex("VISIBLE\\s+persona\\s+$personaId").containsMatchIn(result.text), result.text)
         for (name in tables.keys) assertTrue(Regex("VISIBLE\\s+${Regex.escape(name)}\\s").containsMatchIn(result.text), "$name is not reported VISIBLE: ${result.text}")
         assertFalse(result.text.contains("MISSING  "), result.text)
@@ -152,7 +157,7 @@ class NotionWorkerProbeTest {
         assertTrue(result.text.contains("whole minute on all 14 sampled pages"), result.text)
         assertTrue(result.text.contains("only on a page read, not in a query: ") && result.text.contains("Score (formula)"), result.text)
         assertTrue(result.text.contains("6. select option behavior") && result.text.contains("NOT PROBED"), result.text)
-        assertTrue(result.text.contains("RESULT: all 14 data sources and 1 allowlisted page(s) are reachable. Nothing was written."), result.text)
+        assertTrue(result.text.contains("RESULT: all 14 data sources and 2 allowlisted page(s) are reachable. Nothing was written."), result.text)
     }
 
     @Test
@@ -182,7 +187,7 @@ class NotionWorkerProbeTest {
         val result = probe()
         assertEquals(NotionWorkerProbe.MISSING, result.status, result.text)
         assertTrue(Regex("MISSING\\s+findings").containsMatchIn(result.text), result.text)
-        assertTrue(result.text.contains("1 of 15 data source(s) and page(s) are not reachable with this token: findings"), result.text)
+        assertTrue(result.text.contains("1 of 16 data source(s) and page(s) are not reachable with this token: findings"), result.text)
         assertTrue(result.text.contains("Stop here"), result.text)
         assertTrue(result.text.contains("HTTP 404 object_not_found"), result.text)
     }
@@ -192,7 +197,7 @@ class NotionWorkerProbeTest {
         missing = setOf("memory-items", "memory-sessions")
         val result = probe()
         assertEquals(NotionWorkerProbe.MISSING, result.status, result.text)
-        assertTrue(result.text.contains("2 of 15 data source(s) and page(s) are not reachable") && result.text.contains("memory-items, memory-sessions"), result.text)
+        assertTrue(result.text.contains("2 of 16 data source(s) and page(s) are not reachable") && result.text.contains("memory-items, memory-sessions"), result.text)
     }
 
     @Test
@@ -201,7 +206,7 @@ class NotionWorkerProbeTest {
         val result = probe()
         assertEquals(NotionWorkerProbe.MISSING, result.status, result.text)
         assertTrue(Regex("MISSING\\s+persona").containsMatchIn(result.text), result.text)
-        assertTrue(result.text.contains("1 of 15 data source(s) and page(s) are not reachable with this token: page:persona"), result.text)
+        assertTrue(result.text.contains("1 of 16 data source(s) and page(s) are not reachable with this token: page:persona"), result.text)
         assertTrue(result.text.contains("HTTP 404 object_not_found"), result.text)
     }
 

@@ -221,12 +221,13 @@ tables and one readable page, two tables writable.
 | Goals, Escalations | read-only | The Director reads a goal and its Escalations' Resolution text; it never writes a goal, not even its Status |
 | PPS Questions, **Findings**, Sources | read-only | Findings is the old Claims table (same data source id, renamed 2026-10-12). Evidence is archived and **not in the set** |
 | alfrd memory: Containers, Items, Entities, Connections, Sessions, Sources, Template Changes | read-only | Jacob's real teamspace. Names carry a `memory-` prefix because PPS already has a table called `sources` |
-| Persona (plain page `3f1d0721d4e481d588c6f320f5fa25f8`) | read-only page | The one allowlisted plain page. No other page can be added without changing the shape check |
+| Persona (plain page `3f1d0721d4e481d588c6f320f5fa25f8`) | read-only page | Required. Allowlisted in `readablePages` like the reading pages below |
+| Reading pages (`reading-essay-excerpt`, `3f8d0721d4e481deb87bec779d10acfc`) | read-only pages | Extra plain pages the Director may read when a goal's Scope mentions them. Listed by id in the same `readablePages` allowlist |
 
 `AgentWorkTables.requireShape` refuses a configuration that makes anything else writable, that drops a
-table, that adds a fifteenth one (even read-only), that allows a page-body append, or that allowlists a
-different set of readable pages. Loosening this is therefore an edit to that check, not a one-line change
-to a JSON file. The same check refuses a read-only table that accepts incoming relations, because Notion
+table, that adds a fifteenth one (even read-only), that allows a page-body append, that drops the Persona
+page, or that allowlists a readable page whose name does not start with `reading-`. Loosening this is therefore an edit to that check, not a one-line change
+to a JSON file, except for adding a reading page (below). The same check refuses a read-only table that accepts incoming relations, because Notion
 would mirror a relation written from another table onto its rows. A relation property is replaced as a
 whole, so no dual relation is ever written into a read-only table: the Director writes the relation from
 the Agent Tasks side only, and the guard refuses a relation into any read-only table.
@@ -279,3 +280,11 @@ must be passed to the runtime as `otherSets`, or the check does not see it.
 The token is `tokenRef: "file:/…/.notion-worker-token"`. It is a different token from any read-only
 Notion token used for Hermes ingestion and from every alfrd memory set's token; the registry refuses a
 shared reference, and `verifyDistinctTokens` refuses two references that resolve to one secret.
+
+### Adding a page the Director may read
+
+Add `{ "name": "reading-<short-name>", "pageId": "<32 hex characters>" }` to `readablePages` in
+`deploy/config/notion-agent-worker.json`, connect the integration to the page (or a page above it), and
+restart `engram-dev`. The name must start with `reading-`; the page is then readable when a goal's Scope
+mentions it, never writable, and only the ids listed are readable. A mentioned page that is not listed is
+skipped with a message naming the `readablePages` allowlist.

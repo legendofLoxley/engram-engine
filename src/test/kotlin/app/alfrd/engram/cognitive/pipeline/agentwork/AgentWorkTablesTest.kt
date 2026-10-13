@@ -116,9 +116,10 @@ class AgentWorkTablesTest {
     }
 
     @Test
-    fun `Persona is the one allowlisted page`() {
-        assertEquals(listOf(AgentWorkTables.PERSONA_PAGE), set.readablePages.map { it.name })
-        assertEquals("3f1d0721-d4e4-81d5-88c6-f320f5fa25f8", set.readablePages.single().pageId)
+    fun `the committed allowlist is Persona and the one reading page`() {
+        assertEquals(listOf(AgentWorkTables.PERSONA_PAGE, "reading-essay-excerpt"), set.readablePages.map { it.name })
+        assertEquals("3f1d0721-d4e4-81d5-88c6-f320f5fa25f8", set.readablePages.first().pageId)
+        assertEquals("3f8d0721-d4e4-81de-b87b-ec779d10acfc", set.readablePages.last().pageId)
     }
 
     @Test
@@ -183,12 +184,15 @@ class AgentWorkTablesTest {
     }
 
     @Test
-    fun `exactly the Persona page is allowlisted for reading, and no other page can be added`() {
+    fun `Persona is required, only reading-named pages can be added, and anything else is refused`() {
         val other = NotionReadablePage("home", "99999999-9999-4999-8999-999999999999")
         val e = rejected { AgentWorkTables.requireShape(set.copy(readablePages = set.readablePages + other)) }
-        assertTrue(e.message!!.contains("allowlist exactly") && e.message!!.contains("home"), e.message)
+        assertTrue(e.message!!.contains("reading pages") && e.message!!.contains("home"), e.message)
         rejected { AgentWorkTables.requireShape(set.copy(readablePages = emptyList())) }
         rejected { AgentWorkTables.requireShape(set.copy(readablePages = listOf(NotionReadablePage("home", "99999999-9999-4999-8999-999999999999")))) }
+        rejected { AgentWorkTables.requireShape(set.copy(readablePages = set.readablePages.filter { it.name != AgentWorkTables.PERSONA_PAGE })) }
+        AgentWorkTables.requireShape(set.copy(readablePages = set.readablePages + NotionReadablePage("reading-more", "99999999-9999-4999-8999-999999999999")))
+        AgentWorkTables.requireShape(set.copy(readablePages = set.readablePages.filter { it.name == AgentWorkTables.PERSONA_PAGE }))
     }
 
     // ── The guard enforces the promise: every read-only table refuses writes ──
@@ -228,6 +232,22 @@ class AgentWorkTablesTest {
         val e = violation { api.updatePage(goal.id, mapOf("Status" to NotionValue.Select("Met"))) }
         assertTrue(e.message!!.contains("read-only"), e.message)
         assertEquals("Active", fake.page(goal.id).select("Status"))
+    }
+
+    @Test
+    fun `a listed reading page can be read, is never writable, and an unlisted page beside it stays unreachable`() = runBlocking<Unit> {
+        val page = template.essayExcerptPageId
+        assertEquals("Test material: essay excerpt", api.retrievePage(page).title("title"))
+        assertEquals(1, api.listBlocks(page).blocks.size)
+        val before = fake.requestCount()
+
+        violation { api.updatePage(page, mapOf("title" to NotionValue.Title("edited"))) }
+        violation { api.appendBlocks(page, listOf(NotionBlock.Paragraph(listOf(RichSegment("note"))))) }
+        assertEquals(before, fake.requestCount(), "a write to a reading page reached Notion")
+
+        val stranger = fake.createPlainPage(listOf("private"))
+        violation { api.retrievePage(stranger) }
+        violation { api.listBlocks(stranger) }
     }
 
     @Test

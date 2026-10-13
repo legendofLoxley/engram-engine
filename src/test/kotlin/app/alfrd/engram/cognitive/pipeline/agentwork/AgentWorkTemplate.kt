@@ -36,6 +36,12 @@ class AgentWorkTemplate(val tableSet: NotionTableSet) {
 
     /** The allowlisted Persona page, under the id the configuration pins. */
     val personaPageId: String get() = tableSet.readablePages.single { it.name == AgentWorkTables.PERSONA_PAGE }.pageId
+
+    /** The reading pages the configuration lists besides Persona, by name. */
+    val readingPages: Map<String, String> get() = tableSet.readablePages.filter { it.name.startsWith(AgentWorkTables.READING_PAGE_PREFIX) }.associate { it.name to it.pageId }
+
+    /** The "Test material: essay excerpt" reading page, under the id the configuration pins. */
+    val essayExcerptPageId: String get() = readingPages.getValue("reading-essay-excerpt")
 }
 
 private fun options(vararg names: String) = FakeProperty.Select(names.toSet())
@@ -217,5 +223,6 @@ fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet, personaText
     )
 
     createPlainPageWithId(t.personaPageId, title = "Persona", content = personaText)
+    t.readingPages.values.forEach { createPlainPageWithId(it, title = "Test material: essay excerpt", content = listOf(FakeBlock(text = "An excerpt to read."))) }
     return t
 }

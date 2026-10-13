@@ -217,19 +217,23 @@ class ScopeReader(
                 val label = page.dataSourceId?.let(tableSet::tableForDataSource)?.name
                     ?: tableSet.readablePages.firstOrNull { it.pageId == page.id }?.name
                 if (label == null) {
-                    outcomes += ScopeOutcome.Skipped(mention, SkipReason.NOT_READABLE, "the page is neither a row of a configured table nor an allowlisted page")
+                    outcomes += ScopeOutcome.Skipped(mention, SkipReason.NOT_READABLE, NOT_ALLOWLISTED)
                     continue
                 }
                 rows.putIfAbsent(page.id, rowOf(label, page))
                 pageIds += page.id
                 outcomes += ScopeOutcome.PageRead(mention, label, page.id)
             } catch (e: NotionGuardViolation) {
-                outcomes += ScopeOutcome.Skipped(mention, SkipReason.NOT_READABLE, "the page is neither a row of a configured table nor an allowlisted page")
+                outcomes += ScopeOutcome.Skipped(mention, SkipReason.NOT_READABLE, NOT_ALLOWLISTED)
             } catch (e: NotionApiException) {
                 outcomes += ScopeOutcome.Skipped(mention, SkipReason.UNREADABLE, "Notion answered ${e.status}${e.code?.let { " ($it)" }.orEmpty()}")
             }
         }
         return ScopeContext(rows.values.toList(), outcomes, AllowedScope(pageIds, databaseIds, rowIds), truncated, tables.mapKeys { it.key })
+    }
+
+    private companion object {
+        const val NOT_ALLOWLISTED = "the page is neither a row of a configured table nor on the readablePages allowlist in the worker configuration (to let the Director read it, add its page id there)"
     }
 
     private class Listed(val rows: List<ContextRow>, val truncated: Boolean)

@@ -215,6 +215,7 @@ class CycleExecutionTest {
         assertTrue(row.text("Summary").contains("none of the 2 page or database mentions in the goal's Scope could be read"), row.text("Summary"))
         assertTrue(row.text("Summary").contains("Private notes: not readable") && row.text("Summary").contains("Somebody's database: database not configured"), row.text("Summary"))
         assertTrue(row.text("Goal Feedback").contains("Suggested rewrite of Scope"))
+        assertTrue(row.text("Goal Feedback").contains("readablePages allowlist"), "the error names the allowlist: ${row.text("Goal Feedback")}")
         assertTrue(llm.requests.isEmpty())
         assertEquals(0, f.fake.requestCount("listBlocks"), "the private page was never read")
     }
