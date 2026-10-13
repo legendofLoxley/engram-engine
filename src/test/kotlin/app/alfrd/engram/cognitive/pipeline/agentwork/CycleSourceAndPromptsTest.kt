@@ -105,8 +105,8 @@ class CycleSourceAndPromptsTest {
         val (trace, _) = run(model)
 
         val prompt = model.taskPrompts().single().prompt
-        assertEquals(1, Regex("### Alpha ").findAll(prompt).count(), "a row linked and also in scope appears once")
-        assertEquals(1, Regex("### Beta ").findAll(prompt).count())
+        assertEquals(1, Regex("### \\[R\\d+\\] Alpha").findAll(prompt).count(), "a row linked and also in scope appears once")
+        assertEquals(1, Regex("### \\[R\\d+\\] Beta").findAll(prompt).count())
         assertEquals(1, trace.execution.single().pagesStaged, "the database was linked, so the scope pass added nothing")
         assertTrue(a.id in trace.execution.single().given!!.sourceItemIds)
     }
@@ -154,7 +154,7 @@ class CycleSourceAndPromptsTest {
         run(model)
         val prompt = model.taskPrompts().single().prompt
         assertEquals(1, Regex("properties this client cannot read, so not shown: Container").findAll(prompt).count(), "named once, for the row that has one")
-        assertTrue(prompt.contains("### Has hidden") && prompt.contains("### Has none"))
+        assertTrue(prompt.contains("] Has hidden") && prompt.contains("] Has none"))
     }
 
     // ── Bounds: nothing is cut without saying which item ─────────────────────
@@ -169,13 +169,13 @@ class CycleSourceAndPromptsTest {
         val (trace, _) = run(model, tight)
 
         val prompt = model.taskPrompts().single().prompt
-        val given = rows.filter { prompt.contains("### ${it.properties.values.filterIsInstance<NotionValue.Title>().first().text} ") }
+        val given = rows.filter { prompt.contains("] ${it.properties.values.filterIsInstance<NotionValue.Title>().first().text}\n") }
         val left = rows - given.toSet()
         assertTrue(given.isNotEmpty() && left.isNotEmpty(), "the bound should bite: given ${given.size} of ${rows.size}")
         assertTrue(prompt.contains("NOT GIVEN TO YOU (limits of this call, not facts about the sources):"), prompt)
         for (row in left) {
             val title = row.properties.values.filterIsInstance<NotionValue.Title>().first().text
-            assertTrue(prompt.contains("LEFT OUT: \"$title\" <${notionPageUrl(row.id)}>"), "left-out row '$title' is named")
+            assertTrue(Regex("""LEFT OUT: \[R\d+\] "${title}" did not fit""").containsMatchIn(prompt), "left-out row '$title' is named")
             assertFalse(prompt.contains("R${title.removePrefix("Row ")} x"), "its text was not given")
         }
         val g = trace.execution.single().given!!
@@ -197,7 +197,7 @@ class CycleSourceAndPromptsTest {
 
         val prompt = model.taskPrompts().single().prompt
         assertTrue(Regex("""\[CUT: showing \d+ of 5000 characters of this property""").containsMatchIn(prompt), prompt.take(3_000))
-        assertTrue(prompt.contains("CUT: \"Huge row\" <${notionPageUrl(row.id)}> was given only in part"), "the cut row is named")
+        assertTrue(Regex("""CUT: \[R\d+\] "Huge row" was given only in part""").containsMatchIn(prompt), "the cut row is named")
         assertTrue(prompt.contains("said: Normal row"), "the other row is untouched")
         assertEquals(listOf(row.id), trace.execution.single().given!!.cutItemIds)
     }
@@ -224,7 +224,7 @@ class CycleSourceAndPromptsTest {
 
         val prompt = model.taskPrompts().single().prompt
         assertTrue(prompt.contains("[CUT: this page has more text than the size limit allowed; the rest was not read]"), prompt.takeLast(1_500))
-        assertTrue(prompt.contains("CUT: \"Persona\" <$personaUrl> was given only in part"))
+        assertTrue(prompt.contains("CUT: [P1] \"Persona\" was given only in part"))
         assertEquals(1, trace.execution.single().given!!.cutItemIds.size)
     }
 
@@ -340,8 +340,8 @@ class CycleSourceAndPromptsTest {
     @Test
     fun `each prompt has a name, a version and a pinned fingerprint, so editing the text without bumping the version fails here`() {
         val pinned = mapOf(
-            "plan" to ("2" to "bdbf4db2993c"), "task.read" to ("1" to "d3c22801d0aa"), "task.check" to ("1" to "80fd42edb1da"), "task.consolidate" to ("1" to "b82a372bb4df"),
-            "task.hypothesis" to ("1" to "a753b8db2e9d"), "task.escalate" to ("1" to "80c30dc844be"), "qc" to ("2" to "b27602da948f"),
+            "plan" to ("3" to "5605550f25f7"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("2" to "e0f9d3df301a"), "task.consolidate" to ("2" to "8797d5f3b38d"),
+            "task.hypothesis" to ("2" to "53cb43937922"), "task.escalate" to ("2" to "0161f4860f97"), "qc" to ("3" to "f05582d26ffb"),
         )
         assertEquals(pinned.keys, CyclePrompts.all.map { it.name }.toSet())
         for (p in CyclePrompts.all) {
@@ -361,7 +361,7 @@ class CycleSourceAndPromptsTest {
         val model = Recording().apply { plan = tasks("Read it" to "Read", "Check it" to "Check", "Gather" to "Consolidate") }
         val (trace, _) = run(model)
 
-        assertEquals(PromptRef("plan", "2", CyclePrompts.PLAN.fingerprint), trace.model!!.given!!.prompt)
+        assertEquals(PromptRef("plan", "3", CyclePrompts.PLAN.fingerprint), trace.model!!.given!!.prompt)
         assertEquals(listOf("task.read", "task.check", "task.consolidate"), trace.execution.map { it.given!!.prompt.name })
         assertEquals(CyclePrompts.QC.ref, trace.qc!!.given!!.prompt)
         assertEquals(listOf(emptyList(), listOf(1), listOf(1, 2)), trace.execution.map { it.given!!.earlierTasks })
@@ -385,7 +385,7 @@ class CycleSourceAndPromptsTest {
         val json = Json.encodeToString(CyclePlanTrace.serializer(), trace)
         assertFalse(json.contains("ALPHA-SECRET-TEXT"), "row text must never reach the trace")
         assertFalse(json.contains("Findings: "), "nor a task's own words")
-        assertTrue(json.contains("\"name\":\"task.check\"") && json.contains("\"version\":\"1\"") && json.contains("\"fingerprint\""))
+        assertTrue(json.contains("\"name\":\"task.check\"") && json.contains("\"version\":\"2\"") && json.contains("\"fingerprint\""))
     }
 
     @Test
@@ -432,7 +432,7 @@ class CycleSourceAndPromptsTest {
         assertTrue(staged.pages[1].title.startsWith("Rows of memory-items"))
         assertEquals(2, staged.pages.size)
         assertTrue(staged.notGiven().isEmpty())
-        val tiny = runBlocking { TaskStager(context, PageContentReader(f.guarded())).stageSources(room = 200) }
+        val tiny = runBlocking { TaskStager(context, PageContentReader(f.guarded())).stageSources(room = 100) }
         assertTrue(tiny.items.isEmpty(), "with no room nothing is half-given: ${tiny.items}")
         assertTrue(tiny.problems.isNotEmpty() && tiny.leftOutItems.size == 1, "and both what did not fit are named: ${tiny.notGiven()}")
     }

@@ -27,6 +27,8 @@ data class QcInput(
     val rejectedAtPlanning: Int,
     /** The goal's in-scope rows and pages, staged within bounds. QC judges Done when against these, not only against the task results. */
     val sources: StagedContext = StagedContext.EMPTY,
+    /** Short names for the in-scope pages and rows, shown next to their titles. */
+    val handles: Handles = Handles.NONE,
 )
 
 /** QC's call on the cycle. [goalLooksMet] is one of [LOOKS_MET_VALUES]. The goal's Status is Jacob's to change and QC never does. */
@@ -72,7 +74,17 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
         val client = llmClient ?: return QcResult(null, modelCalled = false, latencyMs = 0, rejectedReason = "no_llm_client")
         val startMs = System.currentTimeMillis()
         val prompt = QcPromptBuilder.build(input)
-        val given = GivenTrace.of(CyclePrompts.QC, prompt.length, input.sources, QcPromptBuilder.shownTasks(input).map { it.order })
+        val shown = QcPromptBuilder.shownTasks(input)
+        val cutTasks = QcPromptBuilder.cutTasks(input)
+        val leftOutTasks = input.tasks.drop(QcPromptBuilder.MAX_TASKS).map { it.order }
+        val base = GivenTrace.of(CyclePrompts.QC, prompt.length, input.sources, shown.map { it.order })
+        // A task result that was cut, or left off, is recorded like a cut row: by id ("task:1"), and counted as a not-given line.
+        val given = base.copy(
+            cutItemIds = (base.cutItemIds + cutTasks.map { "task:$it" }).take(GivenTrace.MAX_IDS),
+            leftOutItemIds = (base.leftOutItemIds + leftOutTasks.map { "task:$it" }).take(GivenTrace.MAX_IDS),
+            leftOutCount = base.leftOutCount + leftOutTasks.size,
+            notGivenLines = base.notGivenLines + cutTasks.size + if (leftOutTasks.isEmpty()) 0 else 1,
+        )
         val response = try {
             client.complete(
                 LlmRequest(
@@ -166,11 +178,51 @@ object QcPromptBuilder {
 
     /** Task results listed: all of them up to this many, so a long cycle says how many it left off instead of overflowing. */
     const val MAX_TASKS = 25
-    private const val RESULT_EXCERPT = 900
     private const val DONE_WHEN_MAX = 6_000
+
+    /** One result's own bound: the most a task may write (see [DirectorTaskExecutor.MAX_RESULT_CHARS]) plus the pages-used footer the Director adds. */
+    const val RESULT_CAP = DirectorTaskExecutor.MAX_RESULT_CHARS + 3_000
+
+    /** All task results together are given about this much; a long cycle shares it out, so no result is starved by a long neighbour. */
+    const val RESULTS_TOTAL = 30_000
 
     /** The tasks that [build] lists. */
     fun shownTasks(input: QcInput): List<QcTaskLine> = input.tasks.take(MAX_TASKS)
+
+    /** How many characters of each shown task's result may be given: its own length up to [RESULT_CAP], and a fair share of [RESULTS_TOTAL]. */
+    fun allowances(input: QcInput): List<Int> {
+        val shown = shownTasks(input)
+        val lengths = shown.map { it.excerpt.trim().length.coerceAtMost(RESULT_CAP) }
+        val allowance = IntArray(shown.size)
+        var remaining = RESULTS_TOTAL
+        var left = shown.size
+        for (i in lengths.indices.sortedBy { lengths[it] }) {
+            allowance[i] = minOf(lengths[i], remaining / left)
+            remaining -= allowance[i]
+            left--
+        }
+        return allowance.toList()
+    }
+
+    /** Orders of the shown tasks whose result is longer than what they are given. */
+    fun cutTasks(input: QcInput): List<Int> {
+        val allow = allowances(input)
+        return shownTasks(input).filterIndexed { i, t -> t.excerpt.trim().length > allow[i] }.map { it.order }
+    }
+
+    /** The lines that go under NOT GIVEN TO YOU for task results. */
+    private fun taskNotGiven(input: QcInput): List<String> = buildList {
+        val cut = cutTasks(input).toSet()
+        shownTasks(input).filter { it.order in cut }.forEach { add("CUT: the result of Task ${it.order} \"${PromptText.excerpt(it.title, 80)}\" was given only in part (see its [CUT ...] marker).") }
+        if (input.tasks.size > MAX_TASKS) add("LEFT OUT: the results of ${input.tasks.size - MAX_TASKS} more task(s) were not given.")
+    }
+
+    /** A result's text for the prompt: kept as written (line breaks indented under the result), cut with a marker only past its allowance. */
+    private fun resultText(text: String, allowance: Int): String {
+        val t = text.trim().ifBlank { "(none)" }
+        val shown = if (t.length <= allowance) t else t.take(allowance) + " [CUT: ${t.length - allowance} more characters of this result not shown]"
+        return shown.replace("\n", "\n    ")
+    }
 
     fun build(input: QcInput): String {
         val goal = input.goal
@@ -186,7 +238,7 @@ object QcPromptBuilder {
             if (goal.scope.ignoredLinks.isNotEmpty()) appendLine("Scope also held ${goal.scope.ignoredLinks.size} link(s) that are not mentions. Code ignored them.")
             appendLine()
 
-            with(TaskPromptBuilder) { appendSources(input.sources, forTask = false) }
+            with(TaskPromptBuilder) { appendSources(input.sources, forTask = false, handles = input.handles, extraNotGiven = taskNotGiven(input)) }
             appendLine()
 
             val counts = input.tasks.groupingBy { it.status }.eachCount()
@@ -198,10 +250,11 @@ object QcPromptBuilder {
                     "; done ${counts[TaskStatus.DONE] ?: 0}, blocked ${counts[TaskStatus.BLOCKED] ?: 0}, failed ${counts[TaskStatus.FAILED] ?: 0}" +
                     if (input.rejectedAtPlanning > 0) "; ${input.rejectedAtPlanning} more proposed task(s) were rejected by code before they were written" else "",
             )
-            shownTasks(input).forEach { task ->
+            val allow = allowances(input)
+            shownTasks(input).forEachIndexed { i, task ->
                 appendLine()
                 appendLine("Task ${task.order} [${task.status.label}] (${task.type}) ${PromptText.excerpt(task.title, 160)}")
-                appendLine("  result: ${PromptText.excerpt(task.excerpt.ifBlank { "(none)" }, RESULT_EXCERPT)}")
+                appendLine("  result: ${resultText(PromptText.withHandles(task.excerpt, input.handles), allow[i])}")
             }
             if (input.tasks.size > MAX_TASKS) appendLine("\n(${input.tasks.size - MAX_TASKS} more task result(s) not listed)")
             appendLine()

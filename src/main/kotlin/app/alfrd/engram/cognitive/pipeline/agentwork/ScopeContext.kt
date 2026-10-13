@@ -139,6 +139,9 @@ data class ScopeContext(
 
     private val byId: Map<String, ContextRow> = rows.associateBy { it.pageId }
 
+    /** Short names (P1, D1, R1) for what this scope puts in reach, shown to every model call of the cycle. */
+    val handles: Handles by lazy { Handles.of(this) }
+
     fun row(pageId: String): ContextRow? = normalizeNotionId(pageId)?.let(byId::get)
     fun rowsOf(table: String): List<ContextRow> = rows.filter { it.table == table }
     fun tableOf(url: String): String? = notionPageIdInPath(url)?.let(tablesByDatabaseId::get)

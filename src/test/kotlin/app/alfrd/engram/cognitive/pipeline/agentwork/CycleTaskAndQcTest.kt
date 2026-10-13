@@ -58,7 +58,7 @@ class CycleTaskAndQcTest {
         assertTrue(prompt.contains("TASK 2 of 4: Compare Persona with the Items  (Check)"), prompt)
         assertTrue(prompt.contains("WHAT TO DO: Compare each claim"), prompt)
         assertTrue(prompt.contains("- Task 1 Read Persona [Done]: Read it: 12 claims."), prompt)
-        assertTrue(prompt.contains("<$memoUrl>") && prompt.contains("Jacob prefers short answers."), prompt)
+        assertTrue(prompt.contains("Jacob prefers short answers.") && !prompt.contains(memoUrl), "a page is shown without its id: $prompt")
     }
 
     @Test

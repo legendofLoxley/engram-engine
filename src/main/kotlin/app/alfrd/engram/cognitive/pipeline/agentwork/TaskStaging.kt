@@ -63,15 +63,16 @@ data class StagedContext(
      * What the model must be told it was NOT given, one line each, naming the item: items cut, items left out,
      * links that could not be read or did not fit, and what was never read. Empty when everything was given in full.
      */
-    fun notGiven(maxListed: Int = MAX_LISTED): List<String> = buildList {
-        cutItems.forEach { add("CUT: \"${it.title.ifBlank { "(untitled)" }}\" <${it.url}> was given only in part (see its [CUT ...] marker).") }
+    fun notGiven(maxListed: Int = MAX_LISTED, handles: Handles = Handles.NONE): List<String> = buildList {
+        fun name(item: StagedItem) = "${handles.label(item.url, "<${item.url}>")} \"${item.title.ifBlank { "(untitled)" }}\"".trim()
+        cutItems.forEach { add("CUT: ${name(it)} was given only in part (see its [CUT ...] marker).") }
         val left = leftOutItems
-        left.take(maxListed).forEach { add("LEFT OUT: \"${it.title.ifBlank { "(untitled)" }}\" <${it.url}> did not fit within this call's size limit.") }
+        left.take(maxListed).forEach { add("LEFT OUT: ${name(it)} did not fit within this call's size limit.") }
         if (left.size > maxListed) add("LEFT OUT: ${left.size - maxListed} more item(s) did not fit; they are not named here.")
         problems.forEach {
             when (it) {
-                is StagingProblem.Unreadable -> add("UNREADABLE: <${it.link}> could not be read (${it.detail}).")
-                is StagingProblem.OverBudget -> add("LEFT OUT: <${it.link}> was not given (${it.detail}).")
+                is StagingProblem.Unreadable -> add("UNREADABLE: ${handles.label(it.link, "<${it.link}>")} could not be read (${it.detail}).")
+                is StagingProblem.OverBudget -> add("LEFT OUT: ${handles.label(it.link, "<${it.link}>")} was not given (${it.detail}).")
                 is StagingProblem.OutOfScope -> Unit // a task naming one is Blocked before any model call
             }
         }
@@ -92,11 +93,11 @@ data class StagedContext(
 object RowText {
     class Rendered(val text: String, val cutProperties: List<String>)
 
-    fun render(row: ContextRow, maxChars: Int, header: Boolean = true): Rendered {
+    fun render(row: ContextRow, maxChars: Int, header: Boolean = true, label: String = ""): Rendered {
         var fields = row.fields
         var cut = emptyList<String>()
         fun body(f: List<RowField>) = buildString {
-            if (header) appendLine("### ${row.title.ifBlank { "(untitled)" }}  <${row.pageUrl}>")
+            if (header) appendLine("### ${label.ifEmpty { "<${row.pageUrl}>" }} ${row.title.ifBlank { "(untitled)" }}")
             f.forEach { appendLine("${it.name}: ${it.text.replace("\n", "\n  ")}") }
             if (row.unreadable.isNotEmpty()) appendLine("(properties this client cannot read, so not shown: ${row.unreadable.joinToString(", ")})")
         }.trimEnd()
@@ -225,7 +226,7 @@ class TaskStager(
         for (row in rows) {
             val item = StagedItem(row.pageId, row.pageUrl, row.title)
             if (full) { left += item; continue }
-            val rendered = RowText.render(row, limits.perPageChars)
+            val rendered = RowText.render(row, limits.perPageChars, label = scope.handles.label(row.pageId))
             val add = rendered.text.length + (if (text.isEmpty()) 0 else 2)
             if (add > run.left - text.length - FOOTER_ROOM) { full = true; left += item; continue }
             if (text.isNotEmpty()) text.append("\n\n")

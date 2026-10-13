@@ -151,7 +151,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
                                 putJsonObject("target_links") {
                                     put("type", "array")
                                     putJsonObject("items") { put("type", "string") }
-                                    put("description", "Links from the allowed list that this task reads. May be empty.")
+                                    put("description", "Handles (like R1, P1 or D1) from the allowed list that this task reads, copied exactly. May be empty.")
                                 }
                             }
                             putJsonArray("required") { add("title"); add("type"); add("instructions") }
@@ -210,16 +210,16 @@ object PlanPromptBuilder {
             }
 
             val context = input.context
-            appendLine("SCOPE: the goal's @-mentions put these in reach (target_links must be copied exactly from the list below):")
-            context.outcomes.filter { it !is ScopeOutcome.Skipped }.forEach { appendLine("- " + describe(it)) }
+            appendLine("SCOPE: the goal's @-mentions put these in reach (write each handle, like R1, P1 or D1, exactly as listed to link it):")
+            context.outcomes.filter { it !is ScopeOutcome.Skipped }.forEach { appendLine("- " + describe(it, context.handles)) }
             appendLine()
-            appendLine("LINKS YOU MAY USE (pages and rows in scope):")
+            appendLine("LINKS YOU MAY USE (pages and rows in scope; write the handle in target_links):")
             val budgetForRows = MAX_CHARS - length - 1_500
             var used = 0
             var shown = 0
             for (row in context.rows) {
                 val line = buildString {
-                    append("- ${row.pageUrl}  [${row.table}] ${row.title.oneLine(200)}")
+                    append("- ${context.handles.handleFor(row.pageId) ?: row.pageUrl}  [${row.table}] ${row.title.oneLine(200)}")
                     if (row.facts.isNotEmpty()) append("  | ${row.facts.joinToString("; ")}")
                     if (row.factsOmitted > 0) append("; (+${row.factsOmitted} more properties not listed here)")
                 }
@@ -245,9 +245,9 @@ object PlanPromptBuilder {
         return PlanPrompt(text, shownIds, omitted, input.context.outcomes.count { it !is ScopeOutcome.Skipped }, input.context.skipped.size)
     }
 
-    private fun describe(outcome: ScopeOutcome): String = when (outcome) {
-        is ScopeOutcome.TableListed -> "${notionPageUrl(outcome.mention.id)}  [database ${outcome.mention.title.ifBlank { outcome.table }}, table ${outcome.table}: ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more exist" else ""}]"
-        is ScopeOutcome.PageRead -> "page ${outcome.mention.title.ifBlank { outcome.label }} (${outcome.label})"
+    private fun describe(outcome: ScopeOutcome, handles: Handles): String = when (outcome) {
+        is ScopeOutcome.TableListed -> "${handles.handleFor(outcome.mention.id) ?: notionPageUrl(outcome.mention.id)}  [database ${outcome.mention.title.ifBlank { outcome.table }}, table ${outcome.table}: ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more exist" else ""}]"
+        is ScopeOutcome.PageRead -> "${handles.handleFor(outcome.pageId) ?: notionPageUrl(outcome.pageId)}  page ${outcome.mention.title.ifBlank { outcome.label }} (${outcome.label})"
         is ScopeOutcome.Skipped -> ""
     }
 

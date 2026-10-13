@@ -306,7 +306,7 @@ class CycleProcessor(
                 continue
             }
             requireLease(cycle)
-            val run = runTask(cycle, goal, task, tasks.size, stager, earlier, trace)
+            val run = runTask(cycle, goal, task, tasks.size, stager, context.handles, earlier, trace)
             current[order] = run.task
             earlier += EarlierResult(order, run.task.title, run.task.status ?: TaskStatus.FAILED, run.task.result)
             if (run.task.status == TaskStatus.DONE) {
@@ -325,7 +325,7 @@ class CycleProcessor(
         // QC judges Done when against the source rows and pages, not only against what the tasks said about them.
         val sources = stager.stageSources(limits.perTaskChars)
         trace.content += sources.traces
-        val result = qc.decide(QcInput(goal, cycle, scopeLines(context), lines, rejected, sources))
+        val result = qc.decide(QcInput(goal, cycle, scopeLines(context), lines, rejected, sources, context.handles))
         trace.qc = QcTrace(result.modelCalled, result.latencyMs, result.rejectedReason, result.decision?.goalLooksMet, result.providerName, result.modelName, result.answer, result.given)
 
         val done = finalTasks.count { it.status == TaskStatus.DONE }
@@ -399,9 +399,9 @@ class CycleProcessor(
             return Planned.Stop(finish(cycle, trace, CycleStatus.FAILED, "Cycle failed: ${explain(proposal.rejectedReason)}. Nothing was written."))
         }
 
-        val plan = CyclePlanValidator.validate(proposal.tasks, budget, context.allowed)
+        val plan = CyclePlanValidator.validate(proposal.tasks, budget, context.allowed, context.handles)
         plan.tasks.forEach { trace.accepted += TaskTrace(it.order, it.title, it.type.label, it.targetLinks, it.instructions.take(300)) }
-        plan.rejected.forEach { trace.rejected += RejectionTrace(it.index, it.title, it.reason.name, it.detail) }
+        plan.rejected.forEach { trace.rejected += RejectionTrace(it.index, it.title, it.reason.name, it.detail, it.type, it.links) }
         if (plan.tasks.isEmpty()) {
             return Planned.Stop(finish(cycle, trace, CycleStatus.FAILED, "Cycle failed: no valid tasks. ${rejectionSummary(proposal.tasks.size, plan.rejected)} Nothing was written."))
         }
@@ -457,6 +457,7 @@ class CycleProcessor(
         task: AgentTask,
         taskCount: Int,
         stager: TaskStager,
+        handles: Handles,
         earlier: List<EarlierResult>,
         trace: CyclePlanTrace,
     ): TaskRun {
@@ -484,7 +485,7 @@ class CycleProcessor(
             return settle(TaskStatus.BLOCKED, result, "pages_unreadable", 0, null)
         }
 
-        val outcome = executor.execute(TaskExecutionInput(goal, cycle, task, taskCount, staged, earlier))
+        val outcome = executor.execute(TaskExecutionInput(goal, cycle, task, taskCount, staged, earlier, handles))
         return when (val execution = outcome.execution) {
             is TaskExecution.Done -> {
                 val text = composeResult(execution, staged)
@@ -508,7 +509,7 @@ class CycleProcessor(
     /** The Result as written: the worker's report, then a footer of the pages used, built by code from the validated citations. */
     private fun composeResult(done: TaskExecution.Done, staged: StagedContext): String = buildString {
         append(done.result.trim())
-        val titles = staged.items.associateBy({ notionPageIdInPath(it.url) }, { it.title })
+        val titles = (staged.pages.map { StagedItem("", it.url, it.title) } + staged.items).associateBy({ notionPageIdInPath(it.url) }, { it.title })
         append("\n\n")
         if (done.pagesUsed.isNotEmpty()) {
             append("Pages used:")

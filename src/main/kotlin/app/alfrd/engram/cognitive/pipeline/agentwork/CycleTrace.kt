@@ -174,7 +174,16 @@ data class ModelTrace(
 data class TaskTrace(val order: Int, val title: String, val type: String, val links: List<String>, val instructions: String)
 
 @Serializable
-data class RejectionTrace(val index: Int, val title: String?, val reason: String, val detail: String?)
+data class RejectionTrace(
+    val index: Int,
+    val title: String?,
+    val reason: String,
+    val detail: String?,
+    /** The type the model proposed, as written. */
+    val type: String? = null,
+    /** Every link the model proposed, as written (handles included). */
+    val links: List<String> = emptyList(),
+)
 
 @Serializable
 data class WriteTrace(val opKey: String, val outcome: String)

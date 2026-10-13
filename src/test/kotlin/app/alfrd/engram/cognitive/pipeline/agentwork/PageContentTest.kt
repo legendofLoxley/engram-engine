@@ -240,7 +240,8 @@ class PageContentTest {
 
         val page = staged.pages.single()
         assertEquals("database", page.source)
-        assertTrue(page.text.contains("### Board memo  <${url(a.id)}>") && page.text.contains("### Audit  <"), page.text)
+        assertTrue(page.text.contains("### [R1] Board memo") && page.text.contains("### [R2] Audit"), page.text)
+        assertFalse(page.text.contains(url(a.id)), "rows are shown by handle, not by id")
         assertEquals(0, f.fake.requestCount("listBlocks"), "a database digest comes from the rows already read, not from page bodies")
     }
 

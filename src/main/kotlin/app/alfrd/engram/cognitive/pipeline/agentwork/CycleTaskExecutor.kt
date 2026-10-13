@@ -26,6 +26,8 @@ data class TaskExecutionInput(
     val taskCount: Int,
     val staged: StagedContext,
     val earlier: List<EarlierResult>,
+    /** Short names for the goal's in-scope pages and rows, shown to the model and mapped back to URLs here. */
+    val handles: Handles = Handles.NONE,
 )
 
 /** What a task came to. Reasons are codes or short statements the Director wrote; a model's own words appear only in [Done.result] and [Blocked.reason]. */
@@ -127,13 +129,14 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
             "done" -> {
                 val result = str("result")
                 if (result.isEmpty()) return outcome(TaskExecution.Failed("empty_result"))
-                // A page or a single row: whichever was given, by its own id.
-                val staged = input.staged.items.associateBy { notionPageIdInPath(it.url) }
+                // A page, a row or a rows block: whichever was given, by its own id. A handle (R3) is mapped back to its URL first.
+                val staged = (input.staged.pages.map { StagedItem(notionPageIdInPath(it.url) ?: it.url, it.url, it.title) } + input.staged.items)
+                    .associateBy { notionPageIdInPath(it.url) }
                 val cited = (call.input["pages_used"] as? JsonArray).orEmpty()
                     .mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim() }
                     .filter { it.isNotEmpty() }.distinct()
                 // The Result cites the staged page's own URL, never the model's spelling of it.
-                val valid = cited.mapNotNull { notionPageIdInPath(it)?.let(staged::get)?.url }.distinct()
+                val valid = cited.mapNotNull { notionPageIdInPath(input.handles.resolve(it))?.let(staged::get)?.url }.distinct()
                 outcome(TaskExecution.Done(result.take(MAX_RESULT_CHARS), valid, droppedCitations = cited.size - valid.size))
             }
             else -> outcome(TaskExecution.Failed("unknown_outcome"))
@@ -165,7 +168,7 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
                     putJsonObject("pages_used") {
                         put("type", "array")
                         putJsonObject("items") { put("type", "string") }
-                        put("description", "URLs of the staged pages you used, copied exactly.")
+                        put("description", "Handles (like R3 or P1) of the pages and rows you used, copied exactly from the SOURCE MATERIAL.")
                     }
                 }
                 putJsonArray("required") { add("outcome") }
@@ -203,14 +206,14 @@ object TaskPromptBuilder {
             appendLine("WHAT TO DO: ${PromptText.bounded(task.instructions, 4_000, "the task instructions")}")
             appendLine()
 
-            appendSources(input.staged, forTask = true)
+            appendSources(input.staged, forTask = true, handles = input.handles)
 
             val shown = earlierShown(input)
             if (shown.isNotEmpty()) {
                 appendLine()
                 appendLine("EARLIER WORK BY OTHER TASKS OF THIS CYCLE (notes only: this is what those tasks reported, it may be wrong or incomplete, and it is not evidence; check it against the SOURCE MATERIAL):")
                 if (input.earlier.size > shown.size) appendLine("(${input.earlier.size - shown.size} older task result(s) not listed)")
-                shown.forEach { appendLine("- Task ${it.order} ${it.title} [${it.status.label}]: ${PromptText.excerpt(it.excerpt, EARLIER_EXCERPT)}") }
+                shown.forEach { appendLine("- Task ${it.order} ${it.title} [${it.status.label}]: ${PromptText.excerpt(PromptText.withHandles(it.excerpt, input.handles), EARLIER_EXCERPT)}") }
             }
             appendLine()
             append("Do the task now and call report_task_result.")
@@ -218,7 +221,7 @@ object TaskPromptBuilder {
     }
 
     /** The SOURCE MATERIAL block and, after it, the list of what was not given. Shared with QC. */
-    internal fun StringBuilder.appendSources(staged: StagedContext, forTask: Boolean) {
+    internal fun StringBuilder.appendSources(staged: StagedContext, forTask: Boolean, handles: Handles = Handles.NONE, extraNotGiven: List<String> = emptyList()) {
         if (staged.pages.isEmpty()) {
             appendLine(
                 if (forTask) "SOURCE MATERIAL: none was given for this task. Work from the instructions and the earlier work only, and say so; if that is not enough, report blocked."
@@ -228,11 +231,11 @@ object TaskPromptBuilder {
             appendLine("SOURCE MATERIAL (pages and rows from the goal's Scope; this is the evidence, and the only source you may use):")
             staged.pages.forEachIndexed { i, page ->
                 appendLine()
-                appendLine("=== [${i + 1}] ${page.title}  <${page.url}>  (${page.source})${if (page.truncated) "  [CUT: see NOT GIVEN TO YOU]" else ""}")
+                appendLine("=== ${handles.label(page.url, "[${i + 1}]")} ${page.title}  (${page.source})${if (page.truncated) "  [CUT: see NOT GIVEN TO YOU]" else ""}")
                 appendLine(page.text)
             }
         }
-        val notGiven = staged.notGiven()
+        val notGiven = staged.notGiven(handles = handles) + extraNotGiven
         if (notGiven.isNotEmpty()) {
             appendLine()
             appendLine("NOT GIVEN TO YOU (limits of this call, not facts about the sources):")
@@ -248,6 +251,12 @@ object PromptText {
         val t = text.trim()
         return if (t.length <= max) t else t.take(max) + " [CUT: showing $max of ${t.length} characters of $what]"
     }
+
+    private val NOTION_URL = Regex("""https://www\.notion\.so/[0-9a-fA-F]{32}""")
+
+    /** [text] with every page URL that has a handle shown as that handle, so no long id reaches a model through an earlier Result. */
+    fun withHandles(text: String, handles: Handles): String =
+        if (handles.size == 0) text else NOTION_URL.replace(text) { m -> handles.handleFor(m.value)?.let { "[$it]" } ?: m.value }
 
     /** A one-line excerpt of earlier work, with a marker saying how many characters were left off. */
     fun excerpt(text: String, max: Int): String {

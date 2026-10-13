@@ -87,7 +87,7 @@ class CyclePlanDirectorTest {
         assertTrue(request.systemPrompt!!.contains("Tasks only read and report"))
         assertTrue(request.prompt.contains("Read the primary documents"))
         assertTrue(request.prompt.contains("TASK BUDGET: 6"))
-        assertTrue(request.prompt.contains(memoRow.pageUrl))
+        assertTrue(request.prompt.contains("- R1  [sources] Oct 6 Board memo") && !request.prompt.contains(memoRow.pageUrl), "rows are listed by handle, not by id")
 
         assertNull(proposal.rejectedReason)
         assertTrue(proposal.modelCalled)
@@ -177,18 +177,18 @@ class CyclePlanDirectorTest {
 
     @Test
     fun `a database the goal mentions is shown to the model with the link to copy, since the validator allows it`() {
-        val databaseUrl = notionPageUrl(sourcesMention.id)
         val prompt = PlanPromptBuilder.build(input(context = context(rows = listOf(memoRow))))
         val scope = prompt.substringAfter("SCOPE:").substringBefore("LINKS YOU MAY USE")
-        assertTrue(scope.contains(databaseUrl) && scope.contains("table sources"), scope)
+        assertTrue(scope.contains("- D1  [database PPS Sources") && scope.contains("table sources"), scope)
+        assertFalse(prompt.contains(notionPageUrl(sourcesMention.id)), "the database is named by handle, not by id")
         val links = prompt.substringAfter("LINKS YOU MAY USE")
-        assertTrue(links.contains(memoRow.pageUrl), "rows are still listed: $links")
+        assertTrue(links.contains("- R1  [sources]"), "rows are still listed: $links")
     }
 
     @Test
     fun `a goal whose only mention is a database with no rows does not say it links to nothing`() {
         val prompt = PlanPromptBuilder.build(input(context = context(rows = emptyList(), outcomes = listOf(ScopeOutcome.TableListed(sourcesMention, "sources", 0, false)))))
-        assertTrue(prompt.contains(notionPageUrl(sourcesMention.id)))
+        assertTrue(prompt.contains("- D1  [database"))
         assertFalse(prompt.contains("tasks have no links"), prompt)
     }
 
@@ -223,9 +223,9 @@ class CyclePlanDirectorTest {
         assertTrue(prompt.contains("Error found [Resolved]: Which A/B box is right? => Box B. Use it."))
         assertFalse(prompt.contains("Please review"), "an escalation with no resolution has nothing for the planner")
         assertTrue(prompt.contains("LAST CYCLE (CYCLE-0) SUMMARY:"))
-        assertTrue(prompt.contains("- ${memoRow.pageUrl}  [sources] Oct 6 Board memo  | Type: PPS Document; URL: https://example.org/memo.pdf"))
+        assertTrue(prompt.contains("- R1  [sources] Oct 6 Board memo  | Type: PPS Document; URL: https://example.org/memo.pdf"))
         assertTrue(prompt.contains("DONE WHEN (a check anyone could apply; plan so it can be checked from your tasks' results): Every listed document has a finding."))
-        assertTrue(prompt.contains("- ${notionPageUrl(sourcesMention.id)}  [database PPS Sources, table sources: 1 row(s) listed below]"))
+        assertTrue(prompt.contains("- D1  [database PPS Sources, table sources: 1 row(s) listed below]"))
         assertFalse(prompt.contains("external:"), "no external URL is offered: none can be in scope")
     }
 

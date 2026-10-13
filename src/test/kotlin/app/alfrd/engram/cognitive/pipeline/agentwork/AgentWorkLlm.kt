@@ -44,10 +44,10 @@ class RoutedLlm(
     }
 
     companion object {
-        private val STAGED_URL = Regex("""<(https://www\.notion\.so/[0-9a-f]{32})>""")
+        private val STAGED_HANDLE = Regex("""(?m)^(?:===|###) \[([PDR]\d+)\]""")
 
-        /** The URLs of the staged pages in a task prompt. */
-        fun stagedUrls(prompt: String): List<String> = STAGED_URL.findAll(prompt).map { it.groupValues[1] }.distinct().toList()
+        /** The handles (R1, P1, D1) of the staged pages and rows in a task prompt, as a cooperative worker would cite them. */
+        fun stagedUrls(prompt: String): List<String> = STAGED_HANDLE.findAll(prompt).map { it.groupValues[1] }.distinct().toList()
 
         fun plan(vararg tasks: JsonObject, rationale: String? = "because"): (LlmRequest) -> JsonObject = { ScriptedLlm.planOf(*tasks, rationale = rationale) }
 
