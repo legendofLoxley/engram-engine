@@ -354,14 +354,14 @@ class CycleSourceAndPromptsTest {
     @Test
     fun `QC tests a nothing-found conclusion item by item and keeps its feedback to the goal's own words`() {
         val text = CyclePrompts.QC.text
-        for (rule in listOf("list the items that conclusion covers", "actually checked in a task result", "unchecked: say so in goal_feedback by name", "only to text that appears in the goal's title, Done when or Scope", "Never refer to ids, codes or labels from the headers", "List every unchecked item here")) assertTrue(text.contains(rule), "missing: $rule")
+        for (rule in listOf("list the items that conclusion covers", "actually checked in a task result", "unchecked: say so in goal_feedback by name", "only to text that appears in the goal's title, Done when or Scope", "List every unchecked item here")) assertTrue(text.contains(rule), "missing: $rule")
     }
 
     @Test
     fun `each prompt has a name, a version and a pinned fingerprint, so editing the text without bumping the version fails here`() {
         val pinned = mapOf(
-            "plan" to ("4" to "f2619334a133"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("3" to "ee86c7f9cb26"), "task.consolidate" to ("2" to "8797d5f3b38d"),
-            "task.hypothesis" to ("2" to "53cb43937922"), "task.escalate" to ("2" to "0161f4860f97"), "qc" to ("4" to "e1dfd574b228"),
+            "plan" to ("5" to "8549b5926716"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("3" to "ee86c7f9cb26"), "task.consolidate" to ("2" to "8797d5f3b38d"),
+            "task.hypothesis" to ("2" to "53cb43937922"), "task.escalate" to ("2" to "0161f4860f97"), "qc" to ("5" to "5a6285cd72e3"),
         )
         assertEquals(pinned.keys, CyclePrompts.all.map { it.name }.toSet())
         for (p in CyclePrompts.all) {
@@ -381,7 +381,7 @@ class CycleSourceAndPromptsTest {
         val model = Recording().apply { plan = tasks("Read it" to "Read", "Check it" to "Check", "Gather" to "Consolidate") }
         val (trace, _) = run(model)
 
-        assertEquals(PromptRef("plan", "4", CyclePrompts.PLAN.fingerprint), trace.model!!.given!!.prompt)
+        assertEquals(PromptRef("plan", "5", CyclePrompts.PLAN.fingerprint), trace.model!!.given!!.prompt)
         assertEquals(listOf("task.read", "task.check", "task.consolidate"), trace.execution.map { it.given!!.prompt.name })
         assertEquals(CyclePrompts.QC.ref, trace.qc!!.given!!.prompt)
         assertEquals(listOf(emptyList(), listOf(1), listOf(1, 2)), trace.execution.map { it.given!!.earlierTasks })

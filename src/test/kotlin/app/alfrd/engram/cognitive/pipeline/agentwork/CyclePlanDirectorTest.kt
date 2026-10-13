@@ -222,7 +222,7 @@ class CyclePlanDirectorTest {
         )
         assertTrue(prompt.contains("Error found [Resolved]: Which A/B box is right? => Box B. Use it."))
         assertFalse(prompt.contains("Please review"), "an escalation with no resolution has nothing for the planner")
-        assertTrue(prompt.contains("LAST CYCLE (CYCLE-0) SUMMARY:"))
+        assertTrue(prompt.contains("LAST CYCLE SUMMARY:"))
         assertTrue(prompt.contains("- R1  [sources] Oct 6 Board memo  | Type: PPS Document; URL: https://example.org/memo.pdf"))
         assertTrue(prompt.contains("DONE WHEN (a check anyone could apply; plan so it can be checked from your tasks' results): Every listed document has a finding."))
         assertTrue(prompt.contains("- D1  [database PPS Sources, table sources: 1 row(s) listed below]"))

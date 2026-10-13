@@ -53,7 +53,7 @@ class CycleTaskAndQcTest {
         assertEquals(CyclePrompts.forTask(TaskType.CHECK).text, request.systemPrompt, "a Check task gets the Check prompt")
         assertTrue(request.systemPrompt!!.contains("You can change nothing") && request.systemPrompt!!.contains("Blocking is correct; guessing is not."))
         val prompt = request.prompt
-        assertTrue(prompt.contains("GOAL: Reconcile Persona (GOAL-1)"), prompt)
+        assertTrue(prompt.contains("GOAL: Reconcile Persona\n") && !prompt.contains("GOAL-1"), prompt)
         assertTrue(prompt.contains("DONE WHEN: Every claim in Persona is marked."), prompt)
         assertTrue(prompt.contains("TASK 2 of 4: Compare Persona with the Items  (Check)"), prompt)
         assertTrue(prompt.contains("WHAT TO DO: Compare each claim"), prompt)
@@ -220,8 +220,9 @@ class CycleTaskAndQcTest {
     fun `an unknown looks-met value reads as unclear, and long text is capped`() {
         assertEquals("unclear", qc(qcAnswering(RoutedLlm.qcOf(looksMet = "definitely"))).decision!!.goalLooksMet)
         val capped = qc(qcAnswering(RoutedLlm.qcOf(summary = "s".repeat(9_000), feedback = "f".repeat(9_000)))).decision!!
-        assertEquals(CycleQcDirector.MAX_TEXT_CHARS, capped.summary.length)
-        assertEquals(CycleQcDirector.MAX_TEXT_CHARS, capped.goalFeedback.length)
+        val marker = " [CUT ${9_000 - CycleQcDirector.MAX_TEXT_CHARS} chars]"
+        assertEquals(CycleQcDirector.MAX_TEXT_CHARS + marker.length, capped.summary.length)
+        assertTrue(capped.summary.endsWith(marker) && capped.goalFeedback.endsWith(marker), "a cut always says so")
     }
 
     @Test

@@ -199,11 +199,11 @@ object TaskPromptBuilder {
         val goal = input.goal
         val task = input.task
         return buildString {
-            appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
+            appendLine("GOAL: ${goal.title}")
             if (goal.doneWhen.isNotBlank()) appendLine("DONE WHEN: ${PromptText.bounded(goal.doneWhen, DONE_WHEN_MAX, "Done when")}")
             appendLine()
-            appendLine("TASK ${task.order ?: "?"} of ${input.taskCount}: ${task.title}  (${task.type?.label ?: "type unknown"})")
-            appendLine("WHAT TO DO: ${PromptText.bounded(task.instructions, 4_000, "the task instructions")}")
+            appendLine("TASK ${task.order ?: "?"} of ${input.taskCount}: ${PromptText.stripCodes(task.title)}  (${task.type?.label ?: "type unknown"})")
+            appendLine("WHAT TO DO: ${PromptText.bounded(PromptText.stripCodes(task.instructions), 4_000, "the task instructions")}")
             appendLine()
 
             appendSources(input.staged, forTask = true, handles = input.handles)
@@ -213,7 +213,7 @@ object TaskPromptBuilder {
                 appendLine()
                 appendLine("EARLIER WORK BY OTHER TASKS OF THIS CYCLE (notes only: this is what those tasks reported, it may be wrong or incomplete, and it is not evidence; check it against the SOURCE MATERIAL):")
                 if (input.earlier.size > shown.size) appendLine("(${input.earlier.size - shown.size} older task result(s) not listed)")
-                shown.forEach { appendLine("- Task ${it.order} ${it.title} [${it.status.label}]: ${PromptText.excerpt(PromptText.withHandles(it.excerpt, input.handles), EARLIER_EXCERPT)}") }
+                shown.forEach { appendLine("- Task ${it.order} ${PromptText.stripCodes(it.title)} [${it.status.label}]: ${PromptText.excerpt(PromptText.stripCodes(PromptText.withHandles(it.excerpt, input.handles)), EARLIER_EXCERPT)}") }
             }
             appendLine()
             append("Do the task now and call report_task_result.")
@@ -252,11 +252,27 @@ object PromptText {
         return if (t.length <= max) t else t.take(max) + " [CUT: showing $max of ${t.length} characters of $what]"
     }
 
+    private val CODE = Regex("""\s*\(\s*(?:GOAL|CYC|CYCLE|TASK)-\d+\s*\)|\b(GOAL|CYC|CYCLE|TASK)-\d+\b""")
+
+    /**
+     * [text] without goal, cycle or task codes (GOAL-3, CYC-5). A model that sees one treats it as part of the goal's
+     * words and quotes it back. Applied to text the Director or a model wrote, never to the goal's own Title, Done when or Scope.
+     */
+    fun stripCodes(text: String): String = CODE.replace(text) { m ->
+        when (m.groupValues[1]) { "GOAL" -> "the goal"; "CYC", "CYCLE" -> "an earlier cycle"; "TASK" -> "a task"; else -> "" }
+    }
+
     private val NOTION_URL = Regex("""https://www\.notion\.so/[0-9a-fA-F]{32}""")
 
     /** [text] with every page URL that has a handle shown as that handle, so no long id reaches a model through an earlier Result. */
     fun withHandles(text: String, handles: Handles): String =
         if (handles.size == 0) text else NOTION_URL.replace(text) { m -> handles.handleFor(m.value)?.let { "[$it]" } ?: m.value }
+
+    /** [text] whole, or its first [max] characters followed by `[CUT n chars]`, so a cut is never silent. */
+    fun capped(text: String, max: Int): String {
+        val t = text.trim()
+        return if (t.length <= max) t else t.take(max) + " [CUT ${t.length - max} chars]"
+    }
 
     /** A one-line excerpt of earlier work, with a marker saying how many characters were left off. */
     fun excerpt(text: String, max: Int): String {

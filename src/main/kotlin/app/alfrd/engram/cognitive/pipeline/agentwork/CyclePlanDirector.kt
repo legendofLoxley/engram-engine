@@ -187,7 +187,7 @@ object PlanPromptBuilder {
         val goal = input.goal
         val shownIds = ArrayList<String>()
         val text = buildString {
-            appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
+            appendLine("GOAL: ${goal.title}")
             appendLine("Deadline: ${goal.deadline ?: "none"}")
             appendLine()
             if (goal.doneWhen.isNotBlank()) {
@@ -200,12 +200,12 @@ object PlanPromptBuilder {
             val resolved = input.escalations.filter { it.resolution.isNotBlank() }
             if (resolved.isNotEmpty()) {
                 appendLine("WHAT JACOB RESOLVED ON EARLIER ESCALATIONS (read before planning):")
-                resolved.forEach { appendLine("- ${it.kind ?: "Escalation"} [${it.status ?: "?"}]: ${it.ask.oneLine(300)} => ${it.resolution.oneLine(600)}") }
+                resolved.forEach { appendLine("- ${PromptText.stripCodes(it.kind ?: "Escalation")} [${PromptText.stripCodes(it.status ?: "?")}]: ${PromptText.stripCodes(it.ask).oneLine(300)} => ${PromptText.stripCodes(it.resolution).oneLine(600)}") }
                 appendLine()
             }
             if (!input.previousSummary.isNullOrBlank()) {
-                appendLine("LAST CYCLE${input.previousCycleLabel?.let { " ($it)" }.orEmpty()} SUMMARY:")
-                appendLine(input.previousSummary.oneLine(900))
+                appendLine("LAST CYCLE SUMMARY:")
+                appendLine(PromptText.stripCodes(input.previousSummary).oneLine(900))
                 appendLine()
             }
 

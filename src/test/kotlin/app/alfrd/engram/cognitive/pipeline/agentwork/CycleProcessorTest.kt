@@ -332,7 +332,7 @@ class CycleProcessorTest {
 
         val prompt = llm.planRequests.single().prompt
         assertTrue(prompt.contains("Error found [Resolved]: Which box is right? => Box B."), prompt)
-        assertTrue(prompt.contains("LAST CYCLE (CYCLE-1) SUMMARY:") && prompt.contains("Persona was reconciled"), prompt)
+        assertTrue(prompt.contains("LAST CYCLE SUMMARY:") && prompt.contains("Persona was reconciled"), prompt)
     }
 
     @Test

@@ -126,11 +126,11 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
         val field = (rewrite?.get("field") as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it in REWRITABLE_FIELDS }
         val text = (rewrite?.get("text") as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
         return QcDecision(
-            summary = summary.take(MAX_TEXT_CHARS),
+            summary = PromptText.capped(summary, MAX_TEXT_CHARS),
             goalLooksMet = looksMet,
-            goalFeedback = feedback.take(MAX_TEXT_CHARS),
+            goalFeedback = PromptText.capped(feedback, MAX_TEXT_CHARS),
             suggestedField = if (field != null && text != null) field else null,
-            suggestedText = if (field != null && text != null) text.take(MAX_REWRITE_CHARS) else null,
+            suggestedText = if (field != null && text != null) PromptText.capped(text, MAX_REWRITE_CHARS) else null,
         )
     }
 
@@ -138,8 +138,9 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
         const val TOOL_NAME = "record_cycle_qc"
         const val TIMEOUT_MS = 180_000L
         const val MAX_TOKENS = 8_000 // see CyclePlanDirector.MAX_TOKENS
-        const val MAX_TEXT_CHARS = 1_500
-        const val MAX_REWRITE_CHARS = 600
+        /** Room for a thorough answer (the 27B writes 2,000 to 3,000 characters). Notion takes it: a rich text property is written in 2,000-character segments. */
+        const val MAX_TEXT_CHARS = 8_000
+        const val MAX_REWRITE_CHARS = 2_000
         val REWRITABLE_FIELDS: Set<String> = setOf("Goal", "Done when", "Scope")
 
         private val QC_TOOL = ToolDefinition(
@@ -227,7 +228,7 @@ object QcPromptBuilder {
     fun build(input: QcInput): String {
         val goal = input.goal
         return buildString {
-            appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
+            appendLine("GOAL: ${goal.title}")
             appendLine("DONE WHEN: ${goal.doneWhen.ifBlank { "(Jacob wrote no Done when)" }.let { PromptText.bounded(it, DONE_WHEN_MAX, "Done when") }}")
             appendLine()
             appendLine("SCOPE (what the goal's @-mentions put in reach):")
@@ -253,8 +254,8 @@ object QcPromptBuilder {
             val allow = allowances(input)
             shownTasks(input).forEachIndexed { i, task ->
                 appendLine()
-                appendLine("Task ${task.order} [${task.status.label}] (${task.type}) ${PromptText.excerpt(task.title, 160)}")
-                appendLine("  result: ${resultText(PromptText.withHandles(task.excerpt, input.handles), allow[i])}")
+                appendLine("Task ${task.order} [${task.status.label}] (${task.type}) ${PromptText.excerpt(PromptText.stripCodes(task.title), 160)}")
+                appendLine("  result: ${resultText(PromptText.stripCodes(PromptText.withHandles(task.excerpt, input.handles)), allow[i])}")
             }
             if (input.tasks.size > MAX_TASKS) appendLine("\n(${input.tasks.size - MAX_TASKS} more task result(s) not listed)")
             appendLine()

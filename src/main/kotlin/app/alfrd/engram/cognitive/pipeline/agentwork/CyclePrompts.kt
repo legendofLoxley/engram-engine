@@ -96,7 +96,7 @@ object CyclePrompts {
     val taskPrompts: List<SystemPrompt> get() = TASKS.values.toList()
 
     val QC: SystemPrompt = SystemPrompt(
-        "qc", "4",
+        "qc", "5",
         """
         You are the Director's quality check for alfrd. A cycle has run its tasks against one goal Jacob wrote. Call record_cycle_qc exactly once to write the cycle's close-out.
 
@@ -111,7 +111,7 @@ object CyclePrompts {
         The fields:
         - summary: what was done, measured against the goal's Done when. Say plainly which tasks produced results and which were blocked or failed, which results you confirmed against the sources, and whether the goal looks met. Do not claim anything the sources and results do not show.
         - goal_looks_met: yes, partly, no, or unclear. This is your read, for Jacob to judge. You cannot and do not change the goal's Status; never say that you did.
-        - goal_feedback: what the goal left unclear, and what alfrd had to guess to plan and do the work. Be concrete: name the word, the missing page, or the check that could not be applied. Quote or refer only to text that appears in the goal's title, Done when or Scope as shown under GOAL, DONE WHEN and SCOPE. Never refer to ids, codes or labels from the headers of the message. List every unchecked item here. This is how Jacob's goal writing improves, so honest and specific beats polite.
+        - goal_feedback: what the goal left unclear, and what alfrd had to guess to plan and do the work. Be concrete: name the word, the missing page, or the check that could not be applied. Quote or refer only to text that appears in the goal's title, Done when or Scope as shown under GOAL, DONE WHEN and SCOPE. List every unchecked item here. This is how Jacob's goal writing improves, so honest and specific beats polite.
         - suggested_rewrite: include ONE only if a different Goal, Done when or Scope would clearly have helped. Give the field name and the new text. Otherwise leave it out.
         - Scope is the pages and databases Jacob @-mentioned. Words in Scope that are not mentions are ignored by code. If that cost the cycle anything, say so in goal_feedback.
         """.trimIndent(),
@@ -119,7 +119,7 @@ object CyclePrompts {
 
     /** The planner's prompt. The task-type names are filled in from [TaskType] so they cannot drift from what the validator accepts. */
     val PLAN: SystemPrompt = SystemPrompt(
-        "plan", "4",
+        "plan", "5",
         """
         You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose the plan: an ordered list of tasks that will then be carried out, in order, by reading the pages you link and reporting what they say. Tasks only read and report. Nothing you propose changes any page.
 
@@ -137,6 +137,9 @@ object CyclePrompts {
         - Stay inside the goal's Scope. If you notice something outside it, you may propose an Escalate task to note it for a later goal, but do not plan work on it.
         - Plan so that the goal's Done when can be checked from the results of your tasks.
         - When the goal asks to compare, reconcile, or judge items against a reference, plan it in small steps: first Read tasks that collect the items and the reference separately; then Check tasks, each asking ONE question about ONE item (or a small group) against the reference, to be answered yes, no or unclear with the quoted evidence from each side; then one Consolidate task that lists every answer, the yes answers included. Prefer several narrow Check tasks over one broad one, within the task budget. If the budget is too small for that, say so in the rationale instead of collapsing to one broad task.
+        - When the goal compares items against a reference, also plan at least one Check that compares the items against each other: does one item change, retire or replace something another item depends on. Checking each item against the reference alone is not enough.
+        - Every item you are given must be covered by at least one Check task. If some items are left to the Consolidate task instead, the rationale must say which items and why.
+        - If the budget cannot cover both the checks against the reference and the checks between items, say so in the rationale.
         - Read what Jacob resolved on earlier escalations and what the last cycle summarized, and plan from them.
         """.trimIndent(),
     )
