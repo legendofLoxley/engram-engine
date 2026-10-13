@@ -83,6 +83,48 @@ data class AnswerTrace(
     }
 }
 
+/**
+ * What one model call was given, as **ids and counts only, never text**: which system prompt (name, version,
+ * fingerprint of the exact text), how big the per-call prompt was, which pages and rows of the goal's Scope it
+ * contained, which earlier tasks' results it was shown, and which items were cut or left out by a bound.
+ * Together with [AnswerTrace] this is what lets a bad answer be traced to what the model was and was not given.
+ */
+@Serializable
+data class GivenTrace(
+    val prompt: PromptRef,
+    /** Characters of the per-call (user) prompt. */
+    val promptChars: Int,
+    /** Pages and row blocks given as source. */
+    val sourceBlocks: Int,
+    /** Pages and rows given as source, in total. [sourceItemIds] lists up to [MAX_IDS] of them. */
+    val sourceItems: Int,
+    val sourceItemIds: List<String>,
+    /** Orders of the earlier tasks whose results were shown, labelled as earlier work. */
+    val earlierTasks: List<Int>,
+    /** Items given only in part, by id (a property or a page body was cut, with a marker). */
+    val cutItemIds: List<String>,
+    /** Items that did not fit and were not given, by id. */
+    val leftOutItemIds: List<String>,
+    /** How many items were left out in all; may exceed the ids listed. */
+    val leftOutCount: Int,
+    /** Lines under NOT GIVEN TO YOU that the model was shown. */
+    val notGivenLines: Int,
+) {
+    companion object {
+        const val MAX_IDS = 100
+
+        fun of(prompt: SystemPrompt, promptChars: Int, staged: StagedContext?, earlierTasks: List<Int> = emptyList()): GivenTrace {
+            val items = staged?.items.orEmpty()
+            val left = staged?.leftOutItems.orEmpty()
+            return GivenTrace(
+                prompt.ref, promptChars, staged?.pages?.size ?: 0, items.size, items.map { it.id }.take(MAX_IDS), earlierTasks,
+                staged?.cutItems.orEmpty().map { it.id }.take(MAX_IDS), left.map { it.id }.take(MAX_IDS),
+                left.size + (staged?.problems?.count { it is StagingProblem.OverBudget } ?: 0), staged?.notGiven()?.size ?: 0,
+            )
+        }
+    }
+}
+
 @Serializable
 data class TaskRunTrace(
     val order: Int,
@@ -97,6 +139,7 @@ data class TaskRunTrace(
     val latencyMs: Long?,
     val problems: List<String> = emptyList(),
     val answer: AnswerTrace? = null,
+    val given: GivenTrace? = null,
 )
 
 @Serializable
@@ -108,6 +151,7 @@ data class QcTrace(
     val provider: String?,
     val model: String?,
     val answer: AnswerTrace? = null,
+    val given: GivenTrace? = null,
 )
 
 @Serializable
@@ -123,6 +167,7 @@ data class ModelTrace(
     val tasksProposed: Int,
     val rationale: String?,
     val answer: AnswerTrace? = null,
+    val given: GivenTrace? = null,
 )
 
 @Serializable

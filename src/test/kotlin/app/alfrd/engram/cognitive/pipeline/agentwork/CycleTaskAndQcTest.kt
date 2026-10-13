@@ -50,6 +50,7 @@ class CycleTaskAndQcTest {
         assertEquals(DirectorTaskExecutor.TOOL_NAME, request.forcedToolName)
         assertEquals(listOf(DirectorTaskExecutor.TOOL_NAME), request.tools.map { it.name })
         assertEquals(0.2, request.temperature)
+        assertEquals(CyclePrompts.forTask(TaskType.CHECK).text, request.systemPrompt, "a Check task gets the Check prompt")
         assertTrue(request.systemPrompt!!.contains("You can change nothing") && request.systemPrompt!!.contains("Blocking is correct; guessing is not."))
         val prompt = request.prompt
         assertTrue(prompt.contains("GOAL: Reconcile Persona (GOAL-1)"), prompt)
@@ -70,7 +71,7 @@ class CycleTaskAndQcTest {
     @Test
     fun `a task that names no page says so instead of showing an empty list`() {
         val prompt = TaskPromptBuilder.build(input(staged = staged()))
-        assertTrue(prompt.contains("STAGED PAGES: none"), prompt)
+        assertTrue(prompt.contains("SOURCE MATERIAL: none was given for this task"), prompt)
     }
 
     @Test
@@ -179,7 +180,7 @@ class CycleTaskAndQcTest {
         val prompt = request.prompt
         assertTrue(prompt.contains("DONE WHEN: Every claim in Persona is marked."), prompt)
         assertTrue(prompt.contains("- page Persona (persona): read") && prompt.contains("- database Items: 40 row(s) read"), prompt)
-        assertTrue(prompt.contains("TASKS: 3 planned; done 1, blocked 1, failed 1; 2 more proposed task(s) were rejected by code"), prompt)
+        assertTrue(prompt.contains("3 planned; done 1, blocked 1, failed 1; 2 more proposed task(s) were rejected by code"), prompt)
         assertTrue(prompt.contains("Task 2 [Blocked] (Check) Check against Items") && prompt.contains("the Items table was not staged"), prompt)
     }
 

@@ -94,14 +94,16 @@ enum class CycleStatus(val label: String) {
  * them itself in later increments and never takes them from a model's proposal. The other five are
  * the work a plan may ask for; none of them writes anything by itself.
  */
-enum class TaskType(val label: String, val proposable: Boolean) {
+enum class TaskType(val label: String, val proposable: Boolean, val drawsOnScope: Boolean = false) {
     ORCHESTRATE("Orchestrate", false),
     GATE("Gate", false),
     QC("QC", false),
     READ("Read", true),
-    CHECK("Check", true),
+
+    /** [drawsOnScope]: a task that verifies or consolidates is given the goal's in-scope rows and pages as source, not only what it links. */
+    CHECK("Check", true, drawsOnScope = true),
     HYPOTHESIS("Hypothesis", true),
-    CONSOLIDATE("Consolidate", true),
+    CONSOLIDATE("Consolidate", true, drawsOnScope = true),
     ESCALATE("Escalate", true);
 
     companion object {

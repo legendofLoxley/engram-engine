@@ -25,6 +25,8 @@ data class QcInput(
     val tasks: List<QcTaskLine>,
     /** Tasks the model proposed that code rejected before anything was written. */
     val rejectedAtPlanning: Int,
+    /** The goal's in-scope rows and pages, staged within bounds. QC judges Done when against these, not only against the task results. */
+    val sources: StagedContext = StagedContext.EMPTY,
 )
 
 /** QC's call on the cycle. [goalLooksMet] is one of [LOOKS_MET_VALUES]. The goal's Status is Jacob's to change and QC never does. */
@@ -46,6 +48,7 @@ data class QcResult(
     val providerName: String? = null,
     val modelName: String? = null,
     val answer: AnswerTrace? = null,
+    val given: GivenTrace? = null,
 )
 
 val LOOKS_MET_VALUES: List<String> = listOf("yes", "partly", "no", "unclear")
@@ -68,11 +71,13 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
     open suspend fun decide(input: QcInput): QcResult {
         val client = llmClient ?: return QcResult(null, modelCalled = false, latencyMs = 0, rejectedReason = "no_llm_client")
         val startMs = System.currentTimeMillis()
+        val prompt = QcPromptBuilder.build(input)
+        val given = GivenTrace.of(CyclePrompts.QC, prompt.length, input.sources, QcPromptBuilder.shownTasks(input).map { it.order })
         val response = try {
             client.complete(
                 LlmRequest(
-                    prompt = QcPromptBuilder.build(input),
-                    systemPrompt = SYSTEM_PROMPT,
+                    prompt = prompt,
+                    systemPrompt = CyclePrompts.QC.text,
                     model = LlmModel.CLAUDE_SONNET_4_5, // label only: the local client ignores it
                     maxTokens = MAX_TOKENS,
                     timeoutMs = TIMEOUT_MS,
@@ -88,15 +93,15 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
         } catch (e: Exception) {
             val latency = System.currentTimeMillis() - startMs
             logger.warn("cycle-qc: LLM call failed: {}", e::class.java.simpleName)
-            return QcResult(null, modelCalled = true, latencyMs = latency, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}")
+            return QcResult(null, modelCalled = true, latencyMs = latency, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}", given = given)
         }
         val latency = System.currentTimeMillis() - startMs
         val answer = AnswerTrace.of(response)
-        fun rejected(code: String) = QcResult(null, true, latency, code, response.providerName, response.modelName, answer)
+        fun rejected(code: String) = QcResult(null, true, latency, code, response.providerName, response.modelName, answer, given)
 
         val call = response.toolCalls.firstOrNull { it.name == TOOL_NAME } ?: return rejected("no_tool_call")
         val decision = parse(call.input) ?: return rejected("malformed_tool_input")
-        return QcResult(decision, true, latency, null, response.providerName, response.modelName, answer)
+        return QcResult(decision, true, latency, null, response.providerName, response.modelName, answer, given)
     }
 
     private fun parse(input: JsonObject): QcDecision? {
@@ -125,17 +130,6 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
         const val MAX_REWRITE_CHARS = 600
         val REWRITABLE_FIELDS: Set<String> = setOf("Goal", "Done when", "Scope")
 
-        private val SYSTEM_PROMPT: String = """
-            You are the Director's quality check for alfrd. A cycle has run its tasks against one goal Jacob wrote. Call record_cycle_qc exactly once to write the cycle's close-out.
-
-            Rules:
-            - summary: what was done, measured against the goal's Done when. Say plainly which tasks produced results and which were blocked or failed, and whether the goal looks met. Do not claim anything the task results do not show.
-            - goal_looks_met: yes, partly, no, or unclear. This is your read, for Jacob to judge. You cannot and do not change the goal's Status; never say that you did.
-            - goal_feedback: what the goal left unclear, and what alfrd had to guess to plan and do the work. Be concrete: name the word, the missing page, or the check that could not be applied. This is how Jacob's goal writing improves, so honest and specific beats polite.
-            - suggested_rewrite: include ONE only if a different Goal, Done when or Scope would clearly have helped. Give the field name and the new text. Otherwise leave it out.
-            - Scope is the pages and databases Jacob @-mentioned. Words in Scope that are not mentions are ignored by code. If that cost the cycle anything, say so in goal_feedback.
-        """.trimIndent()
-
         private val QC_TOOL = ToolDefinition(
             name = TOOL_NAME,
             description = "Write the cycle's close-out: a summary against Done when, and feedback on the goal.",
@@ -162,42 +156,57 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
     }
 }
 
-/** Builds the QC prompt. Pure, so a test can read exactly what the model is given. */
+/**
+ * Builds the QC per-call prompt: **what to judge**. How to judge is in [CyclePrompts.QC]. Order: the goal and
+ * Done when, the Scope, the SOURCE MATERIAL (the evidence), what was NOT GIVEN, then the TASK RESULTS, labelled
+ * as earlier work to be confirmed against the sources. Pure, so a test can read exactly what the model is given.
+ */
 object QcPromptBuilder {
-    const val MAX_CHARS = 24_000
+    const val MAX_CHARS = 60_000
+
+    /** Task results listed: all of them up to this many, so a long cycle says how many it left off instead of overflowing. */
+    const val MAX_TASKS = 25
+    private const val RESULT_EXCERPT = 900
+    private const val DONE_WHEN_MAX = 6_000
+
+    /** The tasks that [build] lists. */
+    fun shownTasks(input: QcInput): List<QcTaskLine> = input.tasks.take(MAX_TASKS)
 
     fun build(input: QcInput): String {
         val goal = input.goal
         return buildString {
             appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
-            appendLine("DONE WHEN: ${goal.doneWhen.ifBlank { "(Jacob wrote no Done when)" }.oneLine(1_000)}")
+            appendLine("DONE WHEN: ${goal.doneWhen.ifBlank { "(Jacob wrote no Done when)" }.let { PromptText.bounded(it, DONE_WHEN_MAX, "Done when") }}")
             appendLine()
             appendLine("SCOPE (what the goal's @-mentions put in reach):")
-            if (input.scopeLines.isEmpty()) appendLine("- (nothing)") else input.scopeLines.forEach { appendLine("- ${it.oneLine(240)}") }
+            if (input.scopeLines.isEmpty()) appendLine("- (nothing)") else input.scopeLines.forEach { appendLine("- ${PromptText.excerpt(it, 240)}") }
             if (goal.scope.proseChars > 0) {
-                appendLine("Scope ALSO held ${goal.scope.proseChars} letters and digits of prose outside the mentions. Code ignored it: ${goal.scope.proseExcerpt.oneLine(200)}")
+                appendLine("Scope ALSO held ${goal.scope.proseChars} letters and digits of prose outside the mentions. Code ignored it: ${PromptText.excerpt(goal.scope.proseExcerpt, 200)}")
             }
             if (goal.scope.ignoredLinks.isNotEmpty()) appendLine("Scope also held ${goal.scope.ignoredLinks.size} link(s) that are not mentions. Code ignored them.")
             appendLine()
+
+            with(TaskPromptBuilder) { appendSources(input.sources, forTask = false) }
+            appendLine()
+
             val counts = input.tasks.groupingBy { it.status }.eachCount()
             appendLine(
-                "TASKS: ${input.tasks.size} planned" +
+                "TASK RESULTS (earlier work: what the tasks of this cycle reported. It may be wrong, incomplete or invented; confirm it against the SOURCE MATERIAL before relying on it).",
+            )
+            appendLine(
+                "${input.tasks.size} planned" +
                     "; done ${counts[TaskStatus.DONE] ?: 0}, blocked ${counts[TaskStatus.BLOCKED] ?: 0}, failed ${counts[TaskStatus.FAILED] ?: 0}" +
                     if (input.rejectedAtPlanning > 0) "; ${input.rejectedAtPlanning} more proposed task(s) were rejected by code before they were written" else "",
             )
-            input.tasks.forEach { task ->
+            shownTasks(input).forEach { task ->
                 appendLine()
-                appendLine("Task ${task.order} [${task.status.label}] (${task.type}) ${task.title.oneLine(160)}")
-                appendLine("  result: ${task.excerpt.ifBlank { "(none)" }.oneLine(900)}")
+                appendLine("Task ${task.order} [${task.status.label}] (${task.type}) ${PromptText.excerpt(task.title, 160)}")
+                appendLine("  result: ${PromptText.excerpt(task.excerpt.ifBlank { "(none)" }, RESULT_EXCERPT)}")
             }
+            if (input.tasks.size > MAX_TASKS) appendLine("\n(${input.tasks.size - MAX_TASKS} more task result(s) not listed)")
             appendLine()
             append("Write the close-out now.")
         }.take(MAX_CHARS)
-    }
-
-    private fun String.oneLine(max: Int): String {
-        val line = replace(Regex("\\s+"), " ").trim()
-        return if (line.length <= max) line else line.take(max - 1) + "…"
     }
 }
 

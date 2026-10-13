@@ -82,8 +82,18 @@ data class ContextRow(
     val pageId: String,
     val pageUrl: String,
     val title: String,
+    /** A short digest for the planner: each property on one line, long text cut with a marker that says so. Not what a worker is given. */
     val facts: List<String>,
+    /** Every readable property in full, untouched, in the page's own order. This is what a task or QC is shown. */
+    val fields: List<RowField> = emptyList(),
+    /** Names of properties this client does not read (people, files, relations, ...): shown to the worker as not given, never silently dropped. */
+    val unreadable: List<String> = emptyList(),
+    /** How many facts the digest left out because of its count limit. */
+    val factsOmitted: Int = 0,
 )
+
+/** One property of a row, as text. [text] is never shortened here. */
+data class RowField(val name: String, val text: String)
 
 enum class SkipReason {
     /** A database mention whose id is not one of the configured tables. The client was never configured to read it. */
@@ -232,24 +242,31 @@ class ScopeReader(
 
     private fun rowOf(table: String, page: NotionPage): ContextRow {
         val title = page.properties.values.filterIsInstance<NotionValue.Title>().firstOrNull()?.text.orEmpty()
-        val facts = ArrayList<String>()
+        val fields = ArrayList<RowField>()
+        val unreadable = ArrayList<String>()
         for ((name, value) in page.properties) {
-            if (facts.size >= maxFactsPerRow) break
-            val fact = when (value) {
+            val text = when (value) {
                 is NotionValue.Title -> null
-                is NotionValue.RichText -> value.text.takeIf { it.isNotBlank() }?.let { "$name: ${it.shorten()}" }
-                is NotionValue.Select -> value.name?.let { "$name: $it" }
-                is NotionValue.NumberValue -> value.value?.let { "$name: ${trim(it)}" }
-                is NotionValue.UrlValue -> value.value?.let { "$name: $it" }
-                is NotionValue.DateValue -> value.start?.let { "$name: $it" }
-                is NotionValue.Checkbox -> if (value.checked) "$name: yes" else null
-                is NotionValue.Formula -> value.display.takeIf { it.isNotBlank() }?.let { "$name: $it (formula, informational)" }
-                is NotionValue.Rollup -> rollupText(value)?.let { "$name: $it (rollup, informational)" }
+                is NotionValue.RichText -> value.text.trim().takeIf { it.isNotEmpty() }
+                is NotionValue.Select -> value.name
+                is NotionValue.NumberValue -> value.value?.let { trim(it) }
+                is NotionValue.UrlValue -> value.value
+                is NotionValue.DateValue -> value.start
+                is NotionValue.Checkbox -> if (value.checked) "yes" else null
+                is NotionValue.UniqueId -> value.display
+                is NotionValue.Formula -> value.display.takeIf { it.isNotBlank() }?.let { "$it (formula, informational)" }
+                is NotionValue.Rollup -> rollupText(value)?.let { "$it (rollup, informational)" }
+                // A relation with something in it, or a kind this client cannot read, is named as not shown; an empty relation says nothing.
+                is NotionValue.Relation -> { if (value.ids.isNotEmpty()) unreadable += name; null }
+                is NotionValue.Unsupported -> { unreadable += name; null }
+                is NotionValue.CreatedTime -> null
                 else -> null
             }
-            if (fact != null) facts += fact
+            if (text != null) fields += RowField(name, text)
         }
-        return ContextRow(table, page.id, notionPageUrl(page.id), title, facts)
+        // The planner's digest: one line per property, long text cut with a marker, at most [maxFactsPerRow] lines.
+        val allFacts = fields.map { f -> "${f.name}: ${f.text.shorten()}" }
+        return ContextRow(table, page.id, notionPageUrl(page.id), title, allFacts.take(maxFactsPerRow), fields, unreadable, (allFacts.size - maxFactsPerRow).coerceAtLeast(0))
     }
 
     private fun rollupText(rollup: NotionValue.Rollup): String? = when {
@@ -260,8 +277,11 @@ class ScopeReader(
 
     private fun trim(d: Double): String = if (d % 1.0 == 0.0) d.toLong().toString() else d.toString()
 
+    /** One line, and if it is too long a marker that says how much was cut, so no reader mistakes the cut for the source. */
     private fun String.shorten(): String {
         val oneLine = replace(Regex("\\s+"), " ").trim()
-        return if (oneLine.length <= maxFactChars) oneLine else oneLine.take(maxFactChars - 1) + "…"
+        if (oneLine.length <= maxFactChars) return oneLine
+        val keep = maxFactChars - 45
+        return oneLine.take(keep) + "[cut: showing $keep of ${oneLine.length} characters]"
     }
 }

@@ -322,8 +322,11 @@ class CycleProcessor(
         val lines = finalTasks.filter { it.status != TaskStatus.SUPERSEDED }.map {
             QcTaskLine(it.order ?: 0, it.title, it.type?.label ?: "?", it.status ?: TaskStatus.FAILED, it.result)
         }
-        val result = qc.decide(QcInput(goal, cycle, scopeLines(context), lines, rejected))
-        trace.qc = QcTrace(result.modelCalled, result.latencyMs, result.rejectedReason, result.decision?.goalLooksMet, result.providerName, result.modelName, result.answer)
+        // QC judges Done when against the source rows and pages, not only against what the tasks said about them.
+        val sources = stager.stageSources(limits.perTaskChars)
+        trace.content += sources.traces
+        val result = qc.decide(QcInput(goal, cycle, scopeLines(context), lines, rejected, sources))
+        trace.qc = QcTrace(result.modelCalled, result.latencyMs, result.rejectedReason, result.decision?.goalLooksMet, result.providerName, result.modelName, result.answer, result.given)
 
         val done = finalTasks.count { it.status == TaskStatus.DONE }
         val blocked = finalTasks.count { it.status == TaskStatus.BLOCKED }
@@ -390,7 +393,7 @@ class CycleProcessor(
         )
         trace.model = ModelTrace(
             called = proposal.modelCalled, latencyMs = proposal.latencyMs, provider = proposal.providerName, model = proposal.modelName,
-            rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400), answer = proposal.answer,
+            rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400), answer = proposal.answer, given = proposal.given,
         )
         if (proposal.rejectedReason != null) {
             return Planned.Stop(finish(cycle, trace, CycleStatus.FAILED, "Cycle failed: ${explain(proposal.rejectedReason)}. Nothing was written."))
@@ -459,13 +462,14 @@ class CycleProcessor(
     ): TaskRun {
         val order = task.order ?: 0
         api.updatePage(task.pageId, AgentTaskMapper.start(clock()))
-        val staged = stager.stage(task.targetLinks)
+        // Check and Consolidate also get the goal's in-scope rows and pages as source, not only what the plan linked.
+        val staged = stager.stage(task.targetLinks, withScope = task.type?.drawsOnScope == true)
         trace.content += staged.traces
         val problems = staged.problems.map(::describe)
 
-        fun settle(status: TaskStatus, result: String, reason: String?, cited: Int, latencyMs: Long?, answer: AnswerTrace? = null): TaskRun {
+        fun settle(status: TaskStatus, result: String, reason: String?, cited: Int, latencyMs: Long?, answer: AnswerTrace? = null, given: GivenTrace? = null): TaskRun {
             return TaskRun(task.copy(status = status, result = result))
-                .also { trace.execution += TaskRunTrace(order, task.title, status.label.lowercase(), reason, staged.pages.size, cited, result.length, latencyMs, problems, answer) }
+                .also { trace.execution += TaskRunTrace(order, task.title, status.label.lowercase(), reason, staged.pages.size, cited, result.length, latencyMs, problems, answer, given) }
         }
 
         // Anything outside the goal's scope blocks the task before a word of it is read or sent to a model.
@@ -486,17 +490,17 @@ class CycleProcessor(
                 val text = composeResult(execution, staged)
                 api.updatePage(task.pageId, AgentTaskMapper.settle(TaskStatus.DONE, text, clock()))
                 val reason = if (execution.droppedCitations > 0) "${execution.droppedCitations} citation(s) not among the staged pages were dropped" else null
-                settle(TaskStatus.DONE, text, reason, execution.pagesUsed.size, outcome.latencyMs, outcome.answer)
+                settle(TaskStatus.DONE, text, reason, execution.pagesUsed.size, outcome.latencyMs, outcome.answer, outcome.given)
             }
             is TaskExecution.Blocked -> {
                 val text = "Blocked: ${execution.reason}"
                 api.updatePage(task.pageId, AgentTaskMapper.settle(TaskStatus.BLOCKED, text, clock()))
-                settle(TaskStatus.BLOCKED, text, "insufficient_material", 0, outcome.latencyMs, outcome.answer)
+                settle(TaskStatus.BLOCKED, text, "insufficient_material", 0, outcome.latencyMs, outcome.answer, outcome.given)
             }
             is TaskExecution.Failed -> {
                 val text = "Not executed: ${explain(execution.reason)}. The task was not retried."
                 api.updatePage(task.pageId, AgentTaskMapper.settle(TaskStatus.FAILED, text, clock()))
-                settle(TaskStatus.FAILED, text, execution.reason, 0, outcome.latencyMs, outcome.answer)
+                settle(TaskStatus.FAILED, text, execution.reason, 0, outcome.latencyMs, outcome.answer, outcome.given)
             }
         }
     }
@@ -504,7 +508,7 @@ class CycleProcessor(
     /** The Result as written: the worker's report, then a footer of the pages used, built by code from the validated citations. */
     private fun composeResult(done: TaskExecution.Done, staged: StagedContext): String = buildString {
         append(done.result.trim())
-        val titles = staged.pages.associateBy({ notionPageIdInPath(it.url) }, { it.title })
+        val titles = staged.items.associateBy({ notionPageIdInPath(it.url) }, { it.title })
         append("\n\n")
         if (done.pagesUsed.isNotEmpty()) {
             append("Pages used:")

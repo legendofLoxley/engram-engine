@@ -666,6 +666,33 @@ model cited is dropped); a Result is plain text with the cited page URLs appende
 and the guard refuses any write outside Cycles and Agent Tasks, including a goal's Status, a PPS row, a
 memory row and a page-body append.
 
+### What each model call is given, and how it is told to work
+
+The rule: **system prompts say how to work; the per-call prompt carries what to work on.** The system prompts
+(`CyclePrompts.kt`) name no goal, table or person's data. There is one for the plan, one per task type (Read,
+Check, Consolidate, Hypothesis, Escalate) and one for QC, each with a name and a hand-bumped version; a test pins
+the fingerprint of each text, so an edit that forgets its version fails the build.
+
+What a call works on:
+
+- **Check and Consolidate tasks** are given the goal's in-scope rows and pages as SOURCE MATERIAL, whatever the plan
+  linked (the task's own links first, then the rest of Scope in the order it mentions them). Read, Hypothesis and
+  Escalate tasks get only the links they were given.
+- **QC** is given the same source material, and judges Done when against it. Task results (to QC and to later tasks)
+  are included but labelled as earlier work that may be wrong and must be confirmed against the source.
+- **Rows are given with every readable property in full**, in the page's own words. Properties this client cannot read
+  (people, files, non-empty relations) are named as not shown. The planner alone sees a short digest of each row, and
+  its cuts carry a marker that says how much was cut.
+- **Bounds are the existing ones** (per row 6,000 characters, per task and per QC call 14,000, per cycle 60,000 read
+  fresh). When one is hit, nothing is cut quietly: text that was cut carries a `[CUT: ...]` marker, a row that did not
+  fit is left out whole, and the prompt ends its source with a NOT GIVEN TO YOU list that names every such item (and
+  anything unreadable or never read), so the model reports a limit of the call instead of inventing a fact about the
+  source.
+
+`/debug/notion-cycles` shows, for the plan, each task and QC, a `given` record: the system prompt's name, version and
+fingerprint, the size of the per-call prompt, the ids and number of pages and rows given, the orders of the earlier
+tasks shown, and the ids cut or left out. Ids and counts only, never text.
+
 ### Where this departs from the Director–Hermes contract
 
 The contract has the Director hand execution to Hermes. This increment **does the tasks in the

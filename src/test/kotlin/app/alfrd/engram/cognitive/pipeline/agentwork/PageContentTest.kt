@@ -211,7 +211,7 @@ class PageContentTest {
         val page = staged.pages.single()
         assertEquals("Persona notes", page.title)
         assertEquals("memory-items", page.source)
-        assertTrue(page.text.startsWith("Properties: ") && page.text.contains("said: Persona notes") && page.text.contains("Jacob prefers short answers."), page.text)
+        assertTrue(page.text.startsWith("Properties:") && page.text.contains("Said: said: Persona notes") && page.text.contains("Jacob prefers short answers."), page.text)
         assertTrue(staged.problems.isEmpty())
         assertEquals(page.text.length, staged.traces.single().chars)
     }
@@ -240,7 +240,7 @@ class PageContentTest {
 
         val page = staged.pages.single()
         assertEquals("database", page.source)
-        assertTrue(page.text.contains("- Board memo <${url(a.id)}>") && page.text.contains("- Audit <"), page.text)
+        assertTrue(page.text.contains("### Board memo  <${url(a.id)}>") && page.text.contains("### Audit  <"), page.text)
         assertEquals(0, f.fake.requestCount("listBlocks"), "a database digest comes from the rows already read, not from page bodies")
     }
 

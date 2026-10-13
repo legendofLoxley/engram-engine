@@ -41,6 +41,7 @@ data class PlanProposal(
     val providerName: String? = null,
     val modelName: String? = null,
     val answer: AnswerTrace? = null,
+    val given: GivenTrace? = null,
 )
 
 /**
@@ -61,11 +62,13 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         val client = llmClient ?: return PlanProposal(emptyList(), null, modelCalled = false, latencyMs = 0, rejectedReason = "no_llm_client")
 
         val startMs = System.currentTimeMillis()
+        val built = PlanPromptBuilder.buildReport(input)
+        val given = built.given()
         val response = try {
             client.complete(
                 LlmRequest(
-                    prompt = buildPrompt(input),
-                    systemPrompt = SYSTEM_PROMPT,
+                    prompt = built.text,
+                    systemPrompt = CyclePrompts.PLAN.text,
                     model = LlmModel.CLAUDE_SONNET_4_5, // label only: LocalLlmClient ignores it and uses its one configured local model
                     maxTokens = MAX_TOKENS,
                     timeoutMs = TIMEOUT_MS,
@@ -82,7 +85,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             val latencyMs = System.currentTimeMillis() - startMs
             // Class name only: an exception message from a provider could echo a prompt.
             logger.warn("cycle-plan: LLM call failed: {}", e::class.java.simpleName)
-            return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}")
+            return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}", given = given)
         }
         val latencyMs = System.currentTimeMillis() - startMs
         val answer = AnswerTrace.of(response)
@@ -90,10 +93,10 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         val calls = response.toolCalls.filter { it.name == TOOL_NAME }
         if (calls.size > 1) logger.warn("cycle-plan: response carried {} '{}' calls, honoring only the first", calls.size, TOOL_NAME)
         val call = calls.firstOrNull()
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName, answer)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName, answer, given)
 
         val tasks = (call.input["tasks"] as? JsonArray)
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName, answer)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName, answer, given)
 
         return PlanProposal(
             tasks = tasks.mapNotNull { (it as? JsonObject)?.let(::parseTask) },
@@ -103,6 +106,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             providerName = response.providerName,
             modelName = response.modelName,
             answer = answer,
+            given = given,
         )
     }
 
@@ -124,24 +128,6 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
 
         /** Reasoning counts against this: the local model spent 1.9k to 4.4k tokens thinking about a 2k-token prompt before the call. */
         const val MAX_TOKENS = 8_000
-
-        private val SYSTEM_PROMPT: String = """
-            You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose the plan: an ordered list of tasks that will then be carried out, in order, by reading the pages you link and reporting what they say. Tasks only read and report. Nothing you propose changes any page.
-
-            Call propose_cycle_plan exactly once.
-
-            Rules you must follow. Code checks every one of them afterwards and discards any task that breaks one:
-            - Propose at most the task budget given. Fewer, sharper tasks beat many vague ones. Skip work the target already covers.
-            - Each task has a short title, a type, and instructions that say what the task would do and what it would look at.
-            - Types you may use: ${TaskType.PROPOSABLE.joinToString(", ") { it.label }}. Do not use Orchestrate, Gate or QC; the Director does those itself.
-            - target_links may contain only links copied exactly from the "Links you may use" list. Those are the pages and databases the goal's Scope mentions, and the rows of the mentioned databases; they are all the worker will be given to read. Never invent, shorten or guess a link. A task may have none.
-            - Plan work that can be done by reading those pages and writing down what they show. Do not plan work that needs anything else.
-            - Never propose a task that locks, unlocks, finalizes or changes an answer standard. Only people lock answer standards.
-            - Never propose a task that deletes, removes, overwrites or replaces an existing row. A correction is a new row that supersedes the old one, and that is a later step's business.
-            - Stay inside the goal's Scope. If you notice something outside it, you may propose an Escalate task to note it for a later goal, but do not plan work on it.
-            - Plan so that the goal's Done when can be checked from the results of your tasks.
-            - Read what Jacob resolved on earlier escalations and what the last cycle summarized, and plan from them.
-        """.trimIndent()
 
         private val PROPOSE_PLAN_TOOL = ToolDefinition(
             name = TOOL_NAME,
@@ -179,17 +165,35 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
     }
 }
 
-/** Builds the user-side prompt: the goal, what Jacob has said since, and the only links a task may use. Pure, so it can be read in a test. */
+/** The planner's prompt and what went into it, by row id. */
+class PlanPrompt(val text: String, val shownRowIds: List<String>, val omittedRowIds: List<String>, private val outcomes: Int, private val notUsable: Int) {
+    fun given() = GivenTrace(
+        CyclePrompts.PLAN.ref, text.length, outcomes, shownRowIds.size, shownRowIds.take(GivenTrace.MAX_IDS), emptyList(),
+        emptyList(), omittedRowIds.take(GivenTrace.MAX_IDS), omittedRowIds.size, notUsable + if (omittedRowIds.isEmpty()) 0 else 1,
+    )
+}
+
+/**
+ * Builds the user-side prompt: the goal, what Jacob has said since, and the only links a task may use. Pure, so
+ * it can be read in a test. The planner sees each row as a short digest (long text is cut, with a marker that
+ * says so); the workers and QC are given the rows in full.
+ */
 object PlanPromptBuilder {
     const val MAX_CHARS = 28_000
 
-    fun build(input: PlanningInput): String {
+    fun build(input: PlanningInput): String = buildReport(input).text
+
+    fun buildReport(input: PlanningInput): PlanPrompt {
         val goal = input.goal
-        return buildString {
+        val shownIds = ArrayList<String>()
+        val text = buildString {
             appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
             appendLine("Deadline: ${goal.deadline ?: "none"}")
             appendLine()
-            section("Done when", goal.doneWhen, note = "a check anyone could apply; plan so it can be checked from your tasks' results")
+            if (goal.doneWhen.isNotBlank()) {
+                appendLine("DONE WHEN (a check anyone could apply; plan so it can be checked from your tasks' results): ${PromptText.bounded(goal.doneWhen, 6_000, "Done when")}")
+                appendLine()
+            }
             appendLine("TASK BUDGET: ${input.taskBudget} (propose at most this many)")
             appendLine()
 
@@ -217,11 +221,13 @@ object PlanPromptBuilder {
                 val line = buildString {
                     append("- ${row.pageUrl}  [${row.table}] ${row.title.oneLine(200)}")
                     if (row.facts.isNotEmpty()) append("  | ${row.facts.joinToString("; ")}")
+                    if (row.factsOmitted > 0) append("; (+${row.factsOmitted} more properties not listed here)")
                 }
                 if (used + line.length > budgetForRows) break
                 appendLine(line)
                 used += line.length + 1
                 shown++
+                shownIds += row.pageId
             }
             if (shown < context.rows.size) appendLine("(${context.rows.size - shown} more rows not shown: out of room)")
             if (context.rows.isEmpty() && context.outcomes.none { it is ScopeOutcome.TableListed }) appendLine("(none: nothing in this goal's scope could be read, so tasks have no links)")
@@ -235,6 +241,8 @@ object PlanPromptBuilder {
             }
             append("Propose the plan now.")
         }.take(MAX_CHARS)
+        val omitted = input.context.rows.map { it.pageId }.filter { it !in shownIds }
+        return PlanPrompt(text, shownIds, omitted, input.context.outcomes.count { it !is ScopeOutcome.Skipped }, input.context.skipped.size)
     }
 
     private fun describe(outcome: ScopeOutcome): String = when (outcome) {
@@ -243,14 +251,5 @@ object PlanPromptBuilder {
         is ScopeOutcome.Skipped -> ""
     }
 
-    private fun StringBuilder.section(label: String, text: String, note: String? = null) {
-        if (text.isBlank()) return
-        appendLine("${label.uppercase()}${note?.let { " ($it)" }.orEmpty()}: ${text.oneLine(1_500)}")
-        appendLine()
-    }
-
-    private fun String.oneLine(max: Int): String {
-        val line = replace(Regex("\\s+"), " ").trim()
-        return if (line.length <= max) line else line.take(max - 1) + "…"
-    }
+    private fun String.oneLine(max: Int): String = PromptText.excerpt(this, max)
 }
