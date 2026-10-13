@@ -31,6 +31,18 @@ sealed interface FakeProperty {
 data class FakeRequest(val operation: String, val target: String)
 
 /**
+ * A block a test puts on a page with [FakeNotionApi.setBlocks]: any Notion block type that carries text
+ * (`paragraph`, `heading_1`..`heading_3`, `bulleted_list_item`, `numbered_list_item`, `to_do`, `callout`,
+ * `toggle`, `quote`), or one that does not (`image`, `divider`, with empty text), plus nested [children].
+ */
+data class FakeBlock(
+    val type: String = "paragraph",
+    val text: String = "",
+    val checked: Boolean? = null,
+    val children: List<FakeBlock> = emptyList(),
+)
+
+/**
  * In-memory stand-in for the parts of Notion this adapter depends on, strict where the real service
  * is strict, so a bug that Notion would reject fails a test instead of passing against a lenient fake:
  *
@@ -60,7 +72,14 @@ class FakeNotionApi(
         var archived: Boolean = false,
     )
 
-    private class StoredBlock(val id: String, val segments: List<RichSegment>, val created: Instant)
+    private class StoredBlock(
+        val id: String,
+        val segments: List<RichSegment>,
+        val created: Instant,
+        val type: String = "paragraph",
+        val checked: Boolean? = null,
+        val children: List<StoredBlock> = emptyList(),
+    )
 
     private val sources = LinkedHashMap<String, Source>()
     private val pages = LinkedHashMap<String, Stored>()
@@ -117,6 +136,27 @@ class FakeNotionApi(
         pages[id] = Stored(id, null, now, truncate(now), HashMap())
         blocks[id] = paragraphs.mapTo(ArrayList()) { StoredBlock(newId(), listOf(RichSegment(it)), now) }
         return id
+    }
+
+    /** A plain page under an id chosen by the test (a configuration pins one), with a title and any [content]. */
+    fun createPlainPageWithId(id: String, title: String = "", content: List<FakeBlock> = emptyList()): String {
+        require(!pages.containsKey(id)) { "page $id already exists" }
+        pages[id] = Stored(id, null, now, truncate(now), HashMap<String, NotionValue>().also { if (title.isNotEmpty()) it["title"] = NotionValue.Title(title) })
+        setBlocks(id, content)
+        return id
+    }
+
+    /** Replaces the blocks of a page (a plain page or a row), nested children included. */
+    fun setBlocks(pageId: String, content: List<FakeBlock>) {
+        require(pages.containsKey(pageId)) { "no such page $pageId" }
+        blocks[pageId] = content.mapTo(ArrayList()) { toStored(it) }
+    }
+
+    private fun toStored(block: FakeBlock): StoredBlock {
+        val children = block.children.map { toStored(it) }
+        val stored = StoredBlock(newId(), if (block.text.isEmpty()) emptyList() else listOf(RichSegment(block.text)), now, block.type, block.checked, children)
+        if (children.isNotEmpty()) blocks[stored.id] = children.toMutableList()
+        return stored
     }
 
     /** Every non-archived row of [dataSourceId], oldest first, as the adapter would see it. */
@@ -187,13 +227,13 @@ class FakeNotionApi(
 
     override suspend fun listBlocks(parentBlockId: String, startCursor: String?, pageSize: Int): BlockPage {
         record("listBlocks", parentBlockId)
-        if (!pages.containsKey(parentBlockId)) throw notFound("block")
+        if (!pages.containsKey(parentBlockId) && !blocks.containsKey(parentBlockId)) throw notFound("block")
         if (pageSize !in 1..NotionApi.MAX_PAGE_SIZE) throw invalid("page_size must be between 1 and ${NotionApi.MAX_PAGE_SIZE}")
         val all = blocks[parentBlockId].orEmpty()
         val offset = startCursor?.let(::decodeCursor) ?: 0
         val slice = all.drop(offset).take(pageSize)
         val next = if (offset + slice.size < all.size) encodeCursor(offset + slice.size) else null
-        return BlockPage(slice.map { NotionBlockRead(it.id, "paragraph", it.segments, it.created) }, next)
+        return BlockPage(slice.map { NotionBlockRead(it.id, it.type, it.segments, it.created, hasChildren = it.children.isNotEmpty(), checked = it.checked) }, next)
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
@@ -246,6 +286,7 @@ class FakeNotionApi(
                 else -> properties[name] ?: defaultValue(kind)
             }
         }
+        if (dataSourceId == null) props.putAll(properties)
         return NotionPage(id, dataSourceId, created, edited, props, archived)
     }
 

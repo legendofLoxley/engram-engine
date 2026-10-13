@@ -7,6 +7,8 @@ import app.alfrd.engram.notion.EnvAndFileSecretResolver
 import app.alfrd.engram.notion.HttpNotionApi
 import app.alfrd.engram.notion.NotionApi
 import app.alfrd.engram.notion.NotionConfigException
+import app.alfrd.engram.notion.NotionSetBinding
+import app.alfrd.engram.notion.NotionSetRegistry
 import app.alfrd.engram.notion.RateLimitedNotionApi
 import app.alfrd.engram.notion.RequestLimiter
 import app.alfrd.engram.notion.RetryPolicy
@@ -83,7 +85,13 @@ class NotionCycleRuntime(
          * The model is the Director's own: the local model client, selected the way the cognitive
          * pipeline selects it (`LLM_PROVIDER=local`). Without it the channel does not start, because a
          * channel that claimed cycles it could not plan would turn Jacob's Queued rows into Failed
-         * ones. Goal and page text goes to that local model and nowhere else.
+         * ones. Goal and page text goes to that local model and nowhere else: it plans, does each task
+         * and writes the QC close-out ([DirectorTaskExecutor], [CycleQcDirector]).
+         *
+         * [otherSets] are the other Notion table sets this process is configured with (for example a
+         * Notion-backed memory store). They are checked against this one by [NotionSetRegistry] before the
+         * channel is built: two sets may not share a token reference, a table, a database or a page, and
+         * an overlap is a [NotionConfigException] (the channel stays off and the reason is logged).
          */
         fun fromEnvironment(
             env: Map<String, String> = System.getenv(),
@@ -94,6 +102,7 @@ class NotionCycleRuntime(
             limiter: RequestLimiter = RequestLimiter(),
             retryPolicy: RetryPolicy = RetryPolicy(),
             sleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+            otherSets: List<NotionSetBinding> = emptyList(),
         ): NotionCycleStartup {
             val path = env[ENV_CONFIG]?.trim().orEmpty()
             if (path.isEmpty()) return NotionCycleStartup.Disabled("$ENV_CONFIG is not set", misconfigured = false)
@@ -101,6 +110,7 @@ class NotionCycleRuntime(
             val pollSeconds = seconds(env, ENV_POLL_SECONDS, DEFAULT_POLL_SECONDS)
             val leaseSeconds = seconds(env, ENV_LEASE_SECONDS, DEFAULT_LEASE_SECONDS)
             val config = AgentWorkConfig.load(path)
+            NotionSetRegistry(listOf<NotionSetBinding>(config) + otherSets) // throws on any overlap
 
             if (llmClient == null) {
                 return NotionCycleStartup.Disabled(
@@ -121,6 +131,8 @@ class NotionCycleRuntime(
                 api = guarded,
                 tableSet = config.tableSet,
                 director = CyclePlanDirector(llmClient),
+                executor = DirectorTaskExecutor(llmClient),
+                qc = CycleQcDirector(llmClient),
                 traces = traces,
                 worker = worker,
                 leaseDuration = Duration.ofSeconds(leaseSeconds),

@@ -320,7 +320,7 @@ class HttpNotionApi(
 
     private fun parseValue(prop: JsonObject): NotionValue = when (val type = (prop["type"] as? JsonPrimitive)?.contentOrNull) {
         "title" -> NotionValue.Title(plainText(prop["title"]))
-        "rich_text" -> NotionValue.RichText(plainText(prop["rich_text"]), hrefs(prop["rich_text"]))
+        "rich_text" -> NotionValue.RichText(plainText(prop["rich_text"]), hrefs(prop["rich_text"]), mentions(prop["rich_text"]))
         "number" -> NotionValue.NumberValue((prop["number"] as? JsonPrimitive)?.doubleOrNull)
         "url" -> NotionValue.UrlValue((prop["url"] as? JsonPrimitive)?.contentOrNull)
         "unique_id" -> (prop["unique_id"] as? JsonObject)?.let { id ->
@@ -357,6 +357,8 @@ class HttpNotionApi(
             type = type,
             segments = segments,
             createdTime = instant(obj["created_time"]),
+            hasChildren = (obj["has_children"] as? JsonPrimitive)?.booleanOrNull == true,
+            checked = if (type == "to_do") ((obj[type] as? JsonObject)?.get("checked") as? JsonPrimitive)?.booleanOrNull ?: false else null,
         )
     }
 
@@ -396,6 +398,27 @@ class HttpNotionApi(
             ?: (((o["text"] as? JsonObject)?.get("link") as? JsonObject)?.get("url") as? JsonPrimitive)?.contentOrNull
             ?: mentionedUrl(o["mention"] as? JsonObject)
     }.distinct()
+
+    /**
+     * The page and database @-mentions of a rich-text array, in order, without repeats. A hyperlink
+     * or a URL typed as text is not a mention and is not returned here (see [hrefs] for those). Other
+     * mention types (a user, a date, a link preview) are left out: they name nothing a goal could point at.
+     */
+    private fun mentions(element: JsonElement?): List<NotionMention> = (element as? JsonArray).orEmpty().mapNotNull { run ->
+        val o = run.jsonObject
+        if ((o["type"] as? JsonPrimitive)?.contentOrNull != "mention") return@mapNotNull null
+        val mention = o["mention"] as? JsonObject ?: return@mapNotNull null
+        val kind = when ((mention["type"] as? JsonPrimitive)?.contentOrNull) {
+            "page" -> MentionKind.PAGE
+            "database" -> MentionKind.DATABASE
+            else -> return@mapNotNull null
+        }
+        val key = if (kind == MentionKind.PAGE) "page" else "database"
+        val id = (((mention[key] as? JsonObject)?.get("id")) as? JsonPrimitive)?.contentOrNull?.let(::normalizeNotionId)
+            ?: (o["href"] as? JsonPrimitive)?.contentOrNull?.let(::normalizeNotionId)
+            ?: return@mapNotNull null
+        NotionMention(kind, id, (o["plain_text"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+    }.distinctBy { it.kind to it.id }
 
     private fun mentionedUrl(mention: JsonObject?): String? {
         val kind = (mention?.get("type") as? JsonPrimitive)?.contentOrNull ?: return null

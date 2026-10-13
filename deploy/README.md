@@ -478,14 +478,30 @@ committing this directory.
 
 ## Notion input channel (Agent Work cycles)
 
-The Director polls the **Cycles** database in Notion's Agent Work for rows Jacob has set to
-`Queued` whose **Goal** is `Active`, claims one at a time with a lease, reads the goal and the pages it
-links to, asks the local model for a plan, **validates the plan in code**, and writes up to Task Budget
-rows into **Agent Tasks** as `Planned`. Then it marks the cycle `Done` with a Summary that says it was
-a dry run. It executes nothing, dispatches nothing to Hermes, and writes nothing to the PPS ledger: the
-four PPS tables and Goals and Escalations are configured read-only in the guard, so that is a property
-of the configuration, not of planner code. It reacts to `Queued` rows and to a `Running` cycle whose
-lease ran out; it schedules nothing and creates no cycle.
+The Director polls the **Cycles** database in Notion's Agent Work for rows Jacob has set to `Queued`
+whose **Goal** is `Active`, claims one at a time with a lease, and runs it end to end in one go:
+
+1. **Scope.** Reads the goal (Goal, Done when, Scope, Serves, Status, Cycle Budget, Replan Cap,
+   Deadline), the Resolution text of its Escalations and the previous cycle's Summary, and builds the
+   allowed set from the **@-mentions in Scope** (below). A goal with no usable mention fails the cycle
+   with the reason; it is never guessed at.
+2. **Plan.** Asks the local model for a plan from what the mentions put in reach, **validates it in
+   code**, and writes up to Cycle Budget rows into **Agent Tasks** as `Planned`, each with an idempotency key.
+3. **Execute, report-only.** Runs the tasks in order. For each it stages bounded in-scope page content,
+   asks the model to do the task from that material alone, and writes the task's **Result** (plain text,
+   citing the pages it used) and `Status` = `Done` (or `Blocked` / `Failed`), then raises the cycle's
+   **Tasks Done**. A task that cannot be done with what Scope allows is marked `Blocked` with the reason
+   and the cycle carries on.
+4. **QC.** One Director decision writes the cycle's **Summary** (what was done against Done when, and
+   whether the goal looks met) and **Goal Feedback** (what was unclear, what alfrd guessed, one suggested
+   rewrite of Goal, Done when or Scope). It does **not** change the goal's Status. Then `Status` = `Done`
+   with `Finished`.
+
+It writes **only Cycles and Agent Tasks**. Goals, Escalations, the PPS tables (Questions, Findings,
+Sources) and the seven alfrd memory tables are read-only in the guard, as is the Persona page, so that is
+a property of the configuration and the guard, not of the planner's or executor's code. No gate, no
+replan, no escalation other than recording a failure, no scheduling, no PDF reading, no graph ingestion.
+It reacts to `Queued` rows and to a `Running` cycle whose lease ran out; it creates no cycle.
 
 ### Setup, in this order
 
@@ -493,29 +509,46 @@ lease ran out; it schedules nothing and creates no cycle.
    (mode `600`, `halo:halo`, beside `.engram-debug-token`). Nothing in this repository creates, prints,
    logs or commits it. It is the alfrd-worker integration's token, a different one from any read-only
    Notion token used for Hermes ingestion, and it must not be shared with any alfrd memory set.
-2. **Verify the placement** (as root, so the JVM read is tested the way the service runs it):
+2. **Share the databases with the integration.** The token must reach all of these data sources (the
+   probe checks them; the ids are in `deploy/config/notion-agent-worker.json`):
+
+   | Group | Data sources |
+   |---|---|
+   | Agent Work (4) | Goals, Cycles, Agent Tasks, Escalations |
+   | PPS Evidence Ledger (3) | Questions, **Findings** (was Claims), Sources |
+   | alfrd memory (7) | Containers, Items, Entities, Connections, Sessions, Sources, Template Changes |
+
+   That is **14 data sources**, plus the **Persona** page (`3f1d0721…`) as the one readable plain page.
+   The memory databases are Jacob's real teamspace and are read with this same token, read-only. PPS
+   Evidence is archived and is *not* in the set; if the token still sees it, the probe lists it as an
+   "other data source" and that is fine.
+3. **Verify the placement** (as root, so the JVM read is tested the way the service runs it):
    `sudo bash deploy/scripts/verify-notion-worker.sh`. It checks mode and owner, that the file is outside
    the checkout and every Hermes mount, that the **JVM can read it as `halo` under SELinux enforcing**
-   (a transient systemd unit running the probe's `--check-token`, then an `ausearch` for AVC denials),
-   and that the token value is not in any container's configuration, the service's process environment,
-   its journal, or a tracked file. It never prints the value. A `WARN` on the JVM read means it could
-   only test from an interactive shell, which proves nothing about the service's SELinux domain.
-3. **Run the read-only probe** — the first live action, before the service is restarted onto this build:
+   (a transient systemd unit that launches the probe's `--check-token` through `/usr/bin/bash`, as
+   `engram-dev.service` does, then an `ausearch` for any AVC denial against the launched binary, the jar
+   or the token), and that the token value is not in any container's configuration, the service's process
+   environment, its journal, or a tracked file. It never prints the value. A `WARN` on the JVM read means
+   it could only test from an interactive shell, which proves nothing about the service's SELinux domain.
+4. **Run the read-only probe** — the first live action, before the service is restarted onto this build:
    ```
    sudo -u halo /home/halo/.local/jdks/jdk-21.0.12.1+1/bin/java \
      -cp /home/halo/development/engram-engine/build/libs/engram-engine.jar \
      app.alfrd.engram.scripts.NotionWorkerProbeKt \
      --config /home/halo/development/engram-engine/deploy/config/notion-agent-worker.json
    ```
-   It lists which of the eight Agent Work and PPS data sources the token can see, flags any other data
-   source the token reaches, and reports what the live API did for the client's open assumptions (data
-   source UUID accepted, a database id rejected, `parent.data_source_id` present, `last_edited_time`
-   granularity, formula and rollup values only on a page read). It creates, updates and deletes nothing.
-   Exit `0` all eight reachable; `2` token unreadable or rejected; `3` at least one of the eight is not
-   reachable (**stop there and share it with the integration or fix its id before anything is created**);
-   `4` no network answer. Select-option behavior needs a write and is observed on the first real dry run.
-4. **Restart** `engram-dev.service` onto the new build. `GET /debug/notion-cycles` (debug bearer token)
-   shows whether the channel runs, what the last poll did, and the planning decision for each recent cycle.
+   **Expectation: all 14 data sources reachable and the Persona page readable.** It also lists any other
+   data source the token reaches, and reports what the live API did for the client's open assumptions
+   (data source UUID accepted, a database id rejected, `parent.data_source_id` present,
+   `last_edited_time` granularity, formula and rollup values only on a page read). It creates, updates and
+   deletes nothing, and prints names and counts, never row content or the token.
+   Exit `0` all 14 data sources and the Persona page reachable; `2` token unreadable or rejected; `3` at
+   least one data source or the Persona page is not reachable (**stop there and share it with the
+   integration or fix its id before anything is created**); `4` no network answer; `64` usage or
+   configuration. Select-option behavior needs a write and is observed on the first real cycle.
+5. **Restart** `engram-dev.service` onto the new build. `GET /debug/notion-cycles` (debug bearer token)
+   shows whether the channel runs, what the last poll did, and for each recent cycle the scope that was
+   read, the planning decision, each task's execution and the QC decision.
 
 ### Configuration
 
@@ -523,61 +556,130 @@ lease ran out; it schedules nothing and creates no cycle.
 |---|---|---|
 | `NOTION_WORKER_CONFIG` | unset (channel off) | Path to `deploy/config/notion-agent-worker.json`. Set by `run-engram-dev.sh`. A path, never a token. |
 | `NOTION_WORKER_POLL_SECONDS` | `180` (30 to 3600) | Poll interval. A queued cycle is picked up within one interval. |
-| `NOTION_WORKER_LEASE_SECONDS` | `120` (30 to 3600) | Lease length; renewed every third of it while a cycle is being planned. |
+| `NOTION_WORKER_LEASE_SECONDS` | `120` (30 to 3600) | Lease length; renewed every third of it while a cycle is being planned, executed or QC'd. |
 | `NOTION_WORKER_ID` | `engram-dev@<host>` | Prefix for the `Worker` field. `#<pid>` is always appended, so a restarted process never looks like the one whose lease it is taking over. |
 
 The channel needs the Director's local model (`LLM_PROVIDER=local`, already set by `run-engram-dev.sh`).
 Without it the channel does not start and says so in the journal (`notion-cycles: NOT RUNNING`) and on
 `/debug/notion-cycles`: claiming cycles it cannot plan would turn Jacob's `Queued` rows into `Failed`
-ones. Goal and page text is sent to that local model only; the plan written back to Notion is the one
-other place any of it can appear.
+ones. Goal and page text is sent to that local model only; what is written back to Notion (the plan, the
+Results, the Summary and Goal Feedback) is the one other place any of it can appear.
 
 ### The token
 
 The configuration holds `tokenRef: file:/home/halo/development/hermes-webui-dev/.notion-worker-token`.
 Unlike the debug token, `run-engram-dev.sh` does **not** read it: the JVM reads the file itself on every
-Notion request. So the value is never in `/proc/<pid>/environ`, never in `systemctl show`, and never in
-the environment of a child process (the Hermes container launch included; it passes no `-e` and mounts
-only the Hermes home and the read-only workspace). A token placed or rotated after the service started
-is used on the next poll with no restart; with no file, the channel runs, makes no Notion request, and
-reports `could not list cycles: NotionConfigException` on `/debug/notion-cycles` (logged once, not every poll).
+Notion request. So the value is never in `/proc/<pid>/environ`, never in `systemctl show`, never in logs
+or the trace, never in a prompt to the model, and never in the environment or arguments of a child
+process. A token placed or rotated after the service started is used on the next poll with no restart;
+with no file, the channel runs, makes no Notion request, and reports
+`could not list cycles: NotionConfigException` on `/debug/notion-cycles` (logged once, not every poll).
+
+### Scope: the mentions rule
+
+A goal's **Scope** is Notion rich text, and **only its page and database @-mentions count**. Prose,
+hyperlinks, URLs typed as text, and mentions of people, dates or link previews are ignored, and the trace
+says how much prose was ignored and which links. From the mentions the code builds the allowed set:
+
+- every **mentioned page** (the Persona page, a memory Item, a PPS Source);
+- every **mentioned database** that is one of the 14 configured tables, and **each of its rows** (up to
+  100 per table, oldest first; the cut is reported);
+- nothing else. An external URL is never allowed, a table that was not mentioned is not, and a page
+  that is not in a configured table or on the allowlist cannot be read at all (the guard refuses it).
+  A link counts only by the page id in its URL **path**; an allowed id in the user-info, query or
+  fragment does not put another page in scope.
+
+Every task link must be in the set (rejected at planning, with a reason code), and every page the
+executor stages must be in it again at execution, so a task row edited in Notion after planning cannot
+reach a page outside Scope: that task is marked `Blocked` and nothing outside is read. `Serves` is read and
+recorded, and the Container it names is **not** fetched unless Scope also mentions it.
+
+A goal whose Scope has **no mentions**, or whose mentions are all unreadable, becomes a `Failed` cycle
+whose Summary says why (and lists the prose it ignored) and whose Goal Feedback suggests a Scope rewrite.
+
+### What is read from a page
+
+Block content of in-scope pages is read through the guard, read-only: paragraphs, headings, bulleted and
+numbered lists, to-dos (with their checked state), callouts, quotes and toggles, with **one level of
+children**. Images, code, tables, embeds and child pages are counted as skipped, not guessed at.
+
+| Limit | Value |
+|---|---|
+| Text per page | 6,000 characters |
+| Page text given to one task | 14,000 characters |
+| Page text read fresh from Notion per cycle | 60,000 characters (a page already read is reused free) |
+| Blocks per page / children per block | 300 / 60 |
+| Rows listed per mentioned database / mentions followed | 100 / 12 |
+
+A limit that bites is noted in the trace (`content` entries, `truncated`), and in the staged page itself
+so the worker knows it saw a cut. A page Notion will not give, or one that would exceed a limit, is not
+staged; the task is told so in its notes and the worker decides whether it can still be done (`Blocked`
+with its reason if not). Only a link **outside Scope** blocks a task before the model is asked.
 
 ### Failure behavior
 
 - **Restart or crash mid-cycle.** The cycle stays `Running` and its `Lease Until` runs out. The next
-  process reclaims it at its first poll after expiry (at most one lease plus one poll interval after
-  the restart). Rows are created with an idempotency key, `cycle:<Cycle ID>:v1:o<Order>`, so a restart
-  after an ambiguous write finds the existing row by key and never creates a second one.
+  process reclaims it at its first poll after expiry (at most one lease plus one poll interval after the
+  restart). Task rows are created with an idempotency key, `cycle:<Cycle ID>:v1:o<Order>`, so a restart
+  after an ambiguous write finds the existing row by key and never creates a second one. Tasks already
+  `Done`, `Blocked` or `Failed` are **not run again**; a task left `Running` by the crash is run again,
+  because its Result was never written. The plan is not remade when its rows exist.
 - **A partial plan is never completed from a guess.** A restart that finds some, but not all, of the
   rows the interrupted run said it would write marks the cycle `Failed` with a Summary saying so. The
   rows already written are left as they are; queue a new cycle to plan again.
-- **Model unavailable, or every proposed task rejected by validation.** The cycle is marked `Failed`
-  with a Summary naming the reason by code. Nothing is requeued automatically. A cycle one process has
-  tried three times without finishing is marked `Failed` rather than retried a fourth time. (That count
-  is kept in memory, so a cycle that crashes the process itself is reclaimed again after each restart;
-  there is no persisted attempt counter in this increment.) Some, but not all, proposed tasks rejected
-  by validation is not a failure: the rest are written and the Summary says how many were rejected.
+- **Lease lost mid-run** (another process took the cycle): this one stops before the next task and
+  writes nothing more to it. A heartbeat still in flight when the cycle finishes is waited for, and none
+  starts after, so a slow response cannot put a lease back on a finished cycle.
+- **Shutdown or a cancelled poll** is not a model failure: it propagates, and the cycle is left `Running`
+  for a later reclaim instead of being failed.
+- **Model unavailable, or every proposed task rejected by validation.** The cycle is `Failed` with a
+  Summary naming the reason by code. Nothing is requeued automatically. A cycle one process has tried
+  three times without finishing is marked `Failed` ("abandoned") rather than retried a fourth time, and
+  keeps the Results already written. (That count is kept in memory, so a cycle that crashes the process
+  itself is reclaimed again after each restart; there is no persisted attempt counter.) Some, but not
+  all, proposed tasks rejected by validation is not a failure: the rest are written and the Summary says
+  how many were rejected.
+- **A task's model call fails.** That task is `Failed` with a code and is not retried; the cycle goes on.
+  The model's own words are never copied into a failure message.
+- **QC fails.** The cycle is `Failed` ("failed at QC"); every task Result stays; no feedback is invented.
 - **Notion rate limit (429).** Honored with `Retry-After` and backoff in the shared client.
 - **Notion or the network down.** The poll records the failure (class name only) and the loop carries
   on at its normal pace; the lease makes a cut-short poll safe to repeat.
-- **A bad configuration** (missing file, a table writable that should not be, a poll interval out of
-  range) is logged at error and leaves the channel off. It never stops the engine from serving chat.
+- **A bad configuration** (missing file, a table writable that should not be, a table missing or extra,
+  a poll interval out of range, or an overlap with any other Notion set handed to the runtime) is logged
+  at error and leaves the channel off. It never stops the engine from serving chat. The overlap check
+  only sees sets it is given; no other set (such as the paused Notion-backed memory store's test
+  teamspace) is configured on the box today, so it has not compared this one against a real one.
 
 ### What the code checks, whatever the model said
 
-Task count within the cycle's budget (and never more than 25); Type one of Read, Check, Hypothesis,
-Consolidate, Escalate (Orchestrate, Gate and QC are the Director's own and are never proposed); every
-Target Link is one the Director itself supplied from what the goal links to (see "Scope" below); no task
-that would lock, unlock or change an answer standard, or delete, remove, overwrite or replace an
-existing row. A task that fails a check is dropped and the reason is recorded in the trace; nothing the
-model said is written without passing.
+At planning: task count within the cycle's budget (and never more than 25); Type one of Read, Check,
+Hypothesis, Consolidate, Escalate (Orchestrate, Gate and QC are the Director's own and are never
+proposed); every Target Link is in the allowed set from Scope; no task that would lock, unlock or change
+an answer standard, or delete, remove, overwrite or replace an existing row. A task that fails a check
+is dropped and the reason is recorded in the trace.
 
-**Scope.** A goal's Scope is prose, so code cannot check a link "against" it. The Director instead bounds
-every link to the rows of the tables the goal links to, those rows' own URLs, and the goal's external
-links, and it hands the model only those. A Target Link that is not a row of a configured table (for
-example "How this ledger works") is reported in the trace and skipped; the guard is not widened to read
-arbitrary pages. A machine-checkable Scope (a relation or a list of allowed URLs on the goal) would let
-code check Scope itself; that is a change to the Goals template, not to this code.
+At execution: each page the task names is re-checked against the allowed set and the guard before it is
+read; the pages a Result cites are only ever pages that were staged for that task (anything else the
+model cited is dropped); a Result is plain text with the cited page URLs appended by code; a
+`Done`/`Blocked`/`Failed` outcome is decided from the model's structured answer, never from free text;
+and the guard refuses any write outside Cycles and Agent Tasks, including a goal's Status, a PPS row, a
+memory row and a page-body append.
+
+### Where this departs from the Director–Hermes contract
+
+The contract has the Director hand execution to Hermes. This increment **does the tasks in the
+Director** (`DirectorTaskExecutor`, behind a `CycleTaskExecutor` interface that a Hermes adapter can
+replace). Reasons: Hermes assignments are a closed set of kinds with fixed ACP methods and a shared
+workspace directory, the dispatcher is fire-and-forget and tied to chat sessions with no way to await a
+result, and Hermes results flow to graph ingestion, which is out of scope here. An adapter that fit these
+would be more than a small one. The same local model does the work, so nothing leaves the box.
+
+### Status vocabulary
+
+The live Goals database offers `Draft, Queued, Active, Met, Abandoned, Expired` (read 2026-10-13); the
+converged design names `Draft, Active, Done, Stopped`. Both sets are known to the code, and only `Active`
+lets a cycle run. QC never writes a goal's Status; renaming the options in Notion changes nothing here.
 
 ## Remaining limits
 

@@ -1,14 +1,20 @@
 package app.alfrd.engram.cognitive.pipeline.agentwork
 
+import app.alfrd.engram.notion.FakeBlock
 import app.alfrd.engram.notion.FakeNotionApi
 import app.alfrd.engram.notion.FakeProperty
 import app.alfrd.engram.notion.NotionTableSet
 
 /**
- * The eight tables of the Agent Work + PPS Evidence Ledger, installed in a [FakeNotionApi] under the
- * ids a [NotionTableSet] gives them. Property names, types and select options are exactly those of
- * the real databases (read from the workspace on 2026-10-12), including which properties are
- * formulas, rollups and auto-increment ids.
+ * The fourteen tables of the Agent Work table set (Agent Work, the PPS Evidence Ledger and Jacob's alfrd
+ * memory) and the Persona page, installed in a [FakeNotionApi] under the ids a [NotionTableSet] gives them.
+ * Property names, types and select options of the Agent Work tables are exactly those of the real
+ * databases (read from the workspace on 2026-10-13); the PPS and memory tables carry the properties the
+ * tests use, with the real names.
+ *
+ * The Goals schema also keeps the **retired** fields (Intent, Metric, Done Criteria, Target Links, Target
+ * Space, Goal Type, Metric Locked, Metric Note) because the live database still has them until Jacob removes
+ * them; a test fills them with a sentinel to prove nothing reads them.
  *
  * Auto-increment prefixes are guesses (`GOAL` is confirmed by a real goal row; the others are not).
  */
@@ -18,14 +24,23 @@ class AgentWorkTemplate(val tableSet: NotionTableSet) {
     val tasks: String get() = tableSet.table(AgentWorkTables.AGENT_TASKS).dataSourceId
     val escalations: String get() = tableSet.table(AgentWorkTables.ESCALATIONS).dataSourceId
     val questions: String get() = tableSet.table(AgentWorkTables.QUESTIONS).dataSourceId
-    val claims: String get() = tableSet.table(AgentWorkTables.CLAIMS).dataSourceId
+    val findings: String get() = tableSet.table(AgentWorkTables.FINDINGS).dataSourceId
     val sources: String get() = tableSet.table(AgentWorkTables.SOURCES).dataSourceId
-    val evidence: String get() = tableSet.table(AgentWorkTables.EVIDENCE).dataSourceId
+    val containers: String get() = tableSet.table(AgentWorkTables.MEMORY_CONTAINERS).dataSourceId
+    val items: String get() = tableSet.table(AgentWorkTables.MEMORY_ITEMS).dataSourceId
+    val entities: String get() = tableSet.table(AgentWorkTables.MEMORY_ENTITIES).dataSourceId
+    val connections: String get() = tableSet.table(AgentWorkTables.MEMORY_CONNECTIONS).dataSourceId
+    val sessions: String get() = tableSet.table(AgentWorkTables.MEMORY_SESSIONS).dataSourceId
+    val memorySources: String get() = tableSet.table(AgentWorkTables.MEMORY_SOURCES).dataSourceId
+    val templateChanges: String get() = tableSet.table(AgentWorkTables.MEMORY_TEMPLATE_CHANGES).dataSourceId
+
+    /** The allowlisted Persona page, under the id the configuration pins. */
+    val personaPageId: String get() = tableSet.readablePages.single { it.name == AgentWorkTables.PERSONA_PAGE }.pageId
 }
 
 private fun options(vararg names: String) = FakeProperty.Select(names.toSet())
 
-fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet): AgentWorkTemplate {
+fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet, personaText: List<FakeBlock> = listOf(FakeBlock(text = "Persona: how alfrd should be."))): AgentWorkTemplate {
     val t = AgentWorkTemplate(tableSet)
 
     defineDataSourceWithId(
@@ -33,21 +48,23 @@ fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet): AgentWorkT
         mapOf(
             "Goal" to FakeProperty.Title,
             "Goal ID" to FakeProperty.UniqueId("GOAL"),
-            "Goal Type" to options("Work", "Review"),
             "Status" to options("Draft", "Queued", "Active", "Met", "Abandoned", "Expired"),
-            "Intent" to FakeProperty.RichText,
+            "Done when" to FakeProperty.RichText,
             "Scope" to FakeProperty.RichText,
-            "Target Space" to options("PPS Evidence Ledger"),
-            "Target Links" to FakeProperty.RichText,
-            "Metric" to FakeProperty.RichText,
-            "Metric Locked" to FakeProperty.Date,
-            "Metric Note" to FakeProperty.RichText,
-            "Done Criteria" to FakeProperty.RichText,
+            "Serves" to FakeProperty.Relation(t.containers, null),
             "Deadline" to FakeProperty.Date,
             "Cycle Budget" to FakeProperty.Number,
             "Replan Cap" to FakeProperty.Number,
             "Cycles" to FakeProperty.Relation(t.cycles, "Goal"),
             "Escalations" to FakeProperty.Relation(t.escalations, "Goal"),
+            // Retired by the converged schema; still on the live database until Jacob removes them.
+            "Goal Type" to options("Work", "Review"),
+            "Intent" to FakeProperty.RichText,
+            "Metric" to FakeProperty.RichText,
+            "Metric Locked" to FakeProperty.Date,
+            "Metric Note" to FakeProperty.RichText,
+            "Target Space" to options("PPS Evidence Ledger"),
+            "Target Links" to FakeProperty.RichText,
         ),
     )
     defineDataSourceWithId(
@@ -70,6 +87,7 @@ fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet): AgentWorkT
             "QC Spot Check" to FakeProperty.RichText,
             "Review Batch" to FakeProperty.RichText,
             "Summary" to FakeProperty.RichText,
+            "Goal Feedback" to FakeProperty.RichText,
             "Tasks" to FakeProperty.Relation(t.tasks, "Cycle"),
             "Escalations" to FakeProperty.Relation(t.escalations, "Cycle"),
         ),
@@ -110,47 +128,26 @@ fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet): AgentWorkT
         ),
     )
 
+    // ── PPS Evidence Ledger (read-only). Evidence is being archived and is not in the set. ──
     defineDataSourceWithId(
         t.questions,
         mapOf(
             "Question" to FakeProperty.Title,
             "Answer Standard" to FakeProperty.RichText,
-            "Asked of" to options("Board", "Superintendent", "Legislature", "State Agency", "Other"),
-            "Section" to options("Budget & Funding", "Enrollment & Facilities", "Students & Programs", "Contracts & Bonds", "Governance & Process", "Community & Transportation"),
             "Weight" to FakeProperty.Number,
-            "Weight Rationale" to FakeProperty.RichText,
             "Standard Locked" to FakeProperty.Date,
             "Lock Note" to FakeProperty.RichText,
-            "Follow-up to" to FakeProperty.Relation(t.questions, "Follow-ups"),
-            "Follow-ups" to FakeProperty.Relation(t.questions, "Follow-up to"),
-            "Related Claims" to FakeProperty.Relation(t.claims, "Bears on"),
-            "Required Claims" to FakeProperty.Relation(t.claims, "Required by"),
             "Status" to FakeProperty.Formula,
             "Answer Score" to FakeProperty.Formula,
-            "Required Claim Confidence" to FakeProperty.Rollup,
         ),
     )
     defineDataSourceWithId(
-        t.claims,
+        t.findings,
         mapOf(
             "Claim" to FakeProperty.Title,
             "Claimed by" to options("PPS", "Board Member", "Save PDX", "Union", "Press", "State Agency", "Anonymous", "Standard (no claimant)", "Other"),
             "Due" to FakeProperty.Date,
-            "Bears on" to FakeProperty.Relation(t.questions, "Related Claims"),
-            "Required by" to FakeProperty.Relation(t.questions, "Required Claims"),
-            "Evidence" to FakeProperty.Relation(t.evidence, "Claim"),
-            "Conflicts with" to FakeProperty.Relation(t.claims, "Conflicted by"),
-            "Conflicted by" to FakeProperty.Relation(t.claims, "Conflicts with"),
             "Confidence" to FakeProperty.Formula,
-            "Impact" to FakeProperty.Formula,
-            "Kind" to FakeProperty.Formula,
-            "Lead Score" to FakeProperty.Formula,
-            "Overdue" to FakeProperty.Formula,
-            "Publish Score" to FakeProperty.Formula,
-            "Best Support" to FakeProperty.Rollup,
-            "Best Contradiction" to FakeProperty.Rollup,
-            "Weight (Bears on)" to FakeProperty.Rollup,
-            "Weight (Required)" to FakeProperty.Rollup,
         ),
     )
     defineDataSourceWithId(
@@ -164,25 +161,61 @@ fun FakeNotionApi.installAgentWorkTemplate(tableSet: NotionTableSet): AgentWorkT
             "URL" to FakeProperty.Url,
             "Date" to FakeProperty.Date,
             "Notes" to FakeProperty.RichText,
-            "Evidence" to FakeProperty.Relation(t.evidence, "Source"),
             "Default Strength" to FakeProperty.Formula,
         ),
     )
+
+    // ── alfrd memory (Jacob's real teamspace; read-only here) ──
     defineDataSourceWithId(
-        t.evidence,
+        t.containers,
         mapOf(
-            "Evidence" to FakeProperty.Title,
-            "Claim" to FakeProperty.Relation(t.claims, "Evidence"),
-            "Source" to FakeProperty.Relation(t.sources, "Evidence"),
-            "Stance" to options("Supports", "Partial", "Doesn't establish", "Contradicts"),
-            "Note" to FakeProperty.RichText,
-            "Strength Override" to FakeProperty.Number,
-            "Strength" to FakeProperty.Formula,
-            "Value" to FakeProperty.Formula,
-            "Pro Value" to FakeProperty.Formula,
-            "Con Value" to FakeProperty.Formula,
-            "Source Default" to FakeProperty.Rollup,
+            "Name" to FakeProperty.Title,
+            "Kind" to options("Domain", "Project"),
+            "Status" to options("Active", "Paused", "Done"),
+            "Sensitivity" to options("Open", "Personal", "Sensitive"),
+            "Focus" to FakeProperty.Checkbox,
+            "Due" to FakeProperty.Date,
         ),
     )
+    defineDataSourceWithId(
+        t.items,
+        mapOf(
+            "Item" to FakeProperty.Title,
+            "Kind" to options("Task", "Event", "Question", "Fact", "Insight"),
+            "Status" to options("Open", "Resolved", "Superseded"),
+            "Said" to FakeProperty.RichText,
+            "Sensitivity" to options("Open", "Personal", "Sensitive"),
+            "Container" to FakeProperty.Relation(t.containers, null),
+            "Date" to FakeProperty.Date,
+            "Op key" to FakeProperty.RichText,
+        ),
+    )
+    defineDataSourceWithId(
+        t.entities,
+        mapOf("Name" to FakeProperty.Title, "Type" to options("Self", "Person", "Client", "Organization", "Artist", "Work", "Place", "Thing"), "Detail" to FakeProperty.RichText),
+    )
+    defineDataSourceWithId(
+        t.connections,
+        mapOf("Connection" to FakeProperty.Title, "Type" to options("Inspired by", "Played with", "Client of", "Works with", "Part of", "Related to"), "Said" to FakeProperty.RichText),
+    )
+    defineDataSourceWithId(
+        t.sessions,
+        mapOf("Session" to FakeProperty.Title, "Key" to FakeProperty.RichText, "Date" to FakeProperty.Date, "Notes" to FakeProperty.RichText),
+    )
+    defineDataSourceWithId(
+        t.memorySources,
+        mapOf("Name" to FakeProperty.Title, "Kind" to options("Notion", "Google", "GitHub", "Other"), "Access" to options("Off", "Read", "Read and write"), "What it holds" to FakeProperty.RichText),
+    )
+    defineDataSourceWithId(
+        t.templateChanges,
+        mapOf(
+            "Change" to FakeProperty.Title,
+            "Status" to options("Proposed", "Approved", "Applied", "Rejected"),
+            "Area" to options("Schema", "Standard kit", "Persona page", "Beta Terms", "Disclosures", "Backend prompt", "Other"),
+            "Why" to FakeProperty.RichText,
+        ),
+    )
+
+    createPlainPageWithId(t.personaPageId, title = "Persona", content = personaText)
     return t
 }

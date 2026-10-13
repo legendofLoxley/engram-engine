@@ -23,9 +23,9 @@ import java.io.PrintStream
 import kotlin.system.exitProcess
 
 /**
- * The first live action of the Notion cycle channel, and only a read: **which of the eight Agent
- * Work and PPS data sources can the worker token see, and what do the client's open assumptions look
- * like against the real API?**
+ * The first live action of the Notion cycle channel, and only a read: **which of the configured data
+ * sources (Agent Work, PPS and alfrd memory: 14) and which allowlisted pages (Persona) can the worker
+ * token see, and what do the client's open assumptions look like against the real API?**
  *
  * It creates, updates and deletes nothing. It goes through the same client every table set uses
  * (the guard in front of the rate limiter in front of `HttpNotionApi`), with two deliberate
@@ -36,9 +36,9 @@ import kotlin.system.exitProcess
  * It prints ids, table names, property names and counts. It never prints a row's content, and it
  * never prints the token or anything derived from it.
  *
- * Exit status: 0 all eight reachable, 2 the token is unreadable or rejected, 3 at least one of the
- * eight is not reachable (stop and report before creating anything), 4 no network answer, 64 usage
- * or configuration.
+ * Exit status: 0 every data source and allowlisted page reachable, 2 the token is unreadable or
+ * rejected, 3 at least one is not reachable (stop and report before running a cycle), 4 no network
+ * answer, 64 usage or configuration.
  */
 object NotionWorkerProbe {
     const val OK = 0
@@ -62,6 +62,11 @@ object NotionWorkerProbe {
         var retrieveFailure: String? = null
         var databaseIdRejected: Boolean? = null
         var databaseIdDetail: String? = null
+    }
+
+    private class PageReport(val name: String, val pageId: String) {
+        var reachable = false
+        var failure: String? = null
     }
 
     suspend fun run(
@@ -135,7 +140,23 @@ object NotionWorkerProbe {
             return TOKEN
         }
 
-        out.println("== The eight data sources ==")
+        val pageReports = set.readablePages.map { PageReport(it.name, it.pageId) }
+        for (report in pageReports) {
+            try {
+                // A read of one allowlisted page's properties: no body, no content is printed.
+                guarded.retrievePage(report.pageId)
+                report.reachable = true
+            } catch (e: NotionApiException) {
+                report.failure = "HTTP ${e.status} ${e.code ?: ""}".trim()
+            } catch (e: NotionRateLimitedException) {
+                report.failure = "rate limited past the retry budget"
+            } catch (e: NotionTransportException) {
+                out.println("network: no answer from Notion (${e::class.java.simpleName})")
+                return NETWORK
+            }
+        }
+
+        out.println("== The ${reports.size} data sources ==")
         for (r in reports) {
             val listed = visible?.any { it.id == r.table.dataSourceId }
             val state = if (r.reachable) "VISIBLE" else "MISSING"
@@ -144,6 +165,11 @@ object NotionWorkerProbe {
                 r.failure?.let { add(it) }
             }.joinToString("; ")
             out.println("  %-8s %-12s %s%s".format(state, r.table.name, r.table.dataSourceId, if (extra.isEmpty()) "" else "  ($extra)"))
+        }
+        out.println()
+        out.println("== Allowlisted pages (read-only; the only plain pages the client may read) ==")
+        pageReports.forEach { r ->
+            out.println("  %-8s %-12s %s%s".format(if (r.reachable) "VISIBLE" else "MISSING", r.name, r.pageId, r.failure?.let { "  ($it)" } ?: ""))
         }
         val configured = set.tables.map { it.dataSourceId }.toSet()
         val beyond = visible.orEmpty().filter { it.id !in configured }
@@ -198,16 +224,16 @@ object NotionWorkerProbe {
             computed.isEmpty() -> "every property of a page read was also in the query result"
             else -> "only on a page read, not in a query: ${computed.joinToString(", ")}"
         })
-        out.println("  6. select option behavior (an unknown option name on create/update): NOT PROBED. It needs a write, and this probe writes nothing. It is observable on the first real dry run.")
+        out.println("  6. select option behavior (an unknown option name on create/update): NOT PROBED. It needs a write, and this probe writes nothing. It is observable on the first real cycle.")
 
-        val missing = reports.filter { !it.reachable }
+        val missing = reports.filter { !it.reachable }.map { it.table.name } + pageReports.filter { !it.reachable }.map { "page:${it.name}" }
         out.println()
         if (missing.isNotEmpty()) {
-            out.println("RESULT: ${missing.size} of ${reports.size} data source(s) are not reachable with this token: ${missing.joinToString(", ") { it.table.name }}.")
-            out.println("Stop here. Share each missing data source with the alfrd-worker integration (or fix its id in the configuration) before anything is created.")
+            out.println("RESULT: ${missing.size} of ${reports.size + pageReports.size} data source(s) and page(s) are not reachable with this token: ${missing.joinToString(", ")}.")
+            out.println("Stop here. Connect the alfrd-worker integration to each (Jacob connects it to his top alfrd page; Agent Work and PPS are shared separately), or fix the id in the configuration, before a cycle runs.")
             return MISSING
         }
-        out.println("RESULT: all ${reports.size} data sources are reachable. Nothing was written.")
+        out.println("RESULT: all ${reports.size} data sources and ${pageReports.size} allowlisted page(s) are reachable. Nothing was written.")
         return OK
     }
 

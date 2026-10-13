@@ -7,17 +7,20 @@ package app.alfrd.engram.cognitive.pipeline.agentwork
  */
 object AgentWorkSchema {
 
+    /**
+     * The converged goal ("Goals in memory: converged schema", October 12, 2026): a sentence (Goal), a check
+     * (Done when), the pages and databases it may touch (Scope, read from @-mentions only), the Container
+     * it serves, its Status, and three hidden defaults. Intent, Metric, Done Criteria (renamed Done when),
+     * Target Links, Target Space, Goal Type, Metric Locked and Metric Note are retired: nothing here names
+     * them, so removing them from the database cannot break the Director.
+     */
     object Goals {
         const val GOAL = "Goal"
         const val GOAL_ID = "Goal ID"
-        const val TYPE = "Goal Type"
         const val STATUS = "Status"
-        const val INTENT = "Intent"
+        const val DONE_WHEN = "Done when"
         const val SCOPE = "Scope"
-        const val TARGET_SPACE = "Target Space"
-        const val TARGET_LINKS = "Target Links"
-        const val METRIC = "Metric"
-        const val DONE_CRITERIA = "Done Criteria"
+        const val SERVES = "Serves"
         const val CYCLE_BUDGET = "Cycle Budget"
         const val REPLAN_CAP = "Replan Cap"
         const val DEADLINE = "Deadline"
@@ -35,6 +38,9 @@ object AgentWorkSchema {
         const val STARTED = "Started"
         const val FINISHED = "Finished"
         const val SUMMARY = "Summary"
+
+        /** Written by QC: what the goal left unclear and what alfrd had to guess. */
+        const val GOAL_FEEDBACK = "Goal Feedback"
     }
 
     object Tasks {
@@ -47,6 +53,9 @@ object AgentWorkSchema {
         const val INSTRUCTIONS = "Instructions"
         const val TARGET_LINKS = "Target Links"
         const val CYCLE = "Cycle"
+        const val RESULT = "Result"
+        const val STARTED = "Started"
+        const val FINISHED = "Finished"
     }
 
     object Escalations {
@@ -62,16 +71,16 @@ object AgentWorkSchema {
     }
 }
 
+/**
+ * A goal's Status. Only [ACTIVE] lets a cycle run; the rest are read so a message can say what the goal
+ * is instead. The live database offers Draft, Queued, Active, Met, Abandoned and Expired (read from the
+ * workspace on 2026-10-13); the converged design names Draft, Active, Done and Stopped. Both vocabularies
+ * are known here, so renaming the options in Notion changes nothing that matters.
+ */
 enum class GoalStatus(val label: String) {
-    DRAFT("Draft"), QUEUED("Queued"), ACTIVE("Active"), MET("Met"), ABANDONED("Abandoned"), EXPIRED("Expired");
+    DRAFT("Draft"), QUEUED("Queued"), ACTIVE("Active"), MET("Met"), ABANDONED("Abandoned"), EXPIRED("Expired"), DONE("Done"), STOPPED("Stopped");
 
     companion object { fun fromLabel(label: String?): GoalStatus? = entries.firstOrNull { it.label == label } }
-}
-
-enum class GoalType(val label: String) {
-    WORK("Work"), REVIEW("Review");
-
-    companion object { fun fromLabel(label: String?): GoalType? = entries.firstOrNull { it.label == label } }
 }
 
 enum class CycleStatus(val label: String) {

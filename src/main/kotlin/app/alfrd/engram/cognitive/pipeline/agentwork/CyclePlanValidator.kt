@@ -35,7 +35,8 @@ data class ValidatedPlan(val tasks: List<PlannedTask>, val rejected: List<Reject
  * - it would take the plan past the cycle's task budget (only accepted tasks count);
  * - its type is not one a plan may propose (Orchestrate, Gate and QC are the Director's own steps);
  * - it has no title, type or instructions, or a title or instructions beyond the length limits;
- * - it has a link that is not an http(s) URL, or not one of the [AllowedLinks] the Director supplied;
+ * - it has a link that is not an http(s) URL, or not in the goal's [AllowedScope] (the pages and databases its
+ *   Scope mentions, and the rows of a mentioned database; an external URL is never in scope);
  * - it asks to lock or change an answer standard, or to delete or overwrite a row ([ForbiddenActions]);
  * - it repeats the title of an earlier accepted task.
  *
@@ -46,7 +47,7 @@ object CyclePlanValidator {
     const val MAX_INSTRUCTIONS_CHARS = 1800
     const val MAX_LINKS_PER_TASK = 8
 
-    fun validate(proposed: List<ProposedTask>, budget: Int, allowed: AllowedLinks): ValidatedPlan {
+    fun validate(proposed: List<ProposedTask>, budget: Int, allowed: AllowedScope): ValidatedPlan {
         val accepted = ArrayList<PlannedTask>()
         val rejected = ArrayList<Rejection>()
         val seenTitles = HashSet<String>()
@@ -68,7 +69,7 @@ object CyclePlanValidator {
 
             val links = task.targetLinks.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
             if (links.size > MAX_LINKS_PER_TASK) { reject(RejectReason.TOO_MANY_LINKS, "more than $MAX_LINKS_PER_TASK"); continue }
-            val badLink = links.firstOrNull { !isHttpUrl(it) }
+            val badLink = links.firstOrNull { !isHttpUrl(it) } // top-level helper in ScopeContext.kt
             if (badLink != null) { reject(RejectReason.LINK_NOT_A_URL, badLink.take(120)); continue }
             val outside = links.firstOrNull { !allowed.allows(it) }
             if (outside != null) { reject(RejectReason.LINK_NOT_ALLOWED, outside.take(200)); continue }
@@ -83,7 +84,6 @@ object CyclePlanValidator {
         return ValidatedPlan(accepted, rejected)
     }
 
-    private fun isHttpUrl(url: String): Boolean = AllowedLinks.canonicalExternal(url) != null
 }
 
 /**

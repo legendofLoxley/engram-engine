@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline.agentwork
 
+import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.notion.NotionConfigException
 import app.alfrd.engram.notion.RequestLimiter
 import app.alfrd.engram.notion.RetryPolicy
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
@@ -68,7 +70,7 @@ class NotionCycleRuntimeTest {
 
     private fun running(
         env: Map<String, String>,
-        llm: ScriptedLlm? = AgentWorkFixture.readPlan("a"),
+        llm: LlmClient? = AgentWorkFixture.readPlan("a"),
     ): NotionCycleRuntime {
         val startup = NotionCycleRuntime.fromEnvironment(
             env = env,
@@ -109,12 +111,12 @@ class NotionCycleRuntimeTest {
     }
 
     @Test
-    fun `a configuration file that is missing or breaks the dry-run shape is refused by name`() {
+    fun `a configuration file that is missing or breaks the required shape is refused by name`() {
         val missing = runCatching { NotionCycleRuntime.fromEnvironment(env = env(File(dir.toFile(), "nope.json")), llmClient = AgentWorkFixture.readPlan("a")) }.exceptionOrNull()
         assertTrue(missing is NotionConfigException, "got $missing")
 
-        val widenedText = committed.replace(Regex("""("name":\s*"claims".*?"access":\s*)"read-only""""), "$1\"read-write\"")
-        assertTrue(widenedText != committed, "the fixture must really make claims writable")
+        val widenedText = committed.replace(Regex("""("name":\s*"findings".*?"access":\s*)"read-only""""), "$1\"read-write\"")
+        assertTrue(widenedText != committed, "the fixture must really make findings writable")
         val widened = dir.resolve("widened.json").toFile().apply { writeText(widenedText) }
         val refused = runCatching { NotionCycleRuntime.fromEnvironment(env = env(widened), llmClient = AgentWorkFixture.readPlan("a")) }.exceptionOrNull()
         assertTrue(refused is NotionConfigException && refused.message!!.contains("exactly cycles and agent-tasks"), "got $refused")
@@ -148,7 +150,13 @@ class NotionCycleRuntimeTest {
     fun `the setup shown to the debug surface lists the tables by access and nothing else`() {
         val info = running(env(configFile(tokenFile().path))).info
         assertEquals(listOf("agent-tasks", "cycles"), info.readWriteTables)
-        assertEquals(listOf("claims", "escalations", "evidence", "goals", "questions", "sources"), info.readOnlyTables)
+        assertEquals(
+            listOf(
+                "escalations", "findings", "goals", "memory-connections", "memory-containers", "memory-entities", "memory-items",
+                "memory-sessions", "memory-sources", "memory-template-changes", "questions", "sources",
+            ),
+            info.readOnlyTables,
+        )
         val text = Json.encodeToString(NotionCycleInfo.serializer(), info)
         assertFalse(text.contains(".notion-worker-token"), text)
         assertFalse(text.contains(secret), text)
@@ -224,6 +232,45 @@ class NotionCycleRuntimeTest {
         assertTrue(runtime.channel.snapshot().consecutiveFailures == 1)
     }
 
+    @Test
+    fun `over real HTTP a poll that finds a queued cycle puts the token in the Authorization header of every request and nowhere else, and nothing it emits holds it`() = runBlocking<Unit> {
+        val cyclePage = """
+            {"object":"page","id":"c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1","created_time":"2026-10-12T09:00:00.000Z","last_edited_time":"2026-10-12T09:00:00.000Z","archived":false,"in_trash":false,
+             "parent":{"type":"data_source_id","data_source_id":"$cyclesId","database_id":"80a97bf4-0939-4cab-9701-a8d162a45cda"},
+             "properties":{"Cycle":{"id":"t","type":"title","title":[{"type":"text","text":{"content":"a cycle"},"plain_text":"a cycle"}]},
+                           "Status":{"id":"s","type":"select","select":{"name":"Queued"}},
+                           "Goal":{"id":"g","type":"relation","relation":[{"id":"9f9f9f9f-9f9f-49f9-89f9-9f9f9f9f9f9f"}],"has_more":false}}}
+        """.trimIndent()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                if (request.method == "POST" && request.path == "/v1/data_sources/$cyclesId/query") {
+                    MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json").setBody("""{"object":"list","results":[$cyclePage],"has_more":false,"next_cursor":null}""")
+                } else {
+                    MockResponse().setResponseCode(500).setHeader("Content-Type", "application/json").setBody("""{"object":"error","status":500,"code":"internal_server_error","message":"boom"}""")
+                }
+        }
+        val runtime = running(env(configFile(tokenFile().path)), llm = AgentWorkFixture.readPlan("a"))
+
+        runtime.channel.pollOnce()
+
+        assertTrue(server.requestCount >= 2, "the poll must have gone past the list: ${server.requestCount} request(s)")
+        repeat(server.requestCount) {
+            val r = taken()
+            assertEquals("Bearer $secret", r.getHeader("Authorization"))
+            assertFalse(r.path!!.contains(secret), "the token is in a path: ${r.path}")
+            assertFalse(r.body.readUtf8().contains(secret), "the token is in a body: ${r.path}")
+            r.headers.names().filter { !it.equals("Authorization", true) }.forEach { name ->
+                assertFalse(r.getHeader(name)!!.contains(secret), "the token is in header $name")
+            }
+        }
+        val everything = listOf(
+            Json.encodeToString(ChannelSnapshot.serializer(), runtime.channel.snapshot()),
+            Json.encodeToString(NotionCycleInfo.serializer(), runtime.info),
+            runtime.traces.recent().toString(),
+        )
+        everything.forEach { assertFalse(it.contains(secret) || it.contains(".notion-worker-token"), "the token or its path leaked into: $it") }
+    }
+
     // ── Bootstrap ────────────────────────────────────────────────────────────
 
     @Test
@@ -263,18 +310,72 @@ class NotionCycleRuntimeTest {
     // ── The assembled stack ──────────────────────────────────────────────────
 
     @Test
-    fun `the assembled client refuses a write to any PPS table, Goals and Escalations before a request is made`() = runBlocking {
+    fun `the assembled client refuses a write to any read-only table - PPS, Goals, Escalations and alfrd memory - before a request is made`() = runBlocking {
         val runtime = running(env(configFile(tokenFile().path)))
         val api = runtime.api ?: error("the runtime must expose its client to tests")
         val anyId = "11111111-1111-4111-8111-111111111111"
-        for (table in listOf("questions", "claims", "sources", "evidence", "goals", "escalations")) {
-            val dataSourceId = Regex(""""name":\s*"$table",\s*"dataSourceId":\s*"([0-9a-f-]+)"""").find(committed)!!.groupValues[1]
-            val refused = runCatching { api.createPage(dataSourceId, mapOf("Title" to app.alfrd.engram.notion.NotionValue.Title("x"))) }.exceptionOrNull()
-            assertTrue(refused is app.alfrd.engram.notion.NotionGuardViolation, "$table: expected the guard to refuse a create, got $refused")
+        val readOnly = AgentWorkConfig.load("deploy/config/notion-agent-worker.json").tableSet.tables.filter { !it.writable }
+        assertEquals(12, readOnly.size)
+        for (table in readOnly) {
+            val refused = runCatching { api.createPage(table.dataSourceId, mapOf("Title" to app.alfrd.engram.notion.NotionValue.Title("x"))) }.exceptionOrNull()
+            assertTrue(refused is app.alfrd.engram.notion.NotionGuardViolation, "${table.name}: expected the guard to refuse a create, got $refused")
         }
         val refusedUpdate = runCatching { api.updatePage(anyId, mapOf("Status" to app.alfrd.engram.notion.NotionValue.Select("Done"))) }.exceptionOrNull()
         assertTrue(refusedUpdate is app.alfrd.engram.notion.NotionGuardViolation, "got $refusedUpdate")
         assertEquals(0, server.requestCount, "a refused write must never reach Notion")
+    }
+
+    @Test
+    fun `the assembled client can read the Persona page but a page that is not allowlisted is refused before a request`() = runBlocking {
+        val runtime = running(env(configFile(tokenFile().path)))
+        val api = runtime.api ?: error("the runtime must expose its client to tests")
+        val refusedBlocks = runCatching { api.listBlocks("22222222-2222-4222-8222-222222222222") }.exceptionOrNull()
+        assertTrue(refusedBlocks is app.alfrd.engram.notion.NotionGuardViolation, "got $refusedBlocks")
+        assertEquals(0, server.requestCount)
+    }
+
+    // ── Overlap with another Notion set (a Notion-backed memory store, a test teamspace) ──
+
+    private fun memoryStore(token: String, containers: String = "00000001-aaaa-4aaa-8aaa-000000000001") = app.alfrd.engram.notion.NotionIdentityConfig(
+        "test-teamspace", token,
+        app.alfrd.engram.notion.NotionDataSources(
+            containers, "00000001-aaaa-4aaa-8aaa-000000000002", "00000001-aaaa-4aaa-8aaa-000000000003",
+            "00000001-aaaa-4aaa-8aaa-000000000004", "00000001-aaaa-4aaa-8aaa-000000000005", "00000001-aaaa-4aaa-8aaa-000000000006",
+        ),
+    )
+
+    @Test
+    fun `a separate memory store set is accepted beside the channel`() {
+        val startup = NotionCycleRuntime.fromEnvironment(
+            env = env(configFile(tokenFile().path)), llmClient = AgentWorkFixture.readPlan("a"), otherSets = listOf(memoryStore("env:OTHER_TOKEN")),
+        )
+        assertTrue(startup is NotionCycleStartup.Running, "got $startup")
+    }
+
+    @Test
+    fun `a memory store set that collides with the channel's tables, token or Persona page keeps the channel off, by name`() {
+        val config = configFile(tokenFile().path)
+        val realContainers = AgentWorkConfig.load("deploy/config/notion-agent-worker.json").tableSet.table(AgentWorkTables.MEMORY_CONTAINERS).dataSourceId
+        val collisions = mapOf(
+            "a real alfrd memory table" to memoryStore("env:OTHER_TOKEN", containers = realContainers),
+            "the same token reference" to memoryStore("file:${tokenFile().path}"),
+        )
+        for ((what, other) in collisions) {
+            val refused = runCatching {
+                NotionCycleRuntime.fromEnvironment(env = env(config), llmClient = AgentWorkFixture.readPlan("a"), otherSets = listOf(other))
+            }.exceptionOrNull()
+            assertTrue(refused is NotionConfigException, "$what: got $refused")
+        }
+        // Through the bootstrap, the same collision is a disabled channel with the reason, not an exception.
+        val scope = CoroutineScope(Job() + Dispatchers.Default)
+        try {
+            val startup = bootstrapNotionCycles(scope, env(config)) {
+                NotionCycleRuntime.fromEnvironment(env = env(config), llmClient = AgentWorkFixture.readPlan("a"), otherSets = listOf(memoryStore("env:OTHER_TOKEN", containers = realContainers)))
+            }
+            assertTrue(startup is NotionCycleStartup.Disabled && startup.misconfigured && startup.reason.contains("belongs to one set"), "got $startup")
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test

@@ -27,7 +27,7 @@ data class PlanningInput(
     val escalations: List<EscalationNote>,
     val previousCycleLabel: String?,
     val previousSummary: String?,
-    val context: LinkedContext,
+    val context: ScopeContext,
 )
 
 /** What the model proposed. [tasks] is untrusted: [CyclePlanValidator] decides what survives. */
@@ -119,7 +119,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         const val TIMEOUT_MS = 180_000L
 
         private val SYSTEM_PROMPT: String = """
-            You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose a dry-run plan: an ordered list of tasks that a later step could carry out toward the goal. Nothing is executed or written now.
+            You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose the plan: an ordered list of tasks that will then be carried out, in order, by reading the pages you link and reporting what they say. Tasks only read and report. Nothing you propose changes any page.
 
             Call propose_cycle_plan exactly once.
 
@@ -127,10 +127,12 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             - Propose at most the task budget given. Fewer, sharper tasks beat many vague ones. Skip work the target already covers.
             - Each task has a short title, a type, and instructions that say what the task would do and what it would look at.
             - Types you may use: ${TaskType.PROPOSABLE.joinToString(", ") { it.label }}. Do not use Orchestrate, Gate or QC; the Director does those itself.
-            - target_links may contain only links copied exactly from the "Links you may use" list. Never invent, shorten or guess a link. A task may have none.
+            - target_links may contain only links copied exactly from the "Links you may use" list. Those are the pages and databases the goal's Scope mentions, and the rows of the mentioned databases; they are all the worker will be given to read. Never invent, shorten or guess a link. A task may have none.
+            - Plan work that can be done by reading those pages and writing down what they show. Do not plan work that needs anything else.
             - Never propose a task that locks, unlocks, finalizes or changes an answer standard. Only people lock answer standards.
             - Never propose a task that deletes, removes, overwrites or replaces an existing row. A correction is a new row that supersedes the old one, and that is a later step's business.
             - Stay inside the goal's Scope. If you notice something outside it, you may propose an Escalate task to note it for a later goal, but do not plan work on it.
+            - Plan so that the goal's Done when can be checked from the results of your tasks.
             - Read what Jacob resolved on earlier escalations and what the last cycle summarized, and plan from them.
         """.trimIndent()
 
@@ -178,13 +180,9 @@ object PlanPromptBuilder {
         val goal = input.goal
         return buildString {
             appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
-            appendLine("Type: ${goal.type?.label ?: "unknown"}")
             appendLine("Deadline: ${goal.deadline ?: "none"}")
             appendLine()
-            section("Intent", goal.intent)
-            section("Scope", goal.scope, note = "what this goal may touch; stay inside it")
-            section("Metric", goal.metric)
-            section("Done criteria", goal.doneCriteria)
+            section("Done when", goal.doneWhen, note = "a check anyone could apply; plan so it can be checked from your tasks' results")
             appendLine("TASK BUDGET: ${input.taskBudget} (propose at most this many)")
             appendLine()
 
@@ -201,18 +199,10 @@ object PlanPromptBuilder {
             }
 
             val context = input.context
-            appendLine("LINKS YOU MAY USE (target_links must be copied exactly from this list):")
-            // The goal's own links first (at most a dozen): a table or an outside URL the goal names is allowed by
-            // the validator, so the model has to be able to see it. Rows come after and are cut first if room runs out.
-            var goalLinks = 0
-            for (outcome in context.outcomes) {
-                when (outcome) {
-                    is LinkOutcome.TableListed -> appendLine("- ${outcome.link}  [table: ${outcome.table}, ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more not listed" else ""}]")
-                    is LinkOutcome.External -> appendLine("- ${outcome.link}  [outside link on the goal]")
-                    else -> continue
-                }
-                goalLinks++
-            }
+            appendLine("SCOPE: the goal's @-mentions put these in reach (target_links must be copied exactly from the list below):")
+            context.outcomes.filter { it !is ScopeOutcome.Skipped }.forEach { appendLine("- " + describe(it)) }
+            appendLine()
+            appendLine("LINKS YOU MAY USE (pages and rows in scope):")
             val budgetForRows = MAX_CHARS - length - 1_500
             var used = 0
             var shown = 0
@@ -220,7 +210,6 @@ object PlanPromptBuilder {
                 val line = buildString {
                     append("- ${row.pageUrl}  [${row.table}] ${row.title.oneLine(200)}")
                     if (row.facts.isNotEmpty()) append("  | ${row.facts.joinToString("; ")}")
-                    row.externalUrl?.let { append("  | external: $it") }
                 }
                 if (used + line.length > budgetForRows) break
                 appendLine(line)
@@ -228,21 +217,23 @@ object PlanPromptBuilder {
                 shown++
             }
             if (shown < context.rows.size) appendLine("(${context.rows.size - shown} more rows not shown: out of room)")
-            if (context.rows.isEmpty() && goalLinks == 0) appendLine("(none: this goal links to no readable page, so tasks have no links)")
+            if (context.rows.isEmpty() && context.outcomes.none { it is ScopeOutcome.TableListed }) appendLine("(none: nothing in this goal's scope could be read, so tasks have no links)")
             appendLine()
 
             val skipped = context.skipped
             if (skipped.isNotEmpty()) {
-                appendLine("LINKS ON THE GOAL THAT COULD NOT BE USED (do not use them):")
-                skipped.forEach { appendLine("- ${it.link}: ${it.reason.name.lowercase().replace('_', ' ')}") }
+                appendLine("MENTIONS ON THE GOAL THAT COULD NOT BE USED (do not use them):")
+                skipped.forEach { appendLine("- ${it.mention.title.ifBlank { it.mention.id }}: ${it.reason.name.lowercase().replace('_', ' ')}") }
                 appendLine()
             }
-            if (goal.targetLinksText.isNotBlank()) {
-                appendLine("TARGET LINKS AS WRITTEN ON THE GOAL: ${goal.targetLinksText.oneLine(600)}")
-                appendLine()
-            }
-            append("Propose the dry-run plan now.")
+            append("Propose the plan now.")
         }.take(MAX_CHARS)
+    }
+
+    private fun describe(outcome: ScopeOutcome): String = when (outcome) {
+        is ScopeOutcome.TableListed -> "${notionPageUrl(outcome.mention.id)}  [database ${outcome.mention.title.ifBlank { outcome.table }}, table ${outcome.table}: ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more exist" else ""}]"
+        is ScopeOutcome.PageRead -> "page ${outcome.mention.title.ifBlank { outcome.label }} (${outcome.label})"
+        is ScopeOutcome.Skipped -> ""
     }
 
     private fun StringBuilder.section(label: String, text: String, note: String? = null) {

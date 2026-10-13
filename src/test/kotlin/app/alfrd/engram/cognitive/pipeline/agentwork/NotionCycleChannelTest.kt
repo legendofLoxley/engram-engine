@@ -1,5 +1,6 @@
 package app.alfrd.engram.cognitive.pipeline.agentwork
 
+import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.notion.NotionApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
@@ -18,7 +19,7 @@ class NotionCycleChannelTest {
     private val interval = Duration.ofMinutes(3)
     private val fixture = AgentWorkFixture()
 
-    private fun channel(llm: ScriptedLlm? = AgentWorkFixture.readPlan("Read the memo"), over: NotionApi = fixture.guarded(), traces: CycleTraceStore = CycleTraceStore()) =
+    private fun channel(llm: LlmClient? = AgentWorkFixture.readPlan("Read the memo"), over: NotionApi = fixture.guarded(), traces: CycleTraceStore = CycleTraceStore()) =
         NotionCycleChannel(fixture.processor(llm, traces, over), interval, clock = { fixture.base })
 
     @Test
