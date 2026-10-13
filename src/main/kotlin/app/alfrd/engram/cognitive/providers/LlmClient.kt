@@ -72,6 +72,8 @@ data class LlmResponse(
     val finishReason: String? = null,
     /** Tokens the model generated, reasoning included, when the provider reports it. */
     val completionTokens: Int? = null,
+    /** The base URL of the server that answered, when the client talks to one (the local client does). Lets a trace say which server served a call. */
+    val endpoint: String? = null,
 )
 
 /** Thrown when an LLM request exceeds the configured [LlmRequest.timeoutMs]. Callers must degrade gracefully. */

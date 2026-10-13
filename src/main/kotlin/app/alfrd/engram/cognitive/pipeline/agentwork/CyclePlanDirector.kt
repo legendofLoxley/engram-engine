@@ -42,7 +42,26 @@ data class PlanProposal(
     val modelName: String? = null,
     val answer: AnswerTrace? = null,
     val given: GivenTrace? = null,
+    /** Set when the plan endpoint failed and the default endpoint served this proposal. */
+    val fallback: FallbackTrace? = null,
 )
+
+/**
+ * A second endpoint for the plan call only. Optional and off by default: without it the plan call goes to the
+ * Director's one model client exactly as before. Tasks and QC never use it.
+ */
+class PlanRoute(
+    val client: LlmClient,
+    val baseUrl: String,
+    val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    val maxTokens: Int = DEFAULT_MAX_TOKENS,
+) {
+    companion object {
+        const val DEFAULT_TIMEOUT_MS = 600_000L
+        /** The last replay used 6,619 of 8,000. */
+        const val DEFAULT_MAX_TOKENS = 12_000
+    }
+}
 
 /**
  * The Director's Orchestrate decision for a Notion-queued cycle: **one structured model call that
@@ -54,7 +73,7 @@ data class PlanProposal(
  * It cannot widen its own reach: the prompt lists the only links it may use and the only task types it
  * may propose, and the validator enforces both whatever the prompt said.
  */
-open class CyclePlanDirector(private val llmClient: LlmClient?) {
+open class CyclePlanDirector(private val llmClient: LlmClient?, private val planRoute: PlanRoute? = null) {
 
     private val logger = LoggerFactory.getLogger(CyclePlanDirector::class.java)
 
@@ -64,20 +83,33 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         val startMs = System.currentTimeMillis()
         val built = PlanPromptBuilder.buildReport(input)
         val given = built.given()
+        fun request(maxTokens: Int, timeoutMs: Long) = LlmRequest(
+            prompt = built.text,
+            systemPrompt = CyclePrompts.PLAN.text,
+            model = LlmModel.CLAUDE_SONNET_4_5, // label only: LocalLlmClient ignores it and uses its one configured local model
+            maxTokens = maxTokens,
+            timeoutMs = timeoutMs,
+            tools = listOf(PROPOSE_PLAN_TOOL),
+            forcedToolName = TOOL_NAME,
+            temperature = 0.2,
+            reasoning = true,
+        )
+        var fallback: FallbackTrace? = null
         val response = try {
-            client.complete(
-                LlmRequest(
-                    prompt = built.text,
-                    systemPrompt = CyclePrompts.PLAN.text,
-                    model = LlmModel.CLAUDE_SONNET_4_5, // label only: LocalLlmClient ignores it and uses its one configured local model
-                    maxTokens = MAX_TOKENS,
-                    timeoutMs = TIMEOUT_MS,
-                    tools = listOf(PROPOSE_PLAN_TOOL),
-                    forcedToolName = TOOL_NAME,
-                    temperature = 0.2,
-                    reasoning = true,
-                ),
-            )
+            try {
+                // The plan endpoint, when one is set; otherwise (and on its failure) the Director's own client.
+                if (planRoute != null) planRoute.client.complete(request(planRoute.maxTokens, planRoute.timeoutMs))
+                else client.complete(request(MAX_TOKENS, TIMEOUT_MS))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (planRoute == null) throw e
+                // Unreachable, timed out or erroring: the default endpoint serves the call, and the record says so.
+                val failedAfter = System.currentTimeMillis() - startMs
+                logger.warn("cycle-plan: plan endpoint {} failed ({}); falling back to the default endpoint", planRoute.baseUrl, e::class.java.simpleName)
+                fallback = FallbackTrace(planRoute.baseUrl, e::class.java.simpleName, failedAfter)
+                client.complete(request(MAX_TOKENS, TIMEOUT_MS))
+            }
         } catch (e: CancellationException) {
             // Shutdown or a cancelled poll is not a model failure: let it propagate so the cycle is left Running for a later reclaim.
             throw e
@@ -85,7 +117,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             val latencyMs = System.currentTimeMillis() - startMs
             // Class name only: an exception message from a provider could echo a prompt.
             logger.warn("cycle-plan: LLM call failed: {}", e::class.java.simpleName)
-            return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}", given = given)
+            return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}", given = given, fallback = fallback)
         }
         val latencyMs = System.currentTimeMillis() - startMs
         val answer = AnswerTrace.of(response)
@@ -93,10 +125,10 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         val calls = response.toolCalls.filter { it.name == TOOL_NAME }
         if (calls.size > 1) logger.warn("cycle-plan: response carried {} '{}' calls, honoring only the first", calls.size, TOOL_NAME)
         val call = calls.firstOrNull()
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName, answer, given)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName, answer, given, fallback)
 
         val tasks = (call.input["tasks"] as? JsonArray)
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName, answer, given)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName, answer, given, fallback)
 
         return PlanProposal(
             tasks = tasks.mapNotNull { (it as? JsonObject)?.let(::parseTask) },
@@ -107,6 +139,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             modelName = response.modelName,
             answer = answer,
             given = given,
+            fallback = fallback,
         )
     }
 

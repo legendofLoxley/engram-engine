@@ -45,9 +45,9 @@ class AgentWorkFixture(val base: Instant = Instant.parse("2026-10-12T10:00:00Z")
         tableSet,
     )
 
-    fun processor(llm: LlmClient?, traces: CycleTraceStore = CycleTraceStore(), over: NotionApi = guarded(), worker: String = "arx-1") =
+    fun processor(llm: LlmClient?, traces: CycleTraceStore = CycleTraceStore(), over: NotionApi = guarded(), worker: String = "arx-1", planRoute: PlanRoute? = null) =
         CycleProcessor(
-            over, tableSet, CyclePlanDirector(llm), DirectorTaskExecutor(llm), CycleQcDirector(llm), traces, worker, { base },
+            over, tableSet, CyclePlanDirector(llm, planRoute), DirectorTaskExecutor(llm), CycleQcDirector(llm), traces, worker, { base },
             leaseDuration = Duration.ofMinutes(2), sleep = {},
         )
 

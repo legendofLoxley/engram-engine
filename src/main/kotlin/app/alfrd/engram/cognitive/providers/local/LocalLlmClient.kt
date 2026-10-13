@@ -124,6 +124,7 @@ class LocalLlmClient(
             modelName = parsed.reportedModel ?: model,
             finishReason = parsed.finishReason,
             completionTokens = parsed.completionTokens,
+            endpoint = baseUrl,
         )
     }
 

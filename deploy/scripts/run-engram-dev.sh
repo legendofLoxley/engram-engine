@@ -40,6 +40,9 @@ exec env \
   SUPABASE_ISSUER=https://gtvosmsdzpfkoqtikswp.supabase.co/auth/v1 \
   LLM_PROVIDER=local \
   LOCAL_LLM_BASE_URL=http://127.0.0.1:8081/v1 \
+  PLAN_LLM_BASE_URL=http://127.0.0.1:8083/v1 \
+  PLAN_LLM_TIMEOUT_SECONDS=600 \
+  PLAN_LLM_MAX_TOKENS=12000 \
   NOTION_WORKER_CONFIG="$NOTION_WORKER_CONFIG" \
   "$JAVA_BIN" \
     --add-opens java.base/java.nio=ALL-UNNAMED \

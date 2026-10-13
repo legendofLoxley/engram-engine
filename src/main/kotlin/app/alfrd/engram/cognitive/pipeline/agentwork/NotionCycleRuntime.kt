@@ -40,6 +40,10 @@ data class NotionCycleInfo(
     val leaseSeconds: Long,
     val readWriteTables: List<String>,
     val readOnlyTables: List<String>,
+    /** The plan-only endpoint, or null when none is set (every call then uses the default endpoint). */
+    val planEndpoint: String? = null,
+    val planTimeoutSeconds: Long? = null,
+    val planMaxTokens: Int? = null,
 )
 
 /**
@@ -72,6 +76,11 @@ class NotionCycleRuntime(
         const val ENV_LEASE_SECONDS = "NOTION_WORKER_LEASE_SECONDS"
         const val ENV_WORKER_ID = "NOTION_WORKER_ID"
 
+        /** Optional second llama.cpp endpoint for the plan call only. Unset: every call goes to the one default endpoint. */
+        const val ENV_PLAN_BASE_URL = "PLAN_LLM_BASE_URL"
+        const val ENV_PLAN_TIMEOUT_SECONDS = "PLAN_LLM_TIMEOUT_SECONDS"
+        const val ENV_PLAN_MAX_TOKENS = "PLAN_LLM_MAX_TOKENS"
+
         const val DEFAULT_POLL_SECONDS = 180L
         const val DEFAULT_LEASE_SECONDS = 120L
         const val MIN_SECONDS = 30L
@@ -103,6 +112,7 @@ class NotionCycleRuntime(
             retryPolicy: RetryPolicy = RetryPolicy(),
             sleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
             otherSets: List<NotionSetBinding> = emptyList(),
+            planClientFor: (String) -> LlmClient = { LocalLlmClient(baseUrl = it) },
         ): NotionCycleStartup {
             val path = env[ENV_CONFIG]?.trim().orEmpty()
             if (path.isEmpty()) return NotionCycleStartup.Disabled("$ENV_CONFIG is not set", misconfigured = false)
@@ -119,6 +129,8 @@ class NotionCycleRuntime(
                 )
             }
 
+            val planRoute = planRouteFor(env, planClientFor)
+
             // #pid is always appended: a restarted process must not look like the one whose lease it is taking over.
             val worker = workerId(env[ENV_WORKER_ID])
 
@@ -130,7 +142,7 @@ class NotionCycleRuntime(
             val processor = CycleProcessor(
                 api = guarded,
                 tableSet = config.tableSet,
-                director = CyclePlanDirector(llmClient),
+                director = CyclePlanDirector(llmClient, planRoute),
                 executor = DirectorTaskExecutor(llmClient),
                 qc = CycleQcDirector(llmClient),
                 traces = traces,
@@ -147,6 +159,9 @@ class NotionCycleRuntime(
                 leaseSeconds = leaseSeconds,
                 readWriteTables = tables.filter { it.access == TableAccess.READ_WRITE }.map { it.name }.sorted(),
                 readOnlyTables = tables.filter { it.access == TableAccess.READ_ONLY }.map { it.name }.sorted(),
+                planEndpoint = planRoute?.baseUrl,
+                planTimeoutSeconds = planRoute?.let { it.timeoutMs / 1000 },
+                planMaxTokens = planRoute?.maxTokens,
             )
             return NotionCycleStartup.Running(NotionCycleRuntime(channel, traces, info, rateLimited, guarded))
         }
@@ -164,6 +179,22 @@ class NotionCycleRuntime(
             } catch (_: NotionConfigException) {
                 false
             }
+        }
+
+        /** The plan endpoint, or null when [ENV_PLAN_BASE_URL] is unset or blank (then the timeout and token variables are ignored). */
+        internal fun planRouteFor(env: Map<String, String>, clientFor: (String) -> LlmClient): PlanRoute? {
+            val url = env[ENV_PLAN_BASE_URL]?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() } ?: return null
+            val parsed = runCatching { java.net.URI(url) }.getOrNull()
+            if (parsed == null || parsed.scheme?.lowercase() !in setOf("http", "https") || parsed.host.isNullOrEmpty()) {
+                throw NotionConfigException("$ENV_PLAN_BASE_URL must be an http(s) URL such as http://127.0.0.1:8083/v1")
+            }
+            val timeout = seconds(env, ENV_PLAN_TIMEOUT_SECONDS, PlanRoute.DEFAULT_TIMEOUT_MS / 1000)
+            val rawTokens = env[ENV_PLAN_MAX_TOKENS]?.trim()?.takeIf { it.isNotEmpty() }
+            val tokens = if (rawTokens == null) PlanRoute.DEFAULT_MAX_TOKENS else rawTokens.toIntOrNull()
+            if (tokens == null || tokens !in 1_000..30_000) {
+                throw NotionConfigException("$ENV_PLAN_MAX_TOKENS must be a whole number between 1000 and 30000")
+            }
+            return PlanRoute(clientFor(url), url, timeout * 1000, tokens)
         }
 
         private fun seconds(env: Map<String, String>, name: String, default: Long): Long {

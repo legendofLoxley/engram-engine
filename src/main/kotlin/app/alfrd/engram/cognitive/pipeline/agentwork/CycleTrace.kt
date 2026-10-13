@@ -76,12 +76,30 @@ data class AnswerTrace(
     val contentChars: Int,
     /** How many tool calls came back. */
     val toolCalls: Int,
+    /** The base URL of the server that answered, or null when the client reports none. */
+    val endpoint: String? = null,
+    /** The model name that server reported, or null when it reported none. */
+    val model: String? = null,
 ) {
     companion object {
         fun of(response: app.alfrd.engram.cognitive.providers.LlmResponse) =
-            AnswerTrace(response.finishReason, response.completionTokens, response.text.length, response.toolCalls.size)
+            AnswerTrace(response.finishReason, response.completionTokens, response.text.length, response.toolCalls.size, response.endpoint, response.modelName)
     }
 }
+
+/**
+ * The plan call was meant for the plan endpoint ([endpoint]) and could not be served there, so the default
+ * endpoint served it. Recorded on the trace and in the cycle's Summary: a fallback is never silent.
+ */
+@Serializable
+data class FallbackTrace(
+    /** The plan endpoint that failed. */
+    val endpoint: String,
+    /** The exception class name only: a provider's message could echo the prompt. */
+    val reason: String,
+    /** How long the failed attempt took. */
+    val failedAfterMs: Long,
+)
 
 /**
  * What one model call was given, as **ids and counts only, never text**: which system prompt (name, version,
@@ -168,6 +186,8 @@ data class ModelTrace(
     val rationale: String?,
     val answer: AnswerTrace? = null,
     val given: GivenTrace? = null,
+    /** Set when the plan endpoint failed and the default endpoint served the call. */
+    val fallback: FallbackTrace? = null,
 )
 
 @Serializable

@@ -393,8 +393,9 @@ class CycleProcessor(
         )
         trace.model = ModelTrace(
             called = proposal.modelCalled, latencyMs = proposal.latencyMs, provider = proposal.providerName, model = proposal.modelName,
-            rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400), answer = proposal.answer, given = proposal.given,
+            rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400), answer = proposal.answer, given = proposal.given, fallback = proposal.fallback,
         )
+        proposal.fallback?.let { trace.notes += fallbackLine(it) }
         if (proposal.rejectedReason != null) {
             return Planned.Stop(finish(cycle, trace, CycleStatus.FAILED, "Cycle failed: ${explain(proposal.rejectedReason)}. Nothing was written."))
         }
@@ -573,10 +574,12 @@ class CycleProcessor(
         cycle: Cycle,
         trace: CyclePlanTrace,
         status: CycleStatus,
-        summary: String,
+        body: String,
         tasksDone: Int = 0,
         feedback: String? = null,
     ): TickResult {
+        // Whatever the outcome, a plan served by the fallback endpoint says so in the Summary.
+        val summary = trace.model?.fallback?.let { "$body ${fallbackLine(it)}" } ?: body
         val guard = leaseGuards[cycle.pageId]
         if (guard == null) {
             api.updatePage(cycle.pageId, CycleMapper.finish(status, clock(), summary, tasksDone, feedback))
@@ -595,6 +598,9 @@ class CycleProcessor(
         )
         return TickResult.Finished(cycle.displayId, status, summary)
     }
+
+    private fun fallbackLine(fallback: FallbackTrace): String =
+        "Plan served by fallback endpoint (the plan endpoint ${fallback.endpoint} failed with ${fallback.reason} after ${fallback.failedAfterMs / 1000} s)."
 
     private fun scopeTrace(goal: Goal, context: ScopeContext): ScopeTrace = ScopeTrace(
         mentions = goal.scope.mentions.size,

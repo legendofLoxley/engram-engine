@@ -558,6 +558,11 @@ It reacts to `Queued` rows and to a `Running` cycle whose lease ran out; it crea
 | `NOTION_WORKER_POLL_SECONDS` | `180` (30 to 3600) | Poll interval. A queued cycle is picked up within one interval. |
 | `NOTION_WORKER_LEASE_SECONDS` | `120` (30 to 3600) | Lease length; renewed every third of it while a cycle is being planned, executed or QC'd. |
 | `NOTION_WORKER_ID` | `engram-dev@<host>` | Prefix for the `Worker` field. `#<pid>` is always appended, so a restarted process never looks like the one whose lease it is taking over. |
+| `PLAN_LLM_BASE_URL` | unset (off) | A second llama.cpp endpoint (for example `http://127.0.0.1:8083/v1`) used for the **plan call only**. Tasks and QC stay on `LOCAL_LLM_BASE_URL`. Unset: every call goes to the one default endpoint, exactly as before. |
+| `PLAN_LLM_TIMEOUT_SECONDS` | `600` (30 to 3600), only read when the URL is set | Timeout of the plan call on that endpoint. |
+| `PLAN_LLM_MAX_TOKENS` | `12000` (1000 to 30000), only read when the URL is set | Token budget of the plan call on that endpoint (reasoning counts against it). |
+
+If the plan endpoint is unreachable, times out or errors, the default endpoint serves the plan call (with its own 180 s and 8000 tokens). It is never silent: the trace on `/debug/notion-cycles` carries a `fallback` record (`model.fallback`: endpoint, exception class, time to fail), and the cycle's Summary gets the line `Plan served by fallback endpoint (...)`. Every call's `answer` in the trace also records the base URL (`endpoint`) and model name (`model`) that served it; each call's `latencyMs` is beside it. `/debug/notion-cycles` shows the configured plan endpoint under the channel's setup (`planEndpoint`, `planTimeoutSeconds`, `planMaxTokens`).
 
 The channel needs the Director's local model (`LLM_PROVIDER=local`, already set by `run-engram-dev.sh`).
 Without it the channel does not start and says so in the journal (`notion-cycles: NOT RUNNING`) and on

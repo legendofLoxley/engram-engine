@@ -93,9 +93,9 @@ class CycleModelCallTest {
         val (traces, _) = runCycle(happyModel())
         val trace = traces.recent(1).single()
 
-        assertEquals(AnswerTrace("tool_calls", 1234, 0, 1), trace.model!!.answer)
-        assertEquals(AnswerTrace("tool_calls", 400, 0, 1), trace.execution.single().answer)
-        assertEquals(AnswerTrace("tool_calls", 600, 0, 1), trace.qc!!.answer)
+        assertEquals(AnswerTrace("tool_calls", 1234, 0, 1, null, "qwen-test"), trace.model!!.answer)
+        assertEquals(AnswerTrace("tool_calls", 400, 0, 1, null, "qwen-test"), trace.execution.single().answer)
+        assertEquals(AnswerTrace("tool_calls", 600, 0, 1, null, "qwen-test"), trace.qc!!.answer)
     }
 
     @Test
@@ -129,7 +129,7 @@ class CycleModelCallTest {
         assertFalse(row.text("Summary").contains("did not return an answer"))
         val trace = traces.recent(1).single()
         assertEquals("no_tool_call", trace.model!!.rejectedReason)
-        assertEquals(AnswerTrace("stop", 2021, prose.length, 0), trace.model!!.answer)
+        assertEquals(AnswerTrace("stop", 2021, prose.length, 0, null, "qwen-test"), trace.model!!.answer)
         assertTrue(f.tasksFor(cycleId).isEmpty())
     }
 
@@ -153,11 +153,11 @@ class CycleModelCallTest {
         val (traces, cycleId) = runCycle(model)
         val trace = traces.recent(1).single()
 
-        assertEquals(AnswerTrace(null, null, 0, 1), trace.model!!.answer)
+        assertEquals(AnswerTrace(null, null, 0, 1, null, "qwen-test"), trace.model!!.answer)
         assertEquals("failed", trace.execution.single().outcome)
-        assertEquals(AnswerTrace("stop", 90, 10, 0), trace.execution.single().answer)
+        assertEquals(AnswerTrace("stop", 90, 10, 0, null, null), trace.execution.single().answer)
         assertEquals("no_tool_call", trace.qc!!.rejectedReason)
-        assertEquals(AnswerTrace("tool_calls", 12, 0, 1), trace.qc!!.answer)
+        assertEquals(AnswerTrace("tool_calls", 12, 0, 1, null, null), trace.qc!!.answer)
         assertEquals("Not executed: the model answered without the required tool call. The task was not retried.", f.tasksFor(cycleId).single().text("Result"))
     }
 
