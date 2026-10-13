@@ -45,6 +45,7 @@ data class QcResult(
     val rejectedReason: String? = null,
     val providerName: String? = null,
     val modelName: String? = null,
+    val answer: AnswerTrace? = null,
 )
 
 val LOOKS_MET_VALUES: List<String> = listOf("yes", "partly", "no", "unclear")
@@ -73,11 +74,12 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
                     prompt = QcPromptBuilder.build(input),
                     systemPrompt = SYSTEM_PROMPT,
                     model = LlmModel.CLAUDE_SONNET_4_5, // label only: the local client ignores it
-                    maxTokens = 2_500,
+                    maxTokens = MAX_TOKENS,
                     timeoutMs = TIMEOUT_MS,
                     tools = listOf(QC_TOOL),
                     forcedToolName = TOOL_NAME,
                     temperature = 0.2,
+                    reasoning = true,
                 ),
             )
         } catch (e: CancellationException) {
@@ -89,11 +91,12 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
             return QcResult(null, modelCalled = true, latencyMs = latency, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}")
         }
         val latency = System.currentTimeMillis() - startMs
-        fun rejected(code: String) = QcResult(null, true, latency, code, response.providerName, response.modelName)
+        val answer = AnswerTrace.of(response)
+        fun rejected(code: String) = QcResult(null, true, latency, code, response.providerName, response.modelName, answer)
 
         val call = response.toolCalls.firstOrNull { it.name == TOOL_NAME } ?: return rejected("no_tool_call")
         val decision = parse(call.input) ?: return rejected("malformed_tool_input")
-        return QcResult(decision, true, latency, null, response.providerName, response.modelName)
+        return QcResult(decision, true, latency, null, response.providerName, response.modelName, answer)
     }
 
     private fun parse(input: JsonObject): QcDecision? {
@@ -117,6 +120,7 @@ open class CycleQcDirector(private val llmClient: LlmClient?) {
     companion object {
         const val TOOL_NAME = "record_cycle_qc"
         const val TIMEOUT_MS = 180_000L
+        const val MAX_TOKENS = 8_000 // see CyclePlanDirector.MAX_TOKENS
         const val MAX_TEXT_CHARS = 1_500
         const val MAX_REWRITE_CHARS = 600
         val REWRITABLE_FIELDS: Set<String> = setOf("Goal", "Done when", "Scope")

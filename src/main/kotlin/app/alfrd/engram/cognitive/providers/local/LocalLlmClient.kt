@@ -9,9 +9,13 @@ import app.alfrd.engram.cognitive.providers.ToolDefinition
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -72,9 +76,10 @@ class LocalLlmClient(
                 model = model,
                 messages = messages,
                 max_tokens = request.maxTokens,
+                // Thinking is switched off per request unless the caller opted in to reasoning (see LlmRequest.reasoning).
+                chat_template_kwargs = if (request.reasoning) null else ChatTemplateKwargs(),
                 tools = request.tools.takeIf { it.isNotEmpty() }?.map { it.toWireFormat() },
-                tool_choice = request.forcedToolName?.takeIf { request.tools.isNotEmpty() }
-                    ?.let { OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = it)) },
+                tool_choice = toolChoice(request),
                 temperature = request.temperature,
             )
         )
@@ -117,7 +122,20 @@ class LocalLlmClient(
             retryCount = 0,
             providerName = "local",
             modelName = parsed.reportedModel ?: model,
+            finishReason = parsed.finishReason,
+            completionTokens = parsed.completionTokens,
         )
+    }
+
+    /**
+     * The server this client talks to ignores the object form (`{"type":"function","function":{"name":...}}`) and falls back
+     * to "auto". A reasoning caller that forces its one tool gets the string form, which is equivalent for a single tool;
+     * every other caller keeps the object form it has always sent.
+     */
+    private fun toolChoice(request: LlmRequest): JsonElement? {
+        val name = request.forcedToolName?.takeIf { request.tools.isNotEmpty() } ?: return null
+        if (request.reasoning && request.tools.size == 1 && request.tools.single().name == name) return JsonPrimitive("required")
+        return json.encodeToJsonElement(OpenAiToolChoice(function = OpenAiToolChoiceFunction(name = name)))
     }
 
     private fun ToolDefinition.toWireFormat() =
@@ -128,6 +146,7 @@ class LocalLlmClient(
         val toolCalls: List<ToolCall>,
         val finishReason: String?,
         val reportedModel: String?,
+        val completionTokens: Int?,
     )
 
     private fun parseCompletion(body: String): ParsedCompletion {
@@ -138,7 +157,8 @@ class LocalLlmClient(
         val toolCalls = message?.get("tool_calls")?.jsonArray?.mapNotNull { parseToolCall(it.jsonObject) } ?: emptyList()
         val finishReason = choice?.get("finish_reason")?.jsonPrimitive?.content
         val reportedModel = root["model"]?.jsonPrimitive?.content
-        return ParsedCompletion(text, toolCalls, finishReason, reportedModel)
+        val completionTokens = root["usage"]?.jsonObject?.get("completion_tokens")?.jsonPrimitive?.intOrNull
+        return ParsedCompletion(text, toolCalls, finishReason, reportedModel, completionTokens)
     }
 
     private fun parseToolCall(obj: JsonObject): ToolCall? {
@@ -159,10 +179,11 @@ class LocalLlmClient(
         val model: String,
         val messages: List<ChatMessage>,
         val max_tokens: Int,
-        val chat_template_kwargs: ChatTemplateKwargs = ChatTemplateKwargs(),
+        /** Omitted when null (a reasoning call): the template's own default then applies, which is thinking on. */
+        val chat_template_kwargs: ChatTemplateKwargs? = ChatTemplateKwargs(),
         val tools: List<OpenAiTool>? = null,
         /** Omitted when null — see [LlmRequest.forcedToolName]. */
-        val tool_choice: OpenAiToolChoice? = null,
+        val tool_choice: JsonElement? = null,
         /** Omitted when null — see [LlmRequest.temperature]. */
         val temperature: Double? = null,
     )

@@ -61,6 +61,28 @@ data class SkippedMentionTrace(val title: String, val kind: String, val reason: 
 @Serializable
 data class ContentTrace(val url: String, val title: String, val chars: Int, val truncated: Boolean, val note: String? = null)
 
+/**
+ * How a model call ended, as counts only. Never the model's words: this is what lets a failed call be told
+ * apart (cut off by the token cap, stopped on its own, answered in prose with no tool call) from the journal
+ * or `/debug/notion-cycles`, without the reply being stored anywhere.
+ */
+@Serializable
+data class AnswerTrace(
+    /** The provider's stop reason (`stop`, `tool_calls`, `length`), or null when it reported none. */
+    val finishReason: String?,
+    /** Tokens generated, reasoning included, or null when the provider reported none. */
+    val completionTokens: Int?,
+    /** Characters of visible content that came back. Zero means the answer was only a tool call. */
+    val contentChars: Int,
+    /** How many tool calls came back. */
+    val toolCalls: Int,
+) {
+    companion object {
+        fun of(response: app.alfrd.engram.cognitive.providers.LlmResponse) =
+            AnswerTrace(response.finishReason, response.completionTokens, response.text.length, response.toolCalls.size)
+    }
+}
+
 @Serializable
 data class TaskRunTrace(
     val order: Int,
@@ -74,6 +96,7 @@ data class TaskRunTrace(
     val resultChars: Int,
     val latencyMs: Long?,
     val problems: List<String> = emptyList(),
+    val answer: AnswerTrace? = null,
 )
 
 @Serializable
@@ -84,6 +107,7 @@ data class QcTrace(
     val goalLooksMet: String?,
     val provider: String?,
     val model: String?,
+    val answer: AnswerTrace? = null,
 )
 
 @Serializable
@@ -98,6 +122,7 @@ data class ModelTrace(
     val rejectedReason: String?,
     val tasksProposed: Int,
     val rationale: String?,
+    val answer: AnswerTrace? = null,
 )
 
 @Serializable

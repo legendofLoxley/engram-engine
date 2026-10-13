@@ -40,6 +40,7 @@ data class PlanProposal(
     val rejectedReason: String? = null,
     val providerName: String? = null,
     val modelName: String? = null,
+    val answer: AnswerTrace? = null,
 )
 
 /**
@@ -66,11 +67,12 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
                     prompt = buildPrompt(input),
                     systemPrompt = SYSTEM_PROMPT,
                     model = LlmModel.CLAUDE_SONNET_4_5, // label only: LocalLlmClient ignores it and uses its one configured local model
-                    maxTokens = 3_000,
+                    maxTokens = MAX_TOKENS,
                     timeoutMs = TIMEOUT_MS,
                     tools = listOf(PROPOSE_PLAN_TOOL),
                     forcedToolName = TOOL_NAME,
                     temperature = 0.2,
+                    reasoning = true,
                 ),
             )
         } catch (e: CancellationException) {
@@ -83,14 +85,15 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}")
         }
         val latencyMs = System.currentTimeMillis() - startMs
+        val answer = AnswerTrace.of(response)
 
         val calls = response.toolCalls.filter { it.name == TOOL_NAME }
         if (calls.size > 1) logger.warn("cycle-plan: response carried {} '{}' calls, honoring only the first", calls.size, TOOL_NAME)
         val call = calls.firstOrNull()
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName, answer)
 
         val tasks = (call.input["tasks"] as? JsonArray)
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName, answer)
 
         return PlanProposal(
             tasks = tasks.mapNotNull { (it as? JsonObject)?.let(::parseTask) },
@@ -99,6 +102,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             latencyMs = latencyMs,
             providerName = response.providerName,
             modelName = response.modelName,
+            answer = answer,
         )
     }
 
@@ -117,6 +121,9 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
     companion object {
         const val TOOL_NAME = "propose_cycle_plan"
         const val TIMEOUT_MS = 180_000L
+
+        /** Reasoning counts against this: the local model spent 1.9k to 4.4k tokens thinking about a 2k-token prompt before the call. */
+        const val MAX_TOKENS = 8_000
 
         private val SYSTEM_PROMPT: String = """
             You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose the plan: an ordered list of tasks that will then be carried out, in order, by reading the pages you link and reporting what they say. Tasks only read and report. Nothing you propose changes any page.

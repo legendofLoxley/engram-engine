@@ -46,6 +46,7 @@ data class ExecutionOutcome(
     val latencyMs: Long,
     val provider: String? = null,
     val model: String? = null,
+    val answer: AnswerTrace? = null,
 )
 
 /**
@@ -88,11 +89,12 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
                     prompt = TaskPromptBuilder.build(input),
                     systemPrompt = SYSTEM_PROMPT,
                     model = LlmModel.CLAUDE_SONNET_4_5, // label only: the local client ignores it
-                    maxTokens = 3_000,
+                    maxTokens = MAX_TOKENS,
                     timeoutMs = TIMEOUT_MS,
                     tools = listOf(REPORT_TOOL),
                     forcedToolName = TOOL_NAME,
                     temperature = 0.2,
+                    reasoning = true,
                 ),
             )
         } catch (e: CancellationException) {
@@ -105,7 +107,7 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
             return ExecutionOutcome(TaskExecution.Failed("llm_call_failed: ${e::class.java.simpleName}"), modelCalled = true, latencyMs = latency)
         }
         val latency = System.currentTimeMillis() - startMs
-        fun outcome(execution: TaskExecution) = ExecutionOutcome(execution, true, latency, response.providerName, response.modelName)
+        fun outcome(execution: TaskExecution) = ExecutionOutcome(execution, true, latency, response.providerName, response.modelName, AnswerTrace.of(response))
 
         val calls = response.toolCalls.filter { it.name == TOOL_NAME }
         if (calls.size > 1) logger.warn("cycle-task: response carried {} '{}' calls, honoring only the first", calls.size, TOOL_NAME)
@@ -138,6 +140,7 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
     companion object {
         const val TOOL_NAME = "report_task_result"
         const val TIMEOUT_MS = 180_000L
+        const val MAX_TOKENS = 8_000 // see CyclePlanDirector.MAX_TOKENS
         const val MAX_RESULT_CHARS = 5_000
         const val MAX_REASON_CHARS = 600
 

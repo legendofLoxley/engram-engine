@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.ToolDefinition
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -175,6 +176,77 @@ class LocalLlmClientTest {
 
         assertEquals("", response.text)
         assertEquals(1, response.toolCalls.size)
+    }
+
+    // -------------------------------------------------------------------------
+    // Reasoning opt-in (the cycle directors): thinking left on, tool_choice as the string the server honours
+    // -------------------------------------------------------------------------
+
+    private val oneTool = ToolDefinition("propose_cycle_plan", "Plan.", buildJsonObject { put("type", "object") })
+    private val otherTool = ToolDefinition("other_tool", "Other.", buildJsonObject { put("type", "object") })
+    private val okBody = """{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"model":"m"}"""
+
+    private fun sentBody(request: LlmRequest) = runBlocking {
+        enqueueChat(okBody)
+        client().complete(request)
+        json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+    }
+
+    @Test
+    fun `a reasoning request does not send enable_thinking, so the template's own default applies`() {
+        val body = sentBody(LlmRequest(prompt = "hi", reasoning = true))
+        assertTrue(!body.containsKey("chat_template_kwargs"), body.keys.toString())
+    }
+
+    @Test
+    fun `a request that did not opt in still sends enable_thinking false, whatever else it carries`() {
+        for (request in listOf(
+            LlmRequest(prompt = "hi"),
+            LlmRequest(prompt = "hi", tools = listOf(oneTool), forcedToolName = oneTool.name, temperature = 0.0, maxTokens = 768),
+        )) {
+            val kwargs = sentBody(request)["chat_template_kwargs"]?.jsonObject
+            assertEquals(false, kwargs?.get("enable_thinking")?.jsonPrimitive?.content?.toBoolean())
+        }
+    }
+
+    @Test
+    fun `a reasoning request that forces its only tool sends tool_choice as the string required`() {
+        val choice = sentBody(LlmRequest(prompt = "hi", tools = listOf(oneTool), forcedToolName = oneTool.name, reasoning = true))["tool_choice"]!!
+        assertEquals("required", choice.jsonPrimitive.content)
+        assertTrue(choice is kotlinx.serialization.json.JsonPrimitive, "a string, not the object form this server ignores")
+    }
+
+    @Test
+    fun `without the opt-in a forced tool keeps the object form it has always had`() {
+        val choice = sentBody(LlmRequest(prompt = "hi", tools = listOf(oneTool), forcedToolName = oneTool.name))["tool_choice"]!!.jsonObject
+        assertEquals("function", choice["type"]?.jsonPrimitive?.content)
+        assertEquals(oneTool.name, choice["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `required is only a stand-in for forcing when there is exactly one tool, so with two the object form is kept`() {
+        val choice = sentBody(LlmRequest(prompt = "hi", tools = listOf(oneTool, otherTool), forcedToolName = oneTool.name, reasoning = true))["tool_choice"]!!
+        assertTrue(choice is JsonObject, "required would let the model pick the other tool")
+    }
+
+    @Test
+    fun `a reasoning request with no forced tool sends no tool_choice, and the budget goes through unchanged`() {
+        val body = sentBody(LlmRequest(prompt = "hi", tools = listOf(oneTool), reasoning = true, maxTokens = 8_000))
+        assertTrue(!body.containsKey("tool_choice"))
+        assertEquals("8000", body["max_tokens"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `the finish reason and the generated token count are reported, and absent usage is null not zero`() = runBlocking {
+        enqueueChat("""{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"t","arguments":"{}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":1942},"model":"m"}""")
+        val withUsage = client().complete(LlmRequest(prompt = "hi"))
+        assertEquals("tool_calls", withUsage.finishReason)
+        assertEquals(1942, withUsage.completionTokens)
+
+        enqueueChat("""{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"partial"}}],"model":"m"}""")
+        val without = client().complete(LlmRequest(prompt = "hi"))
+        assertEquals("length", without.finishReason)
+        assertEquals(null, without.completionTokens)
     }
 
     // -------------------------------------------------------------------------

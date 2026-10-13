@@ -42,6 +42,15 @@ data class LlmRequest(
     val forcedToolName: String? = null,
     /** Sampling temperature. Null (default) leaves the provider's own default, so every existing caller is unaffected. */
     val temperature: Double? = null,
+    /**
+     * Opt in to the model's own reasoning for this call. Off (default) keeps the local client's per-request
+     * `enable_thinking=false`, which suits the chat path's short answers. A caller that forces a tool call
+     * with a long prompt sets this: the local model's template cannot call a tool after a pre-closed think
+     * block and instead writes its reasoning as visible text. Reasoning tokens count against [maxTokens], so
+     * such a caller also needs a larger budget. When set with a [forcedToolName] naming the only entry of
+     * [tools], the local client sends `tool_choice` as the string `"required"`, the one form its server honours.
+     */
+    val reasoning: Boolean = false,
 )
 
 data class LlmResponse(
@@ -59,6 +68,10 @@ data class LlmResponse(
      */
     val providerName: String? = null,
     val modelName: String? = null,
+    /** The provider's stop reason (`stop`, `tool_calls`, `length`), when it reports one. */
+    val finishReason: String? = null,
+    /** Tokens the model generated, reasoning included, when the provider reports it. */
+    val completionTokens: Int? = null,
 )
 
 /** Thrown when an LLM request exceeds the configured [LlmRequest.timeoutMs]. Callers must degrade gracefully. */

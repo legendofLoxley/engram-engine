@@ -323,7 +323,7 @@ class CycleProcessor(
             QcTaskLine(it.order ?: 0, it.title, it.type?.label ?: "?", it.status ?: TaskStatus.FAILED, it.result)
         }
         val result = qc.decide(QcInput(goal, cycle, scopeLines(context), lines, rejected))
-        trace.qc = QcTrace(result.modelCalled, result.latencyMs, result.rejectedReason, result.decision?.goalLooksMet, result.providerName, result.modelName)
+        trace.qc = QcTrace(result.modelCalled, result.latencyMs, result.rejectedReason, result.decision?.goalLooksMet, result.providerName, result.modelName, result.answer)
 
         val done = finalTasks.count { it.status == TaskStatus.DONE }
         val blocked = finalTasks.count { it.status == TaskStatus.BLOCKED }
@@ -390,7 +390,7 @@ class CycleProcessor(
         )
         trace.model = ModelTrace(
             called = proposal.modelCalled, latencyMs = proposal.latencyMs, provider = proposal.providerName, model = proposal.modelName,
-            rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400),
+            rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400), answer = proposal.answer,
         )
         if (proposal.rejectedReason != null) {
             return Planned.Stop(finish(cycle, trace, CycleStatus.FAILED, "Cycle failed: ${explain(proposal.rejectedReason)}. Nothing was written."))
@@ -463,9 +463,9 @@ class CycleProcessor(
         trace.content += staged.traces
         val problems = staged.problems.map(::describe)
 
-        fun settle(status: TaskStatus, result: String, reason: String?, cited: Int, latencyMs: Long?): TaskRun {
+        fun settle(status: TaskStatus, result: String, reason: String?, cited: Int, latencyMs: Long?, answer: AnswerTrace? = null): TaskRun {
             return TaskRun(task.copy(status = status, result = result))
-                .also { trace.execution += TaskRunTrace(order, task.title, status.label.lowercase(), reason, staged.pages.size, cited, result.length, latencyMs, problems) }
+                .also { trace.execution += TaskRunTrace(order, task.title, status.label.lowercase(), reason, staged.pages.size, cited, result.length, latencyMs, problems, answer) }
         }
 
         // Anything outside the goal's scope blocks the task before a word of it is read or sent to a model.
@@ -486,17 +486,17 @@ class CycleProcessor(
                 val text = composeResult(execution, staged)
                 api.updatePage(task.pageId, AgentTaskMapper.settle(TaskStatus.DONE, text, clock()))
                 val reason = if (execution.droppedCitations > 0) "${execution.droppedCitations} citation(s) not among the staged pages were dropped" else null
-                settle(TaskStatus.DONE, text, reason, execution.pagesUsed.size, outcome.latencyMs)
+                settle(TaskStatus.DONE, text, reason, execution.pagesUsed.size, outcome.latencyMs, outcome.answer)
             }
             is TaskExecution.Blocked -> {
                 val text = "Blocked: ${execution.reason}"
                 api.updatePage(task.pageId, AgentTaskMapper.settle(TaskStatus.BLOCKED, text, clock()))
-                settle(TaskStatus.BLOCKED, text, "insufficient_material", 0, outcome.latencyMs)
+                settle(TaskStatus.BLOCKED, text, "insufficient_material", 0, outcome.latencyMs, outcome.answer)
             }
             is TaskExecution.Failed -> {
                 val text = "Not executed: ${explain(execution.reason)}. The task was not retried."
                 api.updatePage(task.pageId, AgentTaskMapper.settle(TaskStatus.FAILED, text, clock()))
-                settle(TaskStatus.FAILED, text, execution.reason, 0, outcome.latencyMs)
+                settle(TaskStatus.FAILED, text, execution.reason, 0, outcome.latencyMs, outcome.answer)
             }
         }
     }
@@ -635,7 +635,7 @@ class CycleProcessor(
     private fun explain(code: String): String = when {
         code == "no_llm_client" -> "no local model is available"
         code.startsWith("llm_call_failed") -> "the model call failed (${code.substringAfter(": ", "unknown error")})"
-        code == "no_tool_call" -> "the model did not return an answer"
+        code == "no_tool_call" -> "the model answered without the required tool call"
         code == "malformed_tool_input" -> "the model's answer was malformed"
         code == "empty_result" -> "the model returned an empty result"
         code == "unknown_outcome" -> "the model's answer had no usable outcome"

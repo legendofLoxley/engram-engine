@@ -57,6 +57,8 @@ class InterpreterTest {
         assertEquals(listOf(Interpreter.TOOL_NAME), request.tools.map { it.name })
         assertEquals(0.0, request.temperature, "a stage that decides what to write must not vary run to run")
         assertTrue(request.isInterpretation)
+        assertEquals(false, request.reasoning, "the chat path keeps thinking off")
+        assertEquals(768, request.maxTokens, "and keeps its own small budget")
     }
 
     @Test
