@@ -1,5 +1,6 @@
 package app.alfrd.engram.db
 
+import com.arcadedb.database.Database
 import com.arcadedb.database.DatabaseFactory
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
@@ -13,6 +14,10 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 class LocalGraphBackupTest {
 
@@ -108,6 +113,85 @@ class LocalGraphBackupTest {
         names.forEach { File(auto, it).writeText("old") }
         val b = backup()
         manager.close() // the engine's BACKUP DATABASE now fails
+        assertThrows<Exception> { b.run() }
+        assertEquals(names.sorted(), auto.list()!!.sorted(), "nothing pruned, nothing added")
+        assertTrue(root.listFiles()!!.none { it.name.startsWith(".staging") })
+    }
+
+    // ── Integrity check ──────────────────────────────────────────────────────
+    // java.util.zip.ZipFile does not compare a CRC when an entry is read, so reading to the end proves little: a
+    // damaged entry that still decompresses is accepted. These tests use zips whose structure stays valid.
+
+    /** A deterministic, compressible payload, like a real backup entry. */
+    private fun payload(): ByteArray {
+        val r = java.util.Random(42)
+        return buildString { repeat(4000) { append("vertex-").append(r.nextInt(500)).append(",edge-").append(r.nextInt(500)).append('\n') } }.toByteArray()
+    }
+
+    private fun writeZip(file: File, stored: Boolean): File {
+        val data = payload()
+        ZipOutputStream(file.outputStream()).use { z ->
+            val e = ZipEntry("data.bin")
+            if (stored) {
+                e.method = ZipEntry.STORED
+                e.size = data.size.toLong()
+                e.compressedSize = data.size.toLong()
+                e.crc = CRC32().also { it.update(data) }.value
+            }
+            z.putNextEntry(e)
+            z.write(data)
+            z.closeEntry()
+        }
+        return file
+    }
+
+    /** The same zip with one bit flipped [offset] bytes into the entry's data. The zip structure stays valid. */
+    private fun flipped(src: File, dest: File, offset: Int): File {
+        val bytes = src.readBytes()
+        val nameLen = (bytes[26].toInt() and 0xff) or ((bytes[27].toInt() and 0xff) shl 8)
+        val extraLen = (bytes[28].toInt() and 0xff) or ((bytes[29].toInt() and 0xff) shl 8)
+        val at = 30 + nameLen + extraLen + offset
+        bytes[at] = (bytes[at].toInt() xor 1).toByte()
+        dest.writeBytes(bytes)
+        return dest
+    }
+
+    /** What the previous check did: read each entry to its end through ZipFile. */
+    private fun readsToTheEnd(zip: File): Boolean = runCatching {
+        ZipFile(zip).use { z -> z.entries().asSequence().forEach { e -> z.getInputStream(e).use { it.readBytes() } } }
+    }.isSuccess
+
+    @Test
+    fun `the zip check accepts intact zips and counts their entries`() {
+        for (stored in listOf(true, false)) assertEquals(1, LocalGraphBackup.verify(writeZip(File(base, "ok-$stored.zip"), stored)), "stored=$stored")
+    }
+
+    @Test
+    fun `the zip check rejects a corrupted entry even when the zip still reads to the end`() {
+        var gotPastAPlainRead = 0
+        for (stored in listOf(true, false)) {
+            val good = writeZip(File(base, "good-$stored.zip"), stored)
+            val size = ZipFile(good).use { z -> z.entries().nextElement().compressedSize.toInt() }
+            for (offset in 0 until size - 2 step 97) {
+                val bad = flipped(good, File(base, "bad-$stored-$offset.zip"), offset)
+                if (readsToTheEnd(bad)) gotPastAPlainRead++
+                assertThrows<Exception>("stored=$stored, one bit flipped $offset bytes into the entry") { LocalGraphBackup.verify(bad) }
+            }
+        }
+        // Guard: the case the old check missed must really be exercised, or this test says nothing about the CRC.
+        assertTrue(gotPastAPlainRead > 0, "no damaged zip got past a plain read, so this test could not catch a missing CRC check")
+    }
+
+    @Test
+    fun `a run whose backup comes out damaged fails, removes its staging folder and prunes nothing`() = runBlocking<Unit> {
+        val auto = File(root, "auto").also { it.mkdirs() }
+        val names = (1..20).map { "graph-202609%02dT041000Z.zip".format(it) }
+        names.forEach { File(auto, it).writeText("old") }
+        val damaged: (Database, File, String) -> File = { _, dir, fileName ->
+            val good = writeZip(File(dir, "good.zip"), stored = true)
+            flipped(good, File(dir, fileName), 100).also { good.delete() }
+        }
+        val b = LocalGraphBackup(manager.getDatabase(), root, null, dbDir, Instant::now, damaged)
         assertThrows<Exception> { b.run() }
         assertEquals(names.sorted(), auto.list()!!.sorted(), "nothing pruned, nothing added")
         assertTrue(root.listFiles()!!.none { it.name.startsWith(".staging") })

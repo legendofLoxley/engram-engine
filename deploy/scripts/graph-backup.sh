@@ -14,6 +14,20 @@ TOKEN_FILE="${DEBUG_TOKEN_FILE:-/home/halo/development/hermes-webui-dev/.engram-
 
 [ -r "$TOKEN_FILE" ] || { echo "graph-backup: the debug token file is not readable" >&2; exit 2; }
 
+# The timer's catch-up run (a missed 05:20 fires once at the next boot) can reach this point before the engine has
+# opened its listener: After=engram-dev.service only waits for the process to start. Wait a bounded time for /health
+# on loopback, then ask. This never starts the engine; a stopped engine is still a failed run, now after the wait.
+READY_WAIT_SECONDS="${READY_WAIT_SECONDS:-180}"
+case "$READY_WAIT_SECONDS" in ''|*[!0-9]*) READY_WAIT_SECONDS=180 ;; esac
+deadline=$((SECONDS + READY_WAIT_SECONDS))
+until curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${PORT}/health" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "graph-backup: FAILED the engine did not answer on port ${PORT} after waiting ${READY_WAIT_SECONDS}s (this script does not start it)" >&2
+    exit 1
+  fi
+  sleep 5
+done
+
 out="$(mktemp)"
 trap 'rm -f "$out"' EXIT
 

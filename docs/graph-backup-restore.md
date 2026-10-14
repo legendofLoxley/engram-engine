@@ -30,8 +30,8 @@ deploy/scripts/graph-restore-proof.sh /home/halo/backups/engram-graph/auto/graph
 
 It restores the backup into a scratch directory, starts the engine on port 8095 against it (no Notion, no model),
 compares vertex and edge counts per type with the live engine (`GET /debug/graph-counts`), confirms the owner-jacob
-user is present, then stops the scratch engine and deletes the scratch directory. Exit 0 means the counts match and
-owner-jacob is present. Live counts are read at that moment, so a write between the backup and the proof shows as a
+user is present in both the live and the restored graph, then stops the scratch engine and deletes the scratch
+directory. Exit 0 means the counts match and owner-jacob is present in both. Live counts are read at that moment, so a write between the backup and the proof shows as a
 difference; compare a backup taken just before. For a cold copy taken while the engine was stopped, pass
 `LIVE_COUNTS_FILE=<counts saved at restart>`.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Proves a backup restores: restores it into a scratch directory, opens it with the engine on a DIFFERENT port,
-# compares vertex and edge counts per type with the live graph, confirms the owner-jacob user is present, then
-# tears the scratch engine and its directory down. It never opens, writes or locks the live graph, never touches
+# compares vertex and edge counts per type with the live graph, confirms the owner-jacob user is present in both
+# the live and the restored graph, then tears the scratch engine and its directory down. It never opens, writes or locks the live graph, never touches
 # 8081, and the scratch engine has no Notion, no model and no network beyond its own loopback port.
 #
 #   graph-restore-proof.sh <backup.zip | cold-copy-directory>
@@ -12,7 +12,7 @@
 # Environment (all optional): ENGRAM_JAR, JAVA_BIN, ENGRAM_PORT (the live engine, default 8082), SCRATCH_PORT
 # (default 8095), SCRATCH_ROOT, LIVE_COUNTS_FILE (compare with counts saved earlier instead of asking the live
 # engine now, for a cold copy taken while the engine was stopped), DEBUG_TOKEN_FILE.
-# Output is counts, sizes, durations and paths only. Exit 0: counts match and owner-jacob is present.
+# Output is counts, sizes, durations and paths only. Exit 0: counts match and owner-jacob is present in both graphs.
 set -euo pipefail
 set +x
 
@@ -103,7 +103,15 @@ for kind in ("vertices", "edges"):
         if a != b: ok = False
         if a or b or flag: print(f"   {n:<28} {a!s:>8} / {b!s:<8}{flag}")
 print("owner-jacob present: live", live["ownerJacobPresent"], "restored", rest["ownerJacobPresent"])
-if not rest["ownerJacobPresent"]: ok = False
-print("RESULT:", "counts match and owner-jacob is present" if ok else "MISMATCH")
+# The one thing that cannot be rebuilt has to be in BOTH graphs. A restored graph that has it proves nothing if the live
+# graph does not (the proof then shows no backup of it), and a live graph that has it while the restored one does not
+# is a backup that lost it.
+if not live["ownerJacobPresent"]:
+    ok = False
+    print("   <-- the live graph does not have owner-jacob, so this proof cannot show that a backup holds it")
+if not rest["ownerJacobPresent"]:
+    ok = False
+    print("   <-- the restored graph does not have owner-jacob")
+print("RESULT:", "counts match and owner-jacob is present in both" if ok else "MISMATCH")
 sys.exit(0 if ok else 1)
 PY

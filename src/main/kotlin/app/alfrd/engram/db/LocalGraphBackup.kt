@@ -15,6 +15,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.temporal.IsoFields
 import java.util.UUID
+import java.util.zip.CRC32
 import java.util.zip.ZipFile
 import org.slf4j.LoggerFactory
 
@@ -38,7 +39,8 @@ data class LocalBackupResult(
  *
  * Layout under [root]: `auto/graph-<UTC yyyyMMddTHHmmssZ>.zip`, mode 600, in a folder of mode 700. Cold copies the
  * runbook describes live beside `auto/` and are never touched here. Each run writes into a staging folder, **verifies
- * the zip (every entry read through its CRC)**, then moves it into `auto/` and only then prunes ([BackupRetention]).
+ * the zip (every entry read to its end and compared with the CRC-32 and size the zip recorded for it)**, then moves it
+ * into `auto/` and only then prunes ([BackupRetention]).
  * A backup that fails verification is deleted and nothing is pruned, so the only good backup is never lost to a bad one.
  *
  * [secondDestination] is an optional second folder (for example a mounted drive); unset by default. The copy is a plain
@@ -50,6 +52,8 @@ class LocalGraphBackup(
     private val secondDestination: File? = null,
     private val dbPath: File = File(db.databasePath),
     private val clock: () -> Instant = Instant::now,
+    /** Makes the engine's backup. Injectable so a test can hand back a damaged zip; production always uses [ArcadeSnapshot.backupInto]. */
+    private val snapshot: (Database, File, String) -> File = ArcadeSnapshot::backupInto,
 ) {
     private val logger = LoggerFactory.getLogger(LocalGraphBackup::class.java)
     private val inFlight = Mutex()
@@ -73,7 +77,7 @@ class LocalGraphBackup(
         val auto = File(root, AUTO).also { privateDir(it) }
         val staging = File(root, ".staging-${UUID.randomUUID()}").also { privateDir(it) }
         try {
-            val raw = ArcadeSnapshot.backupInto(db, staging, "graph.zip")
+            val raw = snapshot(db, staging, "graph.zip")
             val entries = verify(raw)
             val name = "graph-${STAMP.format(now.atOffset(ZoneOffset.UTC))}.zip"
             val target = File(auto, name)
@@ -95,21 +99,6 @@ class LocalGraphBackup(
         }
     }
 
-    /** Reads every entry to its end, which checks each CRC. Returns the entry count; throws on an empty or damaged zip. */
-    private fun verify(zip: File): Int {
-        require(zip.length() > 0) { "the backup is empty" }
-        var count = 0
-        ZipFile(zip).use { z ->
-            val buf = ByteArray(64 * 1024)
-            for (entry in z.entries()) {
-                z.getInputStream(entry).use { input -> while (input.read(buf) >= 0) { /* reading checks the CRC */ } }
-                count++
-            }
-        }
-        require(count > 0) { "the backup has no entries" }
-        return count
-    }
-
     private fun copyTo(dir: File, source: File): Boolean = try {
         privateDir(dir)
         val tmp = File(dir, ".${source.name}.part")
@@ -127,6 +116,37 @@ class LocalGraphBackup(
     }
 
     companion object {
+        /**
+         * Reads every entry to its end and compares what came out with the CRC-32 and size the zip recorded for it.
+         * Reading alone is not a check: `java.util.zip.ZipFile` does not compare a CRC when an entry is read, so a damaged
+         * entry that still decompresses would pass. Returns the entry count; throws on an empty, damaged or inconsistent zip.
+         */
+        internal fun verify(zip: File): Int {
+            require(zip.length() > 0) { "the backup is empty" }
+            var count = 0
+            ZipFile(zip).use { z ->
+                val buf = ByteArray(64 * 1024)
+                for (entry in z.entries()) {
+                    val crc = CRC32()
+                    var size = 0L
+                    z.getInputStream(entry).use { input ->
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            crc.update(buf, 0, n)
+                            size += n
+                        }
+                    }
+                    require(entry.crc != -1L) { "a zip entry has no recorded CRC" }
+                    require(crc.value == entry.crc) { "a zip entry does not match its recorded CRC" }
+                    require(entry.size < 0 || size == entry.size) { "a zip entry does not match its recorded size" }
+                    count++
+                }
+            }
+            require(count > 0) { "the backup has no entries" }
+            return count
+        }
+
         const val AUTO = "auto"
         const val ENV_DIR = "GRAPH_BACKUP_DIR"
         const val ENV_SECOND = "GRAPH_BACKUP_COPY_TO"
