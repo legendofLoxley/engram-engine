@@ -8,8 +8,9 @@ After=engram-dev.service
 [Service]
 Type=oneshot
 User=halo
+# The script is an installed copy (see deploy/README.md "Graph backup"), so the unit does not depend on which branch the checkout is on.
 # Run through bash, as engram-dev.service does: systemd executing a user_home_t script directly is denied under SELinux enforcing.
-ExecStart=/usr/bin/bash /home/halo/development/engram-engine/deploy/scripts/graph-backup.sh
+ExecStart=/usr/bin/bash /home/halo/.local/share/engram/graph-backup.sh
 TimeoutStartSec=1200
 Nice=10
 IOSchedulingClass=idle

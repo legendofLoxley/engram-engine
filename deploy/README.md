@@ -584,9 +584,10 @@ code check Scope itself; that is a change to the Goals template, not to this cod
 The engine runs its own `BACKUP DATABASE` daily into a local folder, with no Spaces, no encryption and no network
 (`LocalGraphBackup`, started by `GRAPH_BACKUP_DIR`; the hosted `GraphBackupCoordinator` path is separate and
 unchanged). Schedule, retention, the second destination, the restore proof and the restore runbook are in
-`docs/graph-backup-restore.md`. Install the units with `sudo cp deploy/systemd/engram-graph-backup.* /etc/systemd/system/`,
-`sudo cp -r deploy/systemd/engram-dev.service.d /etc/systemd/system/`, `sudo systemctl daemon-reload` and
-`sudo systemctl enable --now engram-graph-backup.timer`.
+`docs/graph-backup-restore.md`. Install: `install -D -m 755 deploy/scripts/graph-backup.sh ~/.local/share/engram/graph-backup.sh` (the unit runs this copy, so it does not
+depend on which branch the checkout is on; repeat after changing the script), `sudo install -m 644 deploy/systemd/engram-graph-backup.* /etc/systemd/system/`,
+`sudo install -D -m 644 deploy/systemd/engram-dev.service.d/graph-backup.conf /etc/systemd/system/engram-dev.service.d/graph-backup.conf`,
+`sudo systemctl daemon-reload`, restart `engram-dev` once (it reads `GRAPH_BACKUP_DIR` at start) and `sudo systemctl enable --now engram-graph-backup.timer`.
 
 ## Remaining limits
 
