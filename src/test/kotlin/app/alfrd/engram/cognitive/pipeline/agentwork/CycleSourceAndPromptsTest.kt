@@ -360,7 +360,7 @@ class CycleSourceAndPromptsTest {
     @Test
     fun `each prompt has a name, a version and a pinned fingerprint, so editing the text without bumping the version fails here`() {
         val pinned = mapOf(
-            "plan" to ("5" to "8549b5926716"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("3" to "ee86c7f9cb26"), "task.consolidate" to ("2" to "8797d5f3b38d"),
+            "plan" to ("5" to "8549b5926716"), "task.read" to ("2" to "0ecfa38ab60d"), "task.check" to ("3" to "ee86c7f9cb26"), "task.consolidate" to ("3" to "0f9a652ea1a1"),
             "task.hypothesis" to ("2" to "53cb43937922"), "task.escalate" to ("2" to "0161f4860f97"), "qc" to ("5" to "5a6285cd72e3"),
         )
         assertEquals(pinned.keys, CyclePrompts.all.map { it.name }.toSet())

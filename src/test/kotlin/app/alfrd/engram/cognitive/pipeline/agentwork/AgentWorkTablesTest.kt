@@ -78,7 +78,7 @@ class AgentWorkTablesTest {
         assertEquals(12, readOnlyTables.size)
         for (name in readOnlyTables) assertEquals(TableAccess.READ_ONLY, set.table(name).access, name)
         assertEquals("Op key", set.table(AgentWorkTables.AGENT_TASKS).idempotencyKeyProperty)
-        assertTrue(set.tables.none { it.pageBodyAppend }, "no table takes page-body appends")
+        assertEquals(listOf("cycles"), set.tables.filter { it.pageBodyAppend }.map { it.name }, "only Cycles takes page-body appends (the cycle report)")
     }
 
     @Test
@@ -179,8 +179,9 @@ class AgentWorkTablesTest {
     }
 
     @Test
-    fun `no table may accept page-body appends`() {
-        rejected { AgentWorkTables.requireShape(withTable(AgentWorkTables.CYCLES) { it.copy(pageBodyAppend = true) }) }
+    fun `no table but Cycles may accept page-body appends`() {
+        rejected { AgentWorkTables.requireShape(withTable(AgentWorkTables.AGENT_TASKS) { it.copy(pageBodyAppend = true) }) }
+        AgentWorkTables.requireShape(withTable(AgentWorkTables.CYCLES) { it.copy(pageBodyAppend = true) })
     }
 
     @Test

@@ -3,7 +3,7 @@
   "tokenRef": "file:/home/halo/development/hermes-webui-dev/.notion-worker-token",
   "tables": [
     { "name": "goals",                    "dataSourceId": "2ee6db65-bade-4662-a3e5-0246bd5b733f", "databaseId": "20d47dc9f97c445ea99cf87bfc70f376", "access": "read-only" },
-    { "name": "cycles",                   "dataSourceId": "545ccad7-35ac-4131-b69c-cdbd278fe774", "databaseId": "80a97bf409394cab9701a8d162a45cda", "access": "read-write" },
+    { "name": "cycles",                   "dataSourceId": "545ccad7-35ac-4131-b69c-cdbd278fe774", "databaseId": "80a97bf409394cab9701a8d162a45cda", "access": "read-write", "pageBodyAppend": true },
     { "name": "agent-tasks",              "dataSourceId": "894c2022-6542-4312-b6bd-fb746f87af41", "databaseId": "b1c17008b6b941e5b541d3ea9d19b4d7", "access": "read-write", "idempotencyKeyProperty": "Op key" },
     { "name": "escalations",              "dataSourceId": "b1794330-8d8a-47c4-81a4-30603528ea55", "databaseId": "89d30c7db5834772b494301657631510", "access": "read-only" },
     { "name": "questions",                "dataSourceId": "1bcee51b-37ac-41a3-897b-9d107f34be8f", "databaseId": "2115d7a81d2e4e588a88bb62a8f1769d", "access": "read-only" },

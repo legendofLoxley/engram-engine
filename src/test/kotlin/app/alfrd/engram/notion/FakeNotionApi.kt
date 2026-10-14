@@ -214,11 +214,14 @@ class FakeNotionApi(
         val page = pages[parentBlockId] ?: throw notFound("block")
         if (blocks.size > NotionApi.MAX_BLOCKS_PER_APPEND) throw invalid("children should be at most ${NotionApi.MAX_BLOCKS_PER_APPEND} blocks")
         val added = blocks.map { block ->
-            val paragraph = block as NotionBlock.Paragraph
-            paragraph.segments.forEach {
+            val (segments, type) = when (block) {
+                is NotionBlock.Paragraph -> block.segments to "paragraph"
+                is NotionBlock.Heading -> listOf(RichSegment(block.text)) to "heading_${block.level}"
+            }
+            segments.forEach {
                 if (it.text.length > NotionApi.MAX_TEXT_CHARS) throw invalid("rich_text content should be at most ${NotionApi.MAX_TEXT_CHARS} characters")
             }
-            StoredBlock(newId(), paragraph.segments, now)
+            StoredBlock(newId(), segments, now, type)
         }
         this.blocks.getOrPut(parentBlockId) { ArrayList() }.addAll(added)
         if (added.isNotEmpty()) page.edited = truncate(now)

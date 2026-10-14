@@ -143,8 +143,8 @@ class CycleExecutionTest {
         val taskIds = f.tasksFor(c.id).map { it.id }.toSet()
         val writes = f.fake.requests.drop(mark).filter { it.operation in setOf("createPage", "updatePage", "appendBlocks") }
         assertTrue(writes.isNotEmpty())
-        assertTrue(writes.all { (it.operation == "createPage" && it.target == t.tasks) || (it.operation == "updatePage" && (it.target == c.id || it.target in taskIds)) }, writes.toString())
-        assertTrue(writes.none { it.operation == "appendBlocks" })
+        assertTrue(writes.all { (it.operation == "createPage" && it.target == t.tasks) || (it.operation == "updatePage" && (it.target == c.id || it.target in taskIds)) || (it.operation == "appendBlocks" && it.target == c.id) }, writes.toString())
+        assertTrue(writes.filter { it.operation == "appendBlocks" }.all { it.target == c.id }, "the only body append is the cycle report, on the Cycle's own page")
         assertEquals(before.properties, f.fake.page(goal.id).properties, "the goal row changed")
         assertEquals("Active", f.fake.page(goal.id).select("Status"))
         for ((name, rows) in rowsBefore) assertEquals(rows, f.fake.rows(f.tableSet.table(name).dataSourceId).map { it.id to it.lastEditedTime }, "$name changed")
@@ -217,7 +217,7 @@ class CycleExecutionTest {
         assertTrue(row.text("Goal Feedback").contains("Suggested rewrite of Scope"))
         assertTrue(row.text("Goal Feedback").contains("readablePages allowlist"), "the error names the allowlist: ${row.text("Goal Feedback")}")
         assertTrue(llm.requests.isEmpty())
-        assertEquals(0, f.fake.requestCount("listBlocks"), "the private page was never read")
+        assertTrue(f.fake.requests.none { it.operation == "listBlocks" && it.target == stranger }, "the private page was never read")
     }
 
     // ── Acceptance: links and reads outside Scope are rejected in code ───────
@@ -237,7 +237,8 @@ class CycleExecutionTest {
         assertEquals(listOf("Read Persona"), f.tasksFor(c.id).map { it.title("Task") })
         assertEquals(listOf("LINK_NOT_ALLOWED", "LINK_NOT_ALLOWED"), traces.recent(1).single().rejected.map { it.reason })
         assertTrue(cycleRow(c.id).text("Summary").contains("2 proposed tasks were rejected by validation"))
-        assertEquals(0, f.fake.requestCount("listBlocks") - 1, "only the one accepted task read a page's blocks")
+        // The cycle's own page is listed once, to look for its report; apart from that only the one accepted task read a page's blocks.
+        assertEquals(0, f.fake.requests.count { it.operation == "listBlocks" && it.target != c.id } - 1, "only the one accepted task read a page's blocks")
     }
 
     @Test

@@ -61,6 +61,10 @@ object CyclePrompts {
         - Work from the SOURCE MATERIAL. Go through the items yourself and account for each one. Use EARLIER WORK only as notes about where to look; where a note disagrees with the source, the source wins, and say so.
         - Do not drop items. When the task is about all of them, state your coverage: how many items you were given and how many your account covers, and name any you could not cover.
         - Do not invent items, groupings that nothing supports, or reasons the source does not give. Where the source gives no reason, say it gives none.
+        - Carry forward every item that the earlier tasks of this cycle produced (each finding, answer, quote or listed item). List all of them, one by one; do not fold several into "and others" or a general statement.
+        - If you change, merge or drop an earlier item, say which item it was and why.
+        - If two earlier results conflict, report both and say that they conflict. Do not choose one silently.
+        - End with a count in exactly this form: "items found earlier: N, items reported: N", where the first N is how many items the earlier tasks produced and the second is how many your account reports. If the two differ, say which items account for the difference.
     """.trimIndent()
 
     private val HYPOTHESIS = """
@@ -82,7 +86,7 @@ object CyclePrompts {
     private val TASKS: Map<TaskType, SystemPrompt> = mapOf(
         TaskType.READ to task("read", READ),
         TaskType.CHECK to task("check", CHECK, version = "3"),
-        TaskType.CONSOLIDATE to task("consolidate", CONSOLIDATE),
+        TaskType.CONSOLIDATE to task("consolidate", CONSOLIDATE, version = "3"),
         TaskType.HYPOTHESIS to task("hypothesis", HYPOTHESIS),
         TaskType.ESCALATE to task("escalate", ESCALATE),
     )

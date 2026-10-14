@@ -240,6 +240,15 @@ class HttpNotionApi(
     }
 
     private fun NotionBlock.toJson(): JsonElement = when (val block = this) {
+        is NotionBlock.Heading -> buildJsonObject {
+            require(block.text.length <= NotionApi.MAX_TEXT_CHARS) { "a heading may not exceed ${NotionApi.MAX_TEXT_CHARS} characters" }
+            val type = "heading_${block.level}"
+            put("object", "block")
+            put("type", type)
+            putJsonObject(type) {
+                putJsonArray("rich_text") { add(buildJsonObject { put("type", "text"); putJsonObject("text") { put("content", block.text) } }) }
+            }
+        }
         is NotionBlock.Paragraph -> buildJsonObject {
             put("object", "block")
             put("type", "paragraph")
@@ -249,7 +258,10 @@ class HttpNotionApi(
                         require(segment.text.length <= NotionApi.MAX_TEXT_CHARS) { "a block segment may not exceed ${NotionApi.MAX_TEXT_CHARS} characters" }
                         add(buildJsonObject {
                             put("type", "text")
-                            putJsonObject("text") { put("content", segment.text) }
+                            putJsonObject("text") {
+                                put("content", segment.text)
+                                segment.link?.let { url -> putJsonObject("link") { put("url", url) } }
+                            }
                             if (segment.bold) putJsonObject("annotations") { put("bold", true) }
                         })
                     }

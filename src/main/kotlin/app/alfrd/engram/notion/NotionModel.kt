@@ -191,11 +191,16 @@ sealed interface NotionSort {
 data class QueryPage(val pages: List<NotionPage>, val nextCursor: String?)
 
 /** One run of text inside a block. Plain text is the verbatim ledger; [bold] marks the speaker label that separates ledger entries. */
-data class RichSegment(val text: String, val bold: Boolean = false)
+data class RichSegment(val text: String, val bold: Boolean = false, val link: String? = null)
 
 /** A block this package can write. The ledger is paragraphs only. */
 sealed interface NotionBlock {
     data class Paragraph(val segments: List<RichSegment>) : NotionBlock
+
+    /** A heading of [level] 2 or 3; the text is at most one segment, so at most [NotionApi.MAX_TEXT_CHARS] characters. */
+    data class Heading(val level: Int, val text: String) : NotionBlock {
+        init { require(level in 2..3) { "heading level must be 2 or 3" } }
+    }
 }
 
 /**

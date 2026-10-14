@@ -94,6 +94,10 @@ class CycleProcessor(
 
     private val leaseGuards = ConcurrentHashMap<String, LeaseGuard>()
 
+    /** What the report of each running cycle is built from, by Cycle page id; dropped when the cycle's processing ends. */
+    private val drafts = ConcurrentHashMap<String, ReportDraft>()
+    private fun draft(cycle: Cycle): ReportDraft = drafts.getOrPut(cycle.pageId) { ReportDraft() }
+
     sealed interface TickResult {
         data class Finished(val cycle: String?, val status: CycleStatus, val summary: String) : TickResult
 
@@ -244,6 +248,7 @@ class CycleProcessor(
             }
         } finally {
             leaseGuards.remove(cycle.pageId)
+            drafts.remove(cycle.pageId)
             trace.finishedAt = clock().toString()
             traces.add(trace)
         }
@@ -295,6 +300,7 @@ class CycleProcessor(
         // ── 3. Execute, in order, report-only ────────────────────────────────────
         val stager = TaskStager(context, contentReader, limits)
         val current = tasks.associateBy { it.order ?: 0 }.toMutableMap()
+        draft(cycle).tasks = tasks
         val earlier = ArrayList<EarlierResult>()
         var tasksDone = tasks.count { it.status == TaskStatus.DONE }
 
@@ -308,6 +314,7 @@ class CycleProcessor(
             requireLease(cycle)
             val run = runTask(cycle, goal, task, tasks.size, stager, context.handles, earlier, trace)
             current[order] = run.task
+            draft(cycle).tasks = current.values.toList()
             earlier += EarlierResult(order, run.task.title, run.task.status ?: TaskStatus.FAILED, run.task.result)
             if (run.task.status == TaskStatus.DONE) {
                 tasksDone++
@@ -332,6 +339,7 @@ class CycleProcessor(
         val blocked = finalTasks.count { it.status == TaskStatus.BLOCKED }
         val failed = finalTasks.count { it.status == TaskStatus.FAILED }
         val decision = result.decision
+        draft(cycle).decision = decision
         if (decision == null) {
             val why = result.rejectedReason?.let { explain(it) } ?: "no decision"
             return finish(
@@ -391,11 +399,12 @@ class CycleProcessor(
                 context = context,
             ),
         )
+        draft(cycle).rationale = proposal.rationale
         trace.model = ModelTrace(
             called = proposal.modelCalled, latencyMs = proposal.latencyMs, provider = proposal.providerName, model = proposal.modelName,
             rejectedReason = proposal.rejectedReason, tasksProposed = proposal.tasks.size, rationale = proposal.rationale?.take(400), answer = proposal.answer, given = proposal.given, fallback = proposal.fallback,
         )
-        proposal.fallback?.let { trace.notes += fallbackLine(it) }
+        proposal.fallback?.let { trace.notes += planFallbackLine(it) }
         if (proposal.rejectedReason != null) {
             return Planned.Stop(finish(cycle, trace, CycleStatus.FAILED, "Cycle failed: ${explain(proposal.rejectedReason)}. Nothing was written."))
         }
@@ -579,7 +588,7 @@ class CycleProcessor(
         feedback: String? = null,
     ): TickResult {
         // Whatever the outcome, a plan served by the fallback endpoint says so in the Summary.
-        val summary = trace.model?.fallback?.let { "$body ${fallbackLine(it)}" } ?: body
+        val summary = trace.model?.fallback?.let { "$body ${planFallbackLine(it)}" } ?: body
         val guard = leaseGuards[cycle.pageId]
         if (guard == null) {
             api.updatePage(cycle.pageId, CycleMapper.finish(status, clock(), summary, tasksDone, feedback))
@@ -592,6 +601,7 @@ class CycleProcessor(
         attempts.remove(cycle.pageId)
         trace.outcome = status.label.lowercase()
         trace.summary = summary
+        writeReport(cycle, status, summary, trace)
         logger.info(
             "notion-cycles: cycle {} finished {} (planned={}, rejected={}, done={})",
             cycle.displayId ?: cycle.pageId, status.label, trace.accepted.size, trace.rejected.size, tasksDone,
@@ -599,8 +609,26 @@ class CycleProcessor(
         return TickResult.Finished(cycle.displayId, status, summary)
     }
 
-    private fun fallbackLine(fallback: FallbackTrace): String =
-        "Plan served by fallback endpoint (the plan endpoint ${fallback.endpoint} failed with ${fallback.reason} after ${fallback.failedAfterMs / 1000} s)."
+    /**
+     * Appends the cycle's report to its own page body, once. A report that cannot be written (the guard, Notion,
+     * a bug) is a note on the trace and never a failed cycle: the cycle's Status, Summary and Results are already written.
+     */
+    private suspend fun writeReport(cycle: Cycle, status: CycleStatus, summary: String, trace: CyclePlanTrace) {
+        try {
+            val blocks = CycleReport.build(cycle, status, summary, draft(cycle), trace)
+            val outcome = CycleReportWriter(api).write(cycle.pageId, blocks)
+            trace.notes += when (outcome) {
+                CycleReportWriter.Outcome.WRITTEN -> "cycle report written (${blocks.size} blocks)"
+                CycleReportWriter.Outcome.ALREADY_PRESENT -> "cycle report already on the page; nothing appended"
+                CycleReportWriter.Outcome.ALREADY_PRESENT_INCOMPLETE -> "cycle report already on the page but unfinished (no end line); nothing appended"
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.warn("notion-cycles: cycle {} report not written: {}", cycle.displayId ?: cycle.pageId, e::class.java.simpleName)
+            trace.notes += "cycle report not written: ${e::class.java.simpleName}"
+        }
+    }
 
     private fun scopeTrace(goal: Goal, context: ScopeContext): ScopeTrace = ScopeTrace(
         mentions = goal.scope.mentions.size,

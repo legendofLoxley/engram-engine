@@ -83,8 +83,9 @@ object AgentWorkTables {
         if (set.table(AGENT_TASKS).idempotencyKeyProperty != OP_KEY_PROPERTY) {
             throw NotionConfigException("table '$AGENT_TASKS' must use '$OP_KEY_PROPERTY' as its idempotency key")
         }
-        if (set.tables.any { it.pageBodyAppend }) {
-            throw NotionConfigException("no table may accept page-body appends in this increment")
+        // Only a Cycle's own page body may be appended to (the Director's report of that cycle). No other table may.
+        set.tables.firstOrNull { it.pageBodyAppend && it.name != CYCLES }?.let {
+            throw NotionConfigException("table '${it.name}' may not accept page-body appends; only '$CYCLES' may, for the cycle report")
         }
         val pages = set.readablePages.map { it.name }.toSet()
         val stray = pages.filter { it !in READABLE_PAGES && !it.startsWith(READING_PAGE_PREFIX) }

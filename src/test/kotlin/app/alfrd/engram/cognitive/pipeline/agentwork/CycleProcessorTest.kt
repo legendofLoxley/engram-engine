@@ -201,7 +201,7 @@ class CycleProcessorTest {
         val taskIds = tasksFor(c.id).map { it.id }.toSet()
         assertTrue(writes("createPage").isNotEmpty() && writes("createPage").all { it.target == t.tasks }, "a row was created outside Agent Tasks: ${writes("createPage")}")
         assertTrue(writes("updatePage").isNotEmpty() && writes("updatePage").all { it.target == c.id || it.target in taskIds }, "a page other than the cycle or its tasks was updated: ${writes("updatePage")}")
-        assertTrue(writes("appendBlocks").isEmpty())
+        assertTrue(writes("appendBlocks").all { it.target == c.id }, "the only body append is the cycle report, on the Cycle's own page: ${writes("appendBlocks")}")
         assertEquals("Active", fake.page(g.id).select("Status"), "the goal's own Status is never touched")
     }
 

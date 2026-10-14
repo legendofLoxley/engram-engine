@@ -216,7 +216,7 @@ tables and one readable page, two tables writable.
 
 | Table(s) | Access | Notes |
 |---|---|---|
-| Cycles | read-write | Claimed, heartbeated, finished by the Director; Summary and Goal Feedback are written here |
+| Cycles | read-write, page-body append | Claimed, heartbeated, finished by the Director; Summary and Goal Feedback are written here, and a one-page report is appended to the Cycle's own page body when it finishes (no other table takes a body append) |
 | Agent Tasks | read-write | Created with an idempotency key (`Op key`); each task's Result, Status, Started and Finished are written here |
 | Goals, Escalations | read-only | The Director reads a goal and its Escalations' Resolution text; it never writes a goal, not even its Status |
 | PPS Questions, **Findings**, Sources | read-only | Findings is the old Claims table (same data source id, renamed 2026-10-12). Evidence is archived and **not in the set** |
@@ -225,7 +225,7 @@ tables and one readable page, two tables writable.
 | Reading pages (`reading-essay-excerpt`, `3f8d0721d4e481deb87bec779d10acfc`) | read-only pages | Extra plain pages the Director may read when a goal's Scope mentions them. Listed by id in the same `readablePages` allowlist |
 
 `AgentWorkTables.requireShape` refuses a configuration that makes anything else writable, that drops a
-table, that adds a fifteenth one (even read-only), that allows a page-body append, that drops the Persona
+table, that adds a fifteenth one (even read-only), that allows a page-body append on any table but Cycles, that drops the Persona
 page, or that allowlists a readable page whose name does not start with `reading-`. Loosening this is therefore an edit to that check, not a one-line change
 to a JSON file, except for adding a reading page (below). The same check refuses a read-only table that accepts incoming relations, because Notion
 would mirror a relation written from another table onto its rows. A relation property is replaced as a
