@@ -10,7 +10,7 @@
 # the scratch directory first, so the original is never opened.
 #
 # Environment (all optional): ENGRAM_JAR, JAVA_BIN, ENGRAM_PORT (the live engine, default 8082), SCRATCH_PORT
-# (default 8091), SCRATCH_ROOT, LIVE_COUNTS_FILE (compare with counts saved earlier instead of asking the live
+# (default 8095), SCRATCH_ROOT, LIVE_COUNTS_FILE (compare with counts saved earlier instead of asking the live
 # engine now, for a cold copy taken while the engine was stopped), DEBUG_TOKEN_FILE.
 # Output is counts, sizes, durations and paths only. Exit 0: counts match and owner-jacob is present.
 set -euo pipefail
@@ -20,12 +20,12 @@ SRC="${1:?usage: graph-restore-proof.sh <backup.zip | cold-copy-directory>}"
 JAR="${ENGRAM_JAR:-/home/halo/development/engram-engine/build/libs/engram-engine.jar}"
 JAVA="${JAVA_BIN:-/home/halo/.local/jdks/jdk-21.0.12.1+1/bin/java}"
 LIVE_PORT="${ENGRAM_PORT:-8082}"
-SCRATCH_PORT="${SCRATCH_PORT:-8091}"
+SCRATCH_PORT="${SCRATCH_PORT:-8095}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/home/halo/backups/engram-graph/.restore-proof}"
 TOKEN_FILE="${DEBUG_TOKEN_FILE:-/home/halo/development/hermes-webui-dev/.engram-debug-token}"
 LIVE_DATA="/home/halo/development/engram-engine/data"
 
-case "$SCRATCH_PORT" in 8080|8081|8082|8083|"$LIVE_PORT") echo "refusing: port $SCRATCH_PORT belongs to a live service" >&2; exit 2;; esac
+case "$SCRATCH_PORT" in 8080|8081|8082|8083|8091|8788|"$LIVE_PORT") echo "refusing: port $SCRATCH_PORT belongs to a live service" >&2; exit 2;; esac
 [ -e "$SRC" ] || { echo "no such backup: $SRC" >&2; exit 2; }
 SRC="$(readlink -f "$SRC")"
 case "$SRC" in "$LIVE_DATA"|"$LIVE_DATA"/*) echo "refusing: the source is inside the live data directory" >&2; exit 2;; esac

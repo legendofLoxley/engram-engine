@@ -28,7 +28,7 @@ systemctl start engram-graph-backup.service && journalctl -u engram-graph-backup
 deploy/scripts/graph-restore-proof.sh /home/halo/backups/engram-graph/auto/graph-<stamp>.zip
 ```
 
-It restores the backup into a scratch directory, starts the engine on port 8091 against it (no Notion, no model),
+It restores the backup into a scratch directory, starts the engine on port 8095 against it (no Notion, no model),
 compares vertex and edge counts per type with the live engine (`GET /debug/graph-counts`), confirms the owner-jacob
 user is present, then stops the scratch engine and deletes the scratch directory. Exit 0 means the counts match and
 owner-jacob is present. Live counts are read at that moment, so a write between the backup and the proof shows as a
