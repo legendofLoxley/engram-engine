@@ -579,6 +579,16 @@ example "How this ledger works") is reported in the trace and skipped; the guard
 arbitrary pages. A machine-checkable Scope (a relation or a list of allowed URLs on the goal) would let
 code check Scope itself; that is a change to the Goals template, not to this code.
 
+## Graph backup
+
+The engine runs its own `BACKUP DATABASE` daily into a local folder, with no Spaces, no encryption and no network
+(`LocalGraphBackup`, started by `GRAPH_BACKUP_DIR`; the hosted `GraphBackupCoordinator` path is separate and
+unchanged). Schedule, retention, the second destination, the restore proof and the restore runbook are in
+`docs/graph-backup-restore.md`. Install: `install -D -m 755 deploy/scripts/graph-backup.sh ~/.local/share/engram/graph-backup.sh` (the unit runs this copy, so it does not
+depend on which branch the checkout is on; repeat after changing the script), `sudo install -m 644 deploy/systemd/engram-graph-backup.* /etc/systemd/system/`,
+`sudo install -D -m 644 deploy/systemd/engram-dev.service.d/graph-backup.conf /etc/systemd/system/engram-dev.service.d/graph-backup.conf`,
+`sudo systemctl daemon-reload`, restart `engram-dev` once (it reads `GRAPH_BACKUP_DIR` at start) and `sudo systemctl enable --now engram-graph-backup.timer`.
+
 ## Remaining limits
 
 - No health-check endpoint on the runner adapter (`webui-bridge/runner_adapter.py`
@@ -586,11 +596,12 @@ code check Scope itself; that is a change to the Goals template, not to this cod
   `systemctl status`, or a `GET /v1/runs/<id>` returning 401 without a bearer
   / 404 for an unknown id with a valid one (confirmed live), not a dedicated
   probe.
-- No automatic backup/snapshot of `data/dev/engram-db` or the two Hermes home
-  directories — this is dev/POC state, not covered by the box's real
-  `halo-backup.service` (which only backs up customer/product state).
-  Losing these directories loses the dev graph and dev Hermes state; nothing
-  in this pass changes that.
+- `data/dev/engram-db` is backed up daily, on the same disk. `engram-graph-backup.timer` (05:20) asks the
+  running engine for its own `BACKUP DATABASE` into `/home/halo/backups/engram-graph/auto/` (14 daily and 8
+  weekly kept), and a restore into a scratch copy has been proven (`docs/graph-backup-restore.md`). What is
+  still not covered: the box has one disk, so there is no second copy until `GRAPH_BACKUP_COPY_TO` points at a
+  drive that is not that disk; the two Hermes home directories are not backed up at all; and the real
+  `halo-backup.service` still covers only customer/product state, not this graph.
 - `ProtectSystem=full` without a `ReadWritePaths=` allowlist means the two
   new units get modest, not maximal, sandboxing (see the units' own comments
   for why). This is an intentional trade against the box's own documented

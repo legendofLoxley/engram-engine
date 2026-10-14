@@ -1,7 +1,6 @@
 package app.alfrd.engram.db
 
 import com.arcadedb.Constants
-import com.arcadedb.GlobalConfiguration
 import com.arcadedb.database.Database
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,18 +74,8 @@ class GraphBackupCoordinator(
         val result = try {
             val workDir = createTempDirectory("engram-backup-").toFile()
             try {
-                // ArcadeDB's BACKUP DATABASE requires a bare filename (no path separators) when a
-                // backup directory is configured, and always nests the output under a
-                // <backupDirectory>/<dbName>/ subdirectory it creates itself — confirmed empirically
-                // against arcadedb-engine 25.1.1, not documented behavior. SERVER_BACKUP_DIRECTORY is
-                // a JVM-wide static setting, safe here only because `inFlight` guarantees at most one
-                // backup runs at a time process-wide.
-                GlobalConfiguration.SERVER_BACKUP_DIRECTORY.setValue(workDir.absolutePath)
-                withContext(Dispatchers.IO) {
-                    db.command("sql", "BACKUP DATABASE file://snapshot.zip")
-                }
-                val rawBackupFile = File(File(workDir, db.name), "snapshot.zip")
-                check(rawBackupFile.exists()) { "BACKUP DATABASE reported success but ${rawBackupFile.absolutePath} does not exist" }
+                // The engine's BACKUP DATABASE and its directory quirks live in ArcadeSnapshot, shared with LocalGraphBackup.
+                val rawBackupFile = withContext(Dispatchers.IO) { ArcadeSnapshot.backupInto(db, workDir, "snapshot.zip") }
 
                 val encryptedFile = File(workDir, "snapshot.enc")
                 val checksum = withContext(Dispatchers.IO) {

@@ -1,0 +1,21 @@
+[Unit]
+Description=engram-engine graph backup (asks the running engine to run its own BACKUP DATABASE into a local folder)
+Documentation=file:///home/halo/development/engram-engine/deploy/README.md
+# The engine must be up: this only asks it. A stopped engine is a failed run (and the failure is in the journal),
+# never a start of the engine.
+After=engram-dev.service
+
+[Service]
+Type=oneshot
+User=halo
+# The script is an installed copy (see deploy/README.md "Graph backup"), so the unit does not depend on which branch the checkout is on.
+# Run through bash, as engram-dev.service does: systemd executing a user_home_t script directly is denied under SELinux enforcing.
+ExecStart=/usr/bin/bash /home/halo/.local/share/engram/graph-backup.sh
+TimeoutStartSec=1200
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=engram-graph-backup
