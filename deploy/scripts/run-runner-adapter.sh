@@ -21,7 +21,7 @@ BRIDGE_DIR="/home/halo/development/engram-engine/webui-bridge"
 exec env \
   ENGRAM_BASE_URL=http://127.0.0.1:8082 \
   ENGRAM_DEBUG_TOKEN="$(tr -d '\n' < "$DEV_DIR/.engram-debug-token")" \
-  ENGRAM_SYNTHETIC_USER_ID=owner-jacob \
+  ENGRAM_SYNTHETIC_USER_ID=webui-dev \
   RUNNER_HOST=172.17.0.1 \
   RUNNER_PORT=8091 \
   RUNNER_API_KEY="$(tr -d '\n' < "$DEV_DIR/.runner-api-key")" \
