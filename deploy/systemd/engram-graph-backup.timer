@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily engram-engine graph backup at 05:20 local
+
+[Timer]
+# 05:20 is clear of the vendor timers on this box (updater 03:00, halo-backup 03:30 to 03:45, telemetry Mondays 04:44).
+OnCalendar=*-*-* 05:20:00
+RandomizedDelaySec=0
+# A run missed while the box was off fires once at the next boot. That catch-up run is the one case that can land
+# near a vendor timer; it is a single local file write, with the vendor jobs' own Nice/IO settings untouched.
+Persistent=true
+Unit=engram-graph-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -5,6 +5,7 @@ import app.alfrd.engram.api.configureAuth
 import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
+import app.alfrd.engram.api.configureDebugGraphBackupRoutes
 import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
 import app.alfrd.engram.api.configureDebugNotionCycleRoutes
@@ -22,6 +23,8 @@ import app.alfrd.engram.cognitive.SessionManager
 import app.alfrd.engram.db.DatabaseManager
 import app.alfrd.engram.db.DigitalOceanSpacesRepository
 import app.alfrd.engram.db.GraphBackupCoordinator
+import java.io.File
+import app.alfrd.engram.db.LocalGraphBackup
 import app.alfrd.engram.db.GraphRestore
 import app.alfrd.engram.db.PhantomUserCleanup
 import app.alfrd.engram.db.ResponsePhraseSeed
@@ -97,6 +100,19 @@ fun main() {
         GraphBackupCoordinator(db, repository, encryptor).also { it.start() }
             .also { log.info("GraphBackupCoordinator started") }
     } else null
+
+    // The box's own daily backup: the engine's BACKUP DATABASE into a local folder, no Spaces, no encryption, no network.
+    // Off unless GRAPH_BACKUP_DIR is set; GRAPH_BACKUP_COPY_TO is an optional second folder, unset by default.
+    // A bad setting is logged and leaves it off, never stops the engine.
+    val localBackup = System.getenv(LocalGraphBackup.ENV_DIR)?.trim()?.takeIf { it.isNotEmpty() }?.let { dir ->
+        try {
+            LocalGraphBackup(db, File(dir), System.getenv(LocalGraphBackup.ENV_SECOND)?.trim()?.takeIf { it.isNotEmpty() }?.let(::File))
+                .also { log.info("local graph backup enabled") }
+        } catch (e: IllegalArgumentException) {
+            log.error("local graph backup NOT enabled: {}", e.message)
+            null
+        }
+    }
 
     // Must be registered before the blocking embeddedServer(...).start(wait = true) call below —
     // once that call returns, the JVM shutdown sequence has already begun and
@@ -175,6 +191,7 @@ fun main() {
             configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
             configureDebugHermesActivityRoutes(db, hermesActiveAssignments)
             configureDebugNotionCycleRoutes(notionStartup)
+            configureDebugGraphBackupRoutes(db, localBackup)
             log.info("debug-converse endpoint enabled")
         }
         routing {
