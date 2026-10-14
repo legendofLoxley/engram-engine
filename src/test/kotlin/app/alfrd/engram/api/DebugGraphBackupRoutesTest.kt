@@ -40,12 +40,12 @@ class DebugGraphBackupRoutesTest {
         }
     }
 
-    private fun Application.module(manager: DatabaseManager, backup: LocalGraphBackup?) {
+    private fun Application.module(manager: DatabaseManager, backup: LocalGraphBackup?, isLoopback: (ApplicationCall) -> Boolean = ::connectedFromLoopback) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
         install(Authentication) {
             bearer("debug-token") { authenticate { c -> if (c.token == BACKUP_TEST_TOKEN) UserIdPrincipal("debug") else null } }
         }
-        configureDebugGraphBackupRoutes(manager.getDatabase(), backup)
+        configureDebugGraphBackupRoutes(manager.getDatabase(), backup, isLoopback)
     }
 
     @Test
@@ -105,5 +105,35 @@ class DebugGraphBackupRoutesTest {
             assertEquals("1", after["vertices"]!!.jsonObject["User"]!!.jsonPrimitive.content)
             assertTrue(after["edges"]!!.jsonObject.isNotEmpty())
         }
+    }
+
+    @Test
+    fun `a caller that is not on loopback is refused on both routes, even with the right token`() = withDb { manager, base ->
+        val backup = LocalGraphBackup(manager.getDatabase(), File(base, "backups"), null, File(base, "data/engram-db"))
+        testApplication {
+            application { module(manager, backup, isLoopback = { false }) }
+            val auth = "Bearer $BACKUP_TEST_TOKEN"
+            assertEquals(HttpStatusCode.Forbidden, client.get("/debug/graph-counts") { header(HttpHeaders.Authorization, auth) }.status)
+            assertEquals(HttpStatusCode.Forbidden, client.post("/debug/graph-backup") { header(HttpHeaders.Authorization, auth) }.status)
+            assertFalse(File(base, "backups/auto").exists() && File(base, "backups/auto").list()!!.isNotEmpty(), "a refused caller made no backup")
+            // Still the token first: a non-loopback caller without it is 401, not 403.
+            assertEquals(HttpStatusCode.Unauthorized, client.get("/debug/graph-counts").status)
+        }
+    }
+
+    @Test
+    fun `the default check accepts the test engine's own connection and a forwarded header cannot make a remote caller look local`() = withDb { manager, _ ->
+        testApplication {
+            application { module(manager, null) }
+            // The default check reads the real connection, so a spoofed X-Forwarded-For changes nothing.
+            val r = client.get("/debug/graph-counts") { header(HttpHeaders.Authorization, "Bearer $BACKUP_TEST_TOKEN"); header("X-Forwarded-For", "203.0.113.9") }
+            assertEquals(HttpStatusCode.OK, r.status)
+        }
+    }
+
+    @Test
+    fun `loopback peers are 127_0_0_1, the IPv6 loopback and its mapped form, and nothing else`() {
+        for (ok in listOf("127.0.0.1", "127.1.2.3", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "localhost")) assertTrue(isLoopbackPeer(ok), ok)
+        for (no in listOf("192.168.1.20", "172.17.0.1", "10.0.0.5", "203.0.113.9", "0.0.0.0", "fe80::1", "not an address", "")) assertFalse(isLoopbackPeer(no), no)
     }
 }

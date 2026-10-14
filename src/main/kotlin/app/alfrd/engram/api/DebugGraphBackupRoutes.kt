@@ -8,7 +8,6 @@ import com.arcadedb.schema.VertexType
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.auth.*
-import io.ktor.server.plugins.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
@@ -35,17 +34,22 @@ private const val OWNER_JACOB_EMAIL = "debug+owner-jacob@test.alfrd.internal"
  * the caller must be on the loopback interface, whatever HOST the engine binds. The backup route exists only when a
  * backup folder is configured (`GRAPH_BACKUP_DIR`); the counts route is always there with the other debug routes.
  */
-fun Application.configureDebugGraphBackupRoutes(db: Database, backup: LocalGraphBackup?) {
+fun Application.configureDebugGraphBackupRoutes(
+    db: Database,
+    backup: LocalGraphBackup?,
+    /** Whether the caller is on the loopback interface. Injectable so a test can stand in for a remote caller. */
+    isLoopback: (ApplicationCall) -> Boolean = ::connectedFromLoopback,
+) {
     routing {
         authenticate("debug-token") {
             route("/debug") {
                 get("/graph-counts") {
-                    if (!call.fromLoopback()) return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    if (!isLoopback(call)) return@get call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
                     call.respond(HttpStatusCode.OK, graphCounts(db))
                 }
                 if (backup != null) {
                     post("/graph-backup") {
-                        if (!call.fromLoopback()) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                        if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
                         val result: LocalBackupResult = try {
                             backup.run()
                         } catch (e: Exception) {
@@ -60,8 +64,12 @@ fun Application.configureDebugGraphBackupRoutes(db: Database, backup: LocalGraph
     }
 }
 
-private fun ApplicationCall.fromLoopback(): Boolean =
-    runCatching { InetAddress.getByName(request.origin.remoteAddress).isLoopbackAddress }.getOrDefault(false)
+/** The peer of the actual connection (`local`), never a forwarded header a caller could set. */
+internal fun connectedFromLoopback(call: ApplicationCall): Boolean = isLoopbackPeer(call.request.local.remoteAddress)
+
+internal fun isLoopbackPeer(address: String): Boolean =
+    // InetAddress.getByName("") is the loopback address, so a blank peer must be refused here, not resolved.
+    address.isNotBlank() && runCatching { InetAddress.getByName(address.trim()).isLoopbackAddress }.getOrDefault(false)
 
 internal fun graphCounts(db: Database): GraphCountsResponse {
     val vertices = LinkedHashMap<String, Long>()
