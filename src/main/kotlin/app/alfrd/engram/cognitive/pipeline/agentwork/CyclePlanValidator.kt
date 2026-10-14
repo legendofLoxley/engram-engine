@@ -23,7 +23,16 @@ enum class RejectReason {
 }
 
 /** [detail] names the cause (a type, a link, a verb) and never quotes the task's instructions. */
-data class Rejection(val index: Int, val title: String?, val reason: RejectReason, val detail: String? = null)
+data class Rejection(
+    val index: Int,
+    val title: String?,
+    val reason: RejectReason,
+    val detail: String? = null,
+    /** The type the model proposed, as written. */
+    val type: String? = null,
+    /** Every link the model proposed, as written (handles included), not only the one that failed. */
+    val links: List<String> = emptyList(),
+)
 
 data class ValidatedPlan(val tasks: List<PlannedTask>, val rejected: List<Rejection>)
 
@@ -35,7 +44,8 @@ data class ValidatedPlan(val tasks: List<PlannedTask>, val rejected: List<Reject
  * - it would take the plan past the cycle's task budget (only accepted tasks count);
  * - its type is not one a plan may propose (Orchestrate, Gate and QC are the Director's own steps);
  * - it has no title, type or instructions, or a title or instructions beyond the length limits;
- * - it has a link that is not an http(s) URL, or not one of the [AllowedLinks] the Director supplied;
+ * - it has a link that is not an http(s) URL, or not in the goal's [AllowedScope] (the pages and databases its
+ *   Scope mentions, and the rows of a mentioned database; an external URL is never in scope);
  * - it asks to lock or change an answer standard, or to delete or overwrite a row ([ForbiddenActions]);
  * - it repeats the title of an earlier accepted task.
  *
@@ -45,15 +55,24 @@ object CyclePlanValidator {
     const val MAX_TITLE_CHARS = 200
     const val MAX_INSTRUCTIONS_CHARS = 1800
     const val MAX_LINKS_PER_TASK = 8
+    const val MAX_LINKS_RECORDED = 25
 
-    fun validate(proposed: List<ProposedTask>, budget: Int, allowed: AllowedLinks): ValidatedPlan {
+    /**
+     * [handles] lets a link be written as a short handle (`R3`); it is mapped back to the real URL before any check,
+     * so a handle is held to exactly the same rules as the URL it names, and an unknown one is rejected as an
+     * unknown link is.
+     */
+    fun validate(proposed: List<ProposedTask>, budget: Int, allowed: AllowedScope, handles: Handles = Handles.NONE): ValidatedPlan {
         val accepted = ArrayList<PlannedTask>()
         val rejected = ArrayList<Rejection>()
         val seenTitles = HashSet<String>()
 
         for ((index, task) in proposed.withIndex()) {
             val title = task.title?.trim().orEmpty()
-            fun reject(reason: RejectReason, detail: String? = null) { rejected += Rejection(index, title.ifEmpty { null }, reason, detail) }
+            val asWritten = task.targetLinks.map { it.trim().take(200) }.filter { it.isNotEmpty() }.take(MAX_LINKS_RECORDED)
+            fun reject(reason: RejectReason, detail: String? = null) {
+                rejected += Rejection(index, title.ifEmpty { null }, reason, detail, task.type?.trim()?.take(40), asWritten)
+            }
 
             if (accepted.size >= budget) { reject(RejectReason.OVER_BUDGET, "budget is $budget"); continue }
 
@@ -66,9 +85,9 @@ object CyclePlanValidator {
             if (title.length > MAX_TITLE_CHARS) { reject(RejectReason.TITLE_TOO_LONG); continue }
             if (instructions.length > MAX_INSTRUCTIONS_CHARS) { reject(RejectReason.INSTRUCTIONS_TOO_LONG); continue }
 
-            val links = task.targetLinks.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            val links = task.targetLinks.map { handles.resolve(it.trim()) }.filter { it.isNotEmpty() }.distinct()
             if (links.size > MAX_LINKS_PER_TASK) { reject(RejectReason.TOO_MANY_LINKS, "more than $MAX_LINKS_PER_TASK"); continue }
-            val badLink = links.firstOrNull { !isHttpUrl(it) }
+            val badLink = links.firstOrNull { !isHttpUrl(it) } // top-level helper in ScopeContext.kt
             if (badLink != null) { reject(RejectReason.LINK_NOT_A_URL, badLink.take(120)); continue }
             val outside = links.firstOrNull { !allowed.allows(it) }
             if (outside != null) { reject(RejectReason.LINK_NOT_ALLOWED, outside.take(200)); continue }
@@ -83,7 +102,6 @@ object CyclePlanValidator {
         return ValidatedPlan(accepted, rejected)
     }
 
-    private fun isHttpUrl(url: String): Boolean = AllowedLinks.canonicalExternal(url) != null
 }
 
 /**

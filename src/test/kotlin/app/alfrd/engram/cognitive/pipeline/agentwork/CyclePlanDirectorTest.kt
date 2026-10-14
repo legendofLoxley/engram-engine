@@ -4,6 +4,8 @@ import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.LlmResponse
 import app.alfrd.engram.cognitive.providers.ToolCall
+import app.alfrd.engram.notion.MentionKind
+import app.alfrd.engram.notion.NotionMention
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
@@ -44,26 +46,25 @@ class ScriptedLlm(private val respond: (LlmRequest) -> LlmResponse) : LlmClient 
 
 class CyclePlanDirectorTest {
 
-    private val memoRow = ContextRow("sources", "aaaaaaaa-aaaa-4aaa-8aaa-000000000001", "https://www.notion.so/aaaaaaaaaaaa4aaa8aaa000000000001", "Oct 6 Board memo", listOf("Type: PPS Document", "URL: https://example.org/memo.pdf"), "https://example.org/memo.pdf")
+    private val memoRow = ContextRow("sources", "aaaaaaaa-aaaa-4aaa-8aaa-000000000001", "https://www.notion.so/aaaaaaaaaaaa4aaa8aaa000000000001", "Oct 6 Board memo", listOf("Type: PPS Document", "URL: https://example.org/memo.pdf"))
 
-    private fun goal() = Goal(
-        "g", "PPS: read before lock", "GOAL-1", GoalType.WORK, GoalStatus.ACTIVE,
-        intent = "Read the primary documents before answer standards are locked.",
-        scope = "The 10 listed primary documents and the claims they bear on. No answer standards or locking.",
-        metric = "How many of the 10 are read in full.", doneCriteria = "All 10 done.",
-        targetLinksText = "PPS Sources: Sources ; How this ledger works", targetLinks = emptyList(),
-        cycleBudget = 10, replanCap = 3, deadline = "2026-10-24", targetSpace = "PPS Evidence Ledger",
+    private val sourcesMention = NotionMention(MentionKind.DATABASE, "6e9ea25d-e733-4d89-9d7a-52783509ff54", "PPS Sources")
+
+    private fun goal(scope: GoalScope = GoalScope(listOf(sourcesMention), 0, "", emptyList())) = Goal(
+        "g", "Read the primary documents", "GOAL-1", GoalStatus.ACTIVE,
+        doneWhen = "Every listed document has a finding.",
+        scope = scope, serves = emptyList(), cycleBudget = 10, replanCap = 3, deadline = "2026-10-24",
     )
 
     private fun cycle() = Cycle("c", "Cycle A", "CYCLE-1", CycleStatus.RUNNING, "g", 1, 6, null, "arx-1", null, null, "", Instant.EPOCH, Instant.EPOCH)
 
-    private fun context(rows: List<ContextRow> = listOf(memoRow), outcomes: List<LinkOutcome> = emptyList()) =
-        LinkedContext(rows, outcomes, AllowedLinks(rows.map { it.pageId }.toSet(), emptySet()), truncated = false)
+    private fun context(rows: List<ContextRow> = listOf(memoRow), outcomes: List<ScopeOutcome> = listOf(ScopeOutcome.TableListed(sourcesMention, "sources", 1, false))) =
+        ScopeContext(rows, outcomes, AllowedScope(rows.map { it.pageId }.toSet(), emptySet(), emptySet()), truncated = false, tablesByDatabaseId = emptyMap())
 
     private fun input(
         escalations: List<EscalationNote> = emptyList(),
         previousSummary: String? = null,
-        context: LinkedContext = context(),
+        context: ScopeContext = context(),
     ) = PlanningInput(goal(), cycle(), taskBudget = 6, escalations = escalations, previousCycleLabel = "CYCLE-0", previousSummary = previousSummary, context = context)
 
     private fun propose(llm: LlmClient?, input: PlanningInput = input()) = runBlocking { CyclePlanDirector(llm).propose(input) }
@@ -83,9 +84,10 @@ class CyclePlanDirectorTest {
         assertEquals(CyclePlanDirector.TIMEOUT_MS, request.timeoutMs)
         assertTrue(request.systemPrompt!!.contains("Never propose a task that locks"))
         assertTrue(request.systemPrompt!!.contains("Do not use Orchestrate, Gate or QC"))
-        assertTrue(request.prompt.contains("PPS: read before lock"))
+        assertTrue(request.systemPrompt!!.contains("Tasks only read and report"))
+        assertTrue(request.prompt.contains("Read the primary documents"))
         assertTrue(request.prompt.contains("TASK BUDGET: 6"))
-        assertTrue(request.prompt.contains(memoRow.pageUrl))
+        assertTrue(request.prompt.contains("- R1  [sources] Oct 6 Board memo") && !request.prompt.contains(memoRow.pageUrl), "rows are listed by handle, not by id")
 
         assertNull(proposal.rejectedReason)
         assertTrue(proposal.modelCalled)
@@ -174,29 +176,20 @@ class CyclePlanDirectorTest {
     }
 
     @Test
-    fun `a table and an outside link the goal names are shown to the model, since the validator allows them`() {
-        val table = "https://www.notion.so/6e9ea25de7334d899d7a52783509ff54"
-        val outside = "https://example.org/the-whole-ledger.pdf"
-        val prompt = PlanPromptBuilder.build(
-            input(
-                context = context(
-                    rows = listOf(memoRow),
-                    outcomes = listOf(LinkOutcome.TableListed(table, "sources", 1, truncated = false), LinkOutcome.External(outside)),
-                ),
-            ),
-        )
-        val section = prompt.substringAfter("LINKS YOU MAY USE").substringBefore("LINKS ON THE GOAL")
-        assertTrue(section.contains(table) && section.contains("table: sources"), section)
-        assertTrue(section.contains(outside) && section.contains("outside link"), section)
-        assertTrue(section.contains(memoRow.pageUrl), "rows are still listed: $section")
+    fun `a database the goal mentions is shown to the model with the link to copy, since the validator allows it`() {
+        val prompt = PlanPromptBuilder.build(input(context = context(rows = listOf(memoRow))))
+        val scope = prompt.substringAfter("SCOPE:").substringBefore("LINKS YOU MAY USE")
+        assertTrue(scope.contains("- D1  [database PPS Sources") && scope.contains("table sources"), scope)
+        assertFalse(prompt.contains(notionPageUrl(sourcesMention.id)), "the database is named by handle, not by id")
+        val links = prompt.substringAfter("LINKS YOU MAY USE")
+        assertTrue(links.contains("- R1  [sources]"), "rows are still listed: $links")
     }
 
     @Test
-    fun `a goal whose only link is an outside url does not say it links to nothing`() {
-        val outside = "https://example.org/only-link.pdf"
-        val prompt = PlanPromptBuilder.build(input(context = context(rows = emptyList(), outcomes = listOf(LinkOutcome.External(outside)))))
-        assertTrue(prompt.contains(outside))
-        assertFalse(prompt.contains("this goal links to no readable page"), prompt)
+    fun `a goal whose only mention is a database with no rows does not say it links to nothing`() {
+        val prompt = PlanPromptBuilder.build(input(context = context(rows = emptyList(), outcomes = listOf(ScopeOutcome.TableListed(sourcesMention, "sources", 0, false)))))
+        assertTrue(prompt.contains("- D1  [database"))
+        assertFalse(prompt.contains("tasks have no links"), prompt)
     }
 
     @Test
@@ -217,44 +210,55 @@ class CyclePlanDirectorTest {
     // ── The prompt ───────────────────────────────────────────────────────────
 
     @Test
-    fun `the prompt carries what Jacob resolved and the last summary, and lists the allowed links with their facts`() {
+    fun `the prompt carries what Jacob resolved, the last summary, Done when and the allowed links with their facts`() {
         val prompt = PlanPromptBuilder.build(
             input(
                 escalations = listOf(
                     EscalationNote("Error found", "Resolved", "Which A/B box is right?", "Box B. Use it."),
                     EscalationNote("Review digest", "Open", "Please review", ""),
                 ),
-                previousSummary = "Dry run: 4 planned tasks written; nothing was executed.",
+                previousSummary = "Executed 4 tasks: 4 done, 0 blocked, 0 failed.",
             ),
         )
         assertTrue(prompt.contains("Error found [Resolved]: Which A/B box is right? => Box B. Use it."))
         assertFalse(prompt.contains("Please review"), "an escalation with no resolution has nothing for the planner")
-        assertTrue(prompt.contains("LAST CYCLE (CYCLE-0) SUMMARY:"))
-        assertTrue(prompt.contains("- ${memoRow.pageUrl}  [sources] Oct 6 Board memo  | Type: PPS Document; URL: https://example.org/memo.pdf  | external: https://example.org/memo.pdf"))
-        assertTrue(prompt.contains("SCOPE (what this goal may touch; stay inside it): The 10 listed primary documents"))
+        assertTrue(prompt.contains("LAST CYCLE SUMMARY:"))
+        assertTrue(prompt.contains("- R1  [sources] Oct 6 Board memo  | Type: PPS Document; URL: https://example.org/memo.pdf"))
+        assertTrue(prompt.contains("DONE WHEN (a check anyone could apply; plan so it can be checked from your tasks' results): Every listed document has a finding."))
+        assertTrue(prompt.contains("- D1  [database PPS Sources, table sources: 1 row(s) listed below]"))
+        assertFalse(prompt.contains("external:"), "no external URL is offered: none can be in scope")
     }
 
     @Test
-    fun `links that could not be used are listed as such, so the model does not use them`() {
-        val skipped = LinkOutcome.Skipped("https://www.notion.so/3f6d0721d4e4814d9f91f290a1eea863", SkipReason.NOT_A_CONFIGURED_ROW)
-        val prompt = PlanPromptBuilder.build(input(context = context(outcomes = listOf(skipped))))
+    fun `the prompt names only the converged goal fields`() {
+        val prompt = PlanPromptBuilder.build(input())
+        for (retired in listOf("INTENT", "METRIC", "DONE CRITERIA", "TARGET LINKS", "Target Space", "Goal Type", "Metric Locked")) {
+            assertFalse(prompt.contains(retired), "retired field '$retired' appears in the planner's prompt")
+        }
+    }
+
+    @Test
+    fun `mentions that could not be used are listed as such, so the model does not use them`() {
+        val skippedMention = NotionMention(MentionKind.PAGE, "3f6d0721-d4e4-814d-9f91-f290a1eea863", "How this ledger works")
+        val skipped = ScopeOutcome.Skipped(skippedMention, SkipReason.NOT_READABLE)
+        val prompt = PlanPromptBuilder.build(input(context = context(outcomes = listOf(ScopeOutcome.TableListed(sourcesMention, "sources", 1, false), skipped))))
         assertTrue(prompt.contains("COULD NOT BE USED"))
-        assertTrue(prompt.contains("${skipped.link}: not a configured row"))
+        assertTrue(prompt.contains("How this ledger works: not readable"))
     }
 
     @Test
-    fun `with no readable links the prompt says so`() {
-        val prompt = PlanPromptBuilder.build(input(context = context(rows = emptyList())))
-        assertTrue(prompt.contains("none: this goal links to no readable page"))
+    fun `with nothing readable the prompt says so`() {
+        val prompt = PlanPromptBuilder.build(input(context = context(rows = emptyList(), outcomes = emptyList())))
+        assertTrue(prompt.contains("nothing in this goal's scope could be read"))
     }
 
     @Test
     fun `a long list of rows is cut to fit and says how many were left out`() {
-        val rows = (1..400).map { i -> ContextRow("sources", "bbbbbbbb-bbbb-4bbb-8bbb-%012d".format(i), "https://www.notion.so/bbbbbbbbbbbb4bbb8bbb%012d".format(i), "Source number $i " + "x".repeat(80), listOf("Notes: " + "y".repeat(200)), null) }
+        val rows = (1..400).map { i -> ContextRow("sources", "bbbbbbbb-bbbb-4bbb-8bbb-%012d".format(i), "https://www.notion.so/bbbbbbbbbbbb4bbb8bbb%012d".format(i), "Source number $i " + "x".repeat(80), listOf("Notes: " + "y".repeat(200))) }
         val prompt = PlanPromptBuilder.build(input(context = context(rows = rows)))
         assertTrue(prompt.length <= PlanPromptBuilder.MAX_CHARS, "prompt is ${prompt.length} characters")
         assertTrue(Regex("""\(\d+ more rows not shown: out of room\)""").containsMatchIn(prompt))
-        assertTrue(prompt.endsWith("Propose the dry-run plan now."))
+        assertTrue(prompt.endsWith("Propose the plan now."))
     }
 
     @Test

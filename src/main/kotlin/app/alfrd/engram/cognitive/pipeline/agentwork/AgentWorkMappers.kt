@@ -1,8 +1,10 @@
 package app.alfrd.engram.cognitive.pipeline.agentwork
 
+import app.alfrd.engram.notion.NotionMention
 import app.alfrd.engram.notion.NotionPage
 import app.alfrd.engram.notion.NotionValue
 import app.alfrd.engram.notion.fitTitle
+import app.alfrd.engram.notion.normalizeNotionId
 import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -12,27 +14,66 @@ import java.time.format.DateTimeParseException
 
 // ── Records ──────────────────────────────────────────────────────────────────
 
+/**
+ * What a goal's Scope says, read from its @-mentions and from nothing else. A page or database mention is
+ * the only thing that puts something in scope; the words around the mentions are prose, which is ignored
+ * and reported ([proseChars], [proseExcerpt]); a hyperlink or URL that is not a mention is ignored and
+ * reported too ([ignoredLinks]).
+ */
+data class GoalScope(
+    val mentions: List<NotionMention>,
+    /** Letters and digits left in the Scope text once the mentions' own titles are taken out. */
+    val proseChars: Int,
+    /** The leftover words, collapsed to one line and shortened, for the trace. */
+    val proseExcerpt: String,
+    val ignoredLinks: List<String>,
+) {
+    val hasMentions: Boolean get() = mentions.isNotEmpty()
+
+    companion object {
+        val EMPTY = GoalScope(emptyList(), 0, "", emptyList())
+        private const val EXCERPT_CHARS = 200
+
+        /** Scope as the Director reads it from the property's rich text. A missing property reads as empty scope. */
+        fun fromRichText(value: NotionValue.RichText?): GoalScope {
+            if (value == null) return EMPTY
+            val mentions = value.mentions.filter { normalizeNotionId(it.id) != null }.distinctBy { it.id }
+            val mentionIds = mentions.map { it.id }.toSet()
+
+            // The text of each mention is its title, which is part of the value's text. Take each title out once, in order.
+            var remaining = value.text
+            for (mention in value.mentions) {
+                if (mention.title.isEmpty()) continue
+                val at = remaining.indexOf(mention.title)
+                if (at >= 0) remaining = remaining.removeRange(at, at + mention.title.length)
+            }
+            val prose = remaining.replace(Regex("\\s+"), " ").trim()
+            val proseChars = prose.count { it.isLetterOrDigit() }
+            val excerpt = if (proseChars == 0) "" else if (prose.length <= EXCERPT_CHARS) prose else prose.take(EXCERPT_CHARS - 1) + "…"
+
+            // A link that points at one of the mentioned pages is the mention's own href, not a separate link.
+            val ignored = (value.links + urlsInText(value.text)).distinct().filter { normalizeNotionId(it) !in mentionIds }
+            return GoalScope(mentions, proseChars, excerpt, ignored)
+        }
+    }
+}
+
 /** A goal, as the Director reads it. Goals are read-only here: nothing in this file builds a write for one. */
 data class Goal(
     val pageId: String,
+    /** The one sentence Jacob wrote. */
     val title: String,
     /** `GOAL-1`. */
     val displayId: String?,
-    val type: GoalType?,
     val status: GoalStatus?,
-    val intent: String,
-    /** Prose. Not a list of URLs, so it cannot be matched against a link; see [PlanningContext]. */
-    val scope: String,
-    val metric: String,
-    val doneCriteria: String,
-    /** The `Target Links` text as people see it. A page mention shows only its title here. */
-    val targetLinksText: String,
-    /** Every URL in `Target Links`: the hrefs of mentions and hyperlinks, and URLs typed as text. */
-    val targetLinks: List<String>,
+    /** A check anyone could apply. */
+    val doneWhen: String,
+    val scope: GoalScope,
+    /** The Containers in alfrd memory this goal is for, as page ids. Read and recorded; not dereferenced, because Scope does not mention them. */
+    val serves: List<String>,
     val cycleBudget: Int?,
     val replanCap: Int?,
     val deadline: String?,
-    val targetSpace: String?,
 )
 
 data class Cycle(
@@ -64,9 +105,15 @@ data class AgentTask(
     val planVersion: Int?,
     val instructions: String,
     val targetLinksText: String,
+    /** Every URL on the row's Target Links: what the task would read. Read from the row, because a person can edit it in Notion. */
+    val targetLinks: List<String>,
+    val result: String,
     val opKey: String,
     val cyclePageIds: List<String>,
-)
+) {
+    /** Done, Blocked, Failed and Superseded are final: a restart never runs such a task again. */
+    val settled: Boolean get() = status == TaskStatus.DONE || status == TaskStatus.BLOCKED || status == TaskStatus.FAILED || status == TaskStatus.SUPERSEDED
+}
 
 data class Escalation(
     val pageId: String,
@@ -117,18 +164,13 @@ object GoalMapper {
             pageId = page.id,
             title = page.title(GOAL),
             displayId = page.uniqueId(GOAL_ID)?.display,
-            type = GoalType.fromLabel(page.select(TYPE)),
             status = GoalStatus.fromLabel(page.select(STATUS)),
-            intent = page.text(INTENT),
-            scope = page.text(SCOPE),
-            metric = page.text(METRIC),
-            doneCriteria = page.text(DONE_CRITERIA),
-            targetLinksText = page.text(TARGET_LINKS),
-            targetLinks = page.allLinks(TARGET_LINKS),
+            doneWhen = page.text(DONE_WHEN),
+            scope = GoalScope.fromRichText(page.properties[SCOPE] as? NotionValue.RichText),
+            serves = page.relation(SERVES),
             cycleBudget = page.int(CYCLE_BUDGET),
             replanCap = page.int(REPLAN_CAP),
             deadline = page.date(DEADLINE)?.start,
-            targetSpace = page.select(TARGET_SPACE),
         )
     }
 }
@@ -176,16 +218,25 @@ object CycleMapper {
     fun progress(summary: String): Map<String, NotionValue> =
         mapOf(AgentWorkSchema.Cycles.SUMMARY to NotionValue.RichText(summary))
 
-    /** The cycle is over: [status] is Done or Failed, the lease is released, and nothing was executed (`Tasks Done` is 0). */
-    fun finish(status: CycleStatus, now: Instant, summary: String): Map<String, NotionValue> = with(AgentWorkSchema.Cycles) {
+    /** How many of the cycle's tasks are Done. Set from a count, never incremented blind, so a repeat after a restart cannot overcount. */
+    fun tasksDone(count: Int): Map<String, NotionValue> =
+        mapOf(AgentWorkSchema.Cycles.TASKS_DONE to NotionValue.NumberValue(count.toDouble()))
+
+    /**
+     * The cycle is over: [status] is Done or Failed, the lease is released, [tasksDone] says how many tasks
+     * finished, and [goalFeedback] (when there is any) is QC's note on the goal. The goal's own Status is
+     * never touched: goals are read-only here.
+     */
+    fun finish(status: CycleStatus, now: Instant, summary: String, tasksDone: Int, goalFeedback: String? = null): Map<String, NotionValue> = with(AgentWorkSchema.Cycles) {
         require(status == CycleStatus.DONE || status == CycleStatus.FAILED) { "a cycle finishes as Done or Failed" }
-        mapOf(
-            STATUS to NotionValue.Select(status.label),
-            FINISHED to dateTimeValue(now),
-            TASKS_DONE to NotionValue.NumberValue(0.0),
-            SUMMARY to NotionValue.RichText(summary),
-            LEASE_UNTIL to NotionValue.DateValue(null),
-        )
+        buildMap {
+            put(STATUS, NotionValue.Select(status.label))
+            put(FINISHED, dateTimeValue(now))
+            put(TASKS_DONE, NotionValue.NumberValue(tasksDone.toDouble()))
+            put(SUMMARY, NotionValue.RichText(summary))
+            goalFeedback?.let { put(GOAL_FEEDBACK, NotionValue.RichText(it)) }
+            put(LEASE_UNTIL, NotionValue.DateValue(null))
+        }
     }
 }
 
@@ -201,6 +252,8 @@ object AgentTaskMapper {
             planVersion = page.int(PLAN_VERSION),
             instructions = page.text(INSTRUCTIONS),
             targetLinksText = page.text(TARGET_LINKS),
+            targetLinks = page.allLinks(TARGET_LINKS),
+            result = page.text(RESULT),
             opKey = page.text(AgentWorkTables.OP_KEY_PROPERTY),
             cyclePageIds = page.relation(CYCLE),
         )
@@ -223,6 +276,21 @@ object AgentTaskMapper {
             INSTRUCTIONS to NotionValue.RichText(task.instructions),
             TARGET_LINKS to NotionValue.RichText(task.targetLinks.joinToString("\n")),
             CYCLE to NotionValue.Relation(listOf(cycle.pageId)),
+        )
+    }
+
+    /** The task starts: Running, and when. The Result is empty until it finishes. */
+    fun start(now: Instant): Map<String, NotionValue> = with(AgentWorkSchema.Tasks) {
+        mapOf(STATUS to NotionValue.Select(TaskStatus.RUNNING.label), STARTED to dateTimeValue(now))
+    }
+
+    /** One write that settles the task: its final Status, its Result, and when it finished. Never two writes, so a crash cannot leave a Done task without its Result. */
+    fun settle(status: TaskStatus, result: String, now: Instant): Map<String, NotionValue> = with(AgentWorkSchema.Tasks) {
+        require(status == TaskStatus.DONE || status == TaskStatus.BLOCKED || status == TaskStatus.FAILED) { "a task settles as Done, Blocked or Failed" }
+        mapOf(
+            STATUS to NotionValue.Select(status.label),
+            RESULT to NotionValue.RichText(result),
+            FINISHED to dateTimeValue(now),
         )
     }
 }

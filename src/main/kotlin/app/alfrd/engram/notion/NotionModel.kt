@@ -33,8 +33,13 @@ sealed interface NotionValue {
      * [links] are the URLs attached to the text (a hyperlink, or the target of a page mention),
      * in order and without repeats. They are read-only information: writing a value writes [text].
      * A mention's text is only its title, so the URL of a mentioned page is available here and nowhere else.
+     *
+     * [mentions] are the page and database *mentions* in the text, in order: the @-mentions, which are a
+     * different thing from a hyperlink or a URL typed into the text. Only a mention says "this page" in a
+     * way that cannot be a typo or prose, which is why a goal's Scope is read from them and from nothing else.
+     * Read-only information, like [links].
      */
-    data class RichText(val text: String, val links: List<String> = emptyList()) : NotionValue
+    data class RichText(val text: String, val links: List<String> = emptyList(), val mentions: List<NotionMention> = emptyList()) : NotionValue
 
     /** [value] null is an empty number; written, it clears the property. */
     data class NumberValue(val value: Double?) : NotionValue
@@ -103,6 +108,16 @@ sealed interface NotionValue {
         override val isReadOnly: Boolean get() = true
     }
 }
+
+/** What a mention points at: a page, or a database (which stands for its rows too). */
+enum class MentionKind { PAGE, DATABASE }
+
+/**
+ * One @-mention of a page or a database inside a rich-text value. [id] is the normalized dashed id Notion
+ * gave the mention, [title] is the text the mention shows (its `plain_text`), which is also part of the
+ * enclosing value's text.
+ */
+data class NotionMention(val kind: MentionKind, val id: String, val title: String = "")
 
 /** The name of a value's kind for messages: `Formula`, `UniqueId` and so on. Never includes the value. */
 val NotionValue.kindName: String get() = this::class.simpleName ?: "value"
@@ -176,15 +191,31 @@ sealed interface NotionSort {
 data class QueryPage(val pages: List<NotionPage>, val nextCursor: String?)
 
 /** One run of text inside a block. Plain text is the verbatim ledger; [bold] marks the speaker label that separates ledger entries. */
-data class RichSegment(val text: String, val bold: Boolean = false)
+data class RichSegment(val text: String, val bold: Boolean = false, val link: String? = null)
 
 /** A block this package can write. The ledger is paragraphs only. */
 sealed interface NotionBlock {
     data class Paragraph(val segments: List<RichSegment>) : NotionBlock
+
+    /** A heading of [level] 2 or 3; the text is at most one segment, so at most [NotionApi.MAX_TEXT_CHARS] characters. */
+    data class Heading(val level: Int, val text: String) : NotionBlock {
+        init { require(level in 2..3) { "heading level must be 2 or 3" } }
+    }
 }
 
-/** A block as read back. [segments] is empty for any block type that carries no text. */
-data class NotionBlockRead(val id: String, val type: String, val segments: List<RichSegment>, val createdTime: Instant) {
+/**
+ * A block as read back. [segments] is empty for any block type that carries no text.
+ * [hasChildren] is Notion's own flag: a toggle, a list item or a callout with something nested inside.
+ * [checked] is set for a to-do block and null for every other type.
+ */
+data class NotionBlockRead(
+    val id: String,
+    val type: String,
+    val segments: List<RichSegment>,
+    val createdTime: Instant,
+    val hasChildren: Boolean = false,
+    val checked: Boolean? = null,
+) {
     val plainText: String get() = segments.joinToString("") { it.text }
 }
 

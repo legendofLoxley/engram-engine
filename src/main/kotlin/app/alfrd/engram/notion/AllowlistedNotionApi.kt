@@ -22,6 +22,10 @@ import java.util.concurrent.ConcurrentHashMap
  *   changed afterwards.
  * - Readable pages (the persona page) can be retrieved and listed and are never writable: they are
  *   never known pages.
+ * - The children of a block (a toggle's contents, a nested list) can be listed, but only a block this
+ *   guard itself returned from a permitted list call: a block id arriving from anywhere else is
+ *   refused, so reading one level down never opens a way to an arbitrary block. Blocks are never
+ *   writable here except by appending to a known page of a table configured for it.
  * - A page fetched by id is checked against the set's tables *after* the fetch, and nothing from it is
  *   returned if it belongs elsewhere.
  *
@@ -43,6 +47,9 @@ class AllowlistedNotionApi(
 
     /** page id -> the data source it was seen in. */
     private val knownPages = ConcurrentHashMap<String, String>()
+
+    /** Blocks that have children and were returned by a list call the guard let through. Only these can be listed in turn. */
+    private val knownBlocks: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun isKnownPage(pageId: String): Boolean = normalizeNotionId(pageId)?.let(knownPages::containsKey) == true
 
@@ -88,10 +95,12 @@ class AllowlistedNotionApi(
 
     override suspend fun listBlocks(parentBlockId: String, startCursor: String?, pageSize: Int): BlockPage {
         val id = normalizeNotionId(parentBlockId) ?: throw NotionGuardViolation("list refused: not a Notion id")
-        if (id !in readablePages && !knownPages.containsKey(id)) {
-            throw NotionGuardViolation("list refused: page $id is not a readable page or a page from a configured table")
+        if (id !in readablePages && !knownPages.containsKey(id) && id !in knownBlocks) {
+            throw NotionGuardViolation("list refused: $id is not a readable page, a page from a configured table, or a block listed under one")
         }
-        return delegate.listBlocks(id, startCursor, pageSize)
+        val result = delegate.listBlocks(id, startCursor, pageSize)
+        result.blocks.filter { it.hasChildren && it.id.isNotEmpty() }.forEach { knownBlocks += it.id }
+        return result
     }
 
     private fun requireConfiguredTable(raw: String, operation: String): NotionTable {

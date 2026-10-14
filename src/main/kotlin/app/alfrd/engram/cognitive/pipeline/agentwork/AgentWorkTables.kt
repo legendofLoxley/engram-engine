@@ -7,11 +7,16 @@ import app.alfrd.engram.notion.TableAccess
 import java.io.File
 
 /**
- * The eight tables of the Agent Work + PPS Evidence Ledger table set, by the names the committed
- * configuration (`deploy/config/notion-agent-worker.json`) gives them.
+ * The tables of the Agent Work table set, by the names the committed configuration
+ * (`deploy/config/notion-agent-worker.json`) gives them.
  *
- * **Agent Work** is the Director's own run log. **PPS** is the ledger where the work itself lands
- * in later increments; in this one it is only read.
+ * - **Agent Work** is the Director's own run log: Goals and Escalations are read; Cycles and Agent Tasks
+ *   are the only tables it writes.
+ * - **PPS Evidence Ledger** (Questions, Findings, Sources): read-only. Findings was Claims until the ledger
+ *   was redesigned on October 12 (same data source id). Evidence is being archived and is not in the set.
+ * - **alfrd memory** is Jacob's real teamspace: Containers, Items, Entities, Connections, Sessions,
+ *   Sources and Template Changes, all read-only, plus the Persona page as the one allowlisted plain page.
+ *   Memory tables carry a `memory-` prefix because PPS already has a table called `sources`.
  */
 object AgentWorkTables {
     const val GOALS = "goals"
@@ -20,23 +25,48 @@ object AgentWorkTables {
     const val ESCALATIONS = "escalations"
 
     const val QUESTIONS = "questions"
-    const val CLAIMS = "claims"
+    const val FINDINGS = "findings"
     const val SOURCES = "sources"
-    const val EVIDENCE = "evidence"
 
-    val PPS: List<String> = listOf(QUESTIONS, CLAIMS, SOURCES, EVIDENCE)
-    val ALL: Set<String> = setOf(GOALS, CYCLES, AGENT_TASKS, ESCALATIONS) + PPS
+    const val MEMORY_CONTAINERS = "memory-containers"
+    const val MEMORY_ITEMS = "memory-items"
+    const val MEMORY_ENTITIES = "memory-entities"
+    const val MEMORY_CONNECTIONS = "memory-connections"
+    const val MEMORY_SESSIONS = "memory-sessions"
+    const val MEMORY_SOURCES = "memory-sources"
+    const val MEMORY_TEMPLATE_CHANGES = "memory-template-changes"
+
+    /** The one plain page the client may read (and never write). */
+    const val PERSONA_PAGE = "persona"
+
+    val AGENT_WORK: List<String> = listOf(GOALS, CYCLES, AGENT_TASKS, ESCALATIONS)
+    val PPS: List<String> = listOf(QUESTIONS, FINDINGS, SOURCES)
+    val MEMORY: List<String> = listOf(
+        MEMORY_CONTAINERS, MEMORY_ITEMS, MEMORY_ENTITIES, MEMORY_CONNECTIONS, MEMORY_SESSIONS, MEMORY_SOURCES, MEMORY_TEMPLATE_CHANGES,
+    )
+    val ALL: Set<String> = (AGENT_WORK + PPS + MEMORY).toSet()
+
+    /** The only tables this channel may write. Everything else, memory and PPS included, is read-only. */
+    val WRITABLE: Set<String> = setOf(CYCLES, AGENT_TASKS)
+
+    val READABLE_PAGES: Set<String> = setOf(PERSONA_PAGE)
+
+    /**
+     * Other plain pages the Director may read (never write) are listed in the same `readablePages` allowlist, by id,
+     * under a name that starts with this prefix. The Persona page stays required; nothing else can be listed.
+     */
+    const val READING_PAGE_PREFIX = "reading-"
 
     /** The text property on Agent Tasks that makes a create idempotent: `cycle:<Cycle ID>:v<Plan Version>:o<Order>`. */
     const val OP_KEY_PROPERTY = "Op key"
 
     /**
-     * This increment's promise, enforced where the guard is configured and not in planner code:
-     * the Director reads Goals and Escalations, reads PPS, and writes only Cycles and Agent Tasks.
-     * A configuration that grants more is refused at startup, so loosening it is a deliberate edit
-     * to this check in a later increment and not a one-line change to a JSON file.
+     * This increment's promise, enforced where the guard is configured and not in planner code: the
+     * Director reads every table, and writes only Cycles and Agent Tasks. A configuration that grants more
+     * (a writable memory or PPS table, a page-body append, an extra readable page) is refused at startup,
+     * so loosening it is a deliberate edit to this check and not a one-line change to a JSON file.
      */
-    fun requireDryRunShape(set: NotionTableSet) {
+    fun requireShape(set: NotionTableSet) {
         val names = set.tables.map { it.name }.toSet()
         val missing = ALL - names
         if (missing.isNotEmpty()) throw NotionConfigException("table set '${set.name}' is missing table(s): ${missing.sorted().joinToString(", ")}")
@@ -44,7 +74,7 @@ object AgentWorkTables {
         if (extra.isNotEmpty()) throw NotionConfigException("table set '${set.name}' has table(s) this increment does not use: ${extra.sorted().joinToString(", ")}")
 
         val writable = set.tables.filter { it.access == TableAccess.READ_WRITE }.map { it.name }.toSet()
-        if (writable != setOf(CYCLES, AGENT_TASKS)) {
+        if (writable != WRITABLE) {
             throw NotionConfigException(
                 "table set '${set.name}' must make exactly ${CYCLES} and ${AGENT_TASKS} read-write in this increment; " +
                     "read-write now: ${writable.sorted().joinToString(", ").ifEmpty { "none" }}",
@@ -53,11 +83,18 @@ object AgentWorkTables {
         if (set.table(AGENT_TASKS).idempotencyKeyProperty != OP_KEY_PROPERTY) {
             throw NotionConfigException("table '$AGENT_TASKS' must use '$OP_KEY_PROPERTY' as its idempotency key")
         }
-        if (set.table(CYCLES).pageBodyAppend || set.table(AGENT_TASKS).pageBodyAppend) {
-            throw NotionConfigException("no table may accept page-body appends in this increment")
+        // Only a Cycle's own page body may be appended to (the Director's report of that cycle). No other table may.
+        set.tables.firstOrNull { it.pageBodyAppend && it.name != CYCLES }?.let {
+            throw NotionConfigException("table '${it.name}' may not accept page-body appends; only '$CYCLES' may, for the cycle report")
         }
-        if (set.readablePages.isNotEmpty()) {
-            throw NotionConfigException("this increment reads no page that is not a row of a configured table")
+        val pages = set.readablePages.map { it.name }.toSet()
+        val stray = pages.filter { it !in READABLE_PAGES && !it.startsWith(READING_PAGE_PREFIX) }
+        if (PERSONA_PAGE !in pages || stray.isNotEmpty()) {
+            throw NotionConfigException(
+                "table set '${set.name}' must allowlist the page '$PERSONA_PAGE' for reading, plus any reading pages named '$READING_PAGE_PREFIX…'; " +
+                    "allowlisted now: ${pages.sorted().joinToString(", ").ifEmpty { "none" }}" +
+                    (if (stray.isEmpty()) "" else " (not allowed: ${stray.sorted().joinToString(", ")})"),
+            )
         }
         // A relation is replaced as a whole and Notion mirrors it onto the other table's row. A read-only table
         // that accepts incoming relations would therefore be written to, through the table that points at it.
@@ -69,13 +106,13 @@ object AgentWorkTables {
     }
 }
 
-/** Loads and checks the Agent Work + PPS configuration. The token is only a reference in the file; nothing here reads it. */
+/** Loads and checks the Agent Work configuration. The token is only a reference in the file; nothing here reads it. */
 object AgentWorkConfig {
     fun load(path: String): NotionTableSetConfig {
         val file = File(path)
         if (!file.isFile) throw NotionConfigException("the Notion worker configuration file does not exist")
         val config = NotionTableSetConfig.parse(file.readText())
-        AgentWorkTables.requireDryRunShape(config.tableSet)
+        AgentWorkTables.requireShape(config.tableSet)
         return config
     }
 }

@@ -49,7 +49,7 @@ class CycleProcessorTest {
     private val base = Instant.parse("2026-10-12T10:00:00Z")
     private var clockNow = base
 
-    private val sourcesDatabaseUrl = "https://www.notion.so/6e9ea25de7334d899d7a52783509ff54"
+    private val sourcesMention get() = databaseMention(set.table(AgentWorkTables.SOURCES).databaseId!!, "PPS Sources")
     private val ping502 = NotionApiException(502, "bad_gateway", "upstream")
 
     /** Where the fake's request log stood when the processor last started; writes are counted from there, not from fixture setup. */
@@ -73,7 +73,10 @@ class CycleProcessorTest {
         lease: Duration = Duration.ofMinutes(2),
         maxAttempts: Int = 3,
         over: NotionApi = api,
-    ) = CycleProcessor(over, set, CyclePlanDirector(llm), traces, worker, { clockNow }, leaseDuration = lease, heartbeatInterval = lease.dividedBy(3), maxAttemptsPerCycle = maxAttempts, sleep = {})
+    ) = CycleProcessor(
+        over, set, CyclePlanDirector(llm), DirectorTaskExecutor(llm), CycleQcDirector(llm), traces, worker, { clockNow },
+        leaseDuration = lease, heartbeatInterval = lease.dividedBy(3), maxAttemptsPerCycle = maxAttempts, sleep = {},
+    )
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -90,14 +93,18 @@ class CycleProcessorTest {
         ).also { tick() }
     }
 
-    private fun goal(status: String = "Active", links: List<String> = listOf(sourcesDatabaseUrl), budget: Double? = 10.0, title: String = "PPS: read before lock"): NotionPage = runBlocking {
+    private fun goal(
+        status: String = "Active",
+        scope: NotionValue.RichText = scopeOf("", sourcesMention),
+        budget: Double? = 10.0,
+        title: String = "Read the primary documents",
+    ): NotionPage = runBlocking {
         fake.createPage(
             t.goals,
             buildMap {
-                put("Goal", NotionValue.Title(title)); put("Goal Type", NotionValue.Select("Work")); put("Status", NotionValue.Select(status))
-                put("Intent", NotionValue.RichText("Read the primary documents before answer standards are locked."))
-                put("Scope", NotionValue.RichText("The 10 listed primary documents and the claims they bear on. No answer standards or locking."))
-                put("Target Links", NotionValue.RichText("PPS Sources", links = links))
+                put("Goal", NotionValue.Title(title)); put("Status", NotionValue.Select(status))
+                put("Done when", NotionValue.RichText("Every listed document has a finding."))
+                put("Scope", scope)
                 budget?.let { put("Cycle Budget", NotionValue.NumberValue(it)) }
             },
         ).also { tick() }
@@ -135,7 +142,8 @@ class CycleProcessorTest {
         ).also { tick() }
     }
 
-    private fun llmPlan(vararg tasks: JsonObject, rationale: String? = "because") = ScriptedLlm.answering(ScriptedLlm.planOf(*tasks, rationale = rationale))
+    private fun llmPlan(vararg tasks: JsonObject, rationale: String? = "because") =
+        RoutedLlm(RoutedLlm.plan(*tasks, rationale = rationale), RoutedLlm.doingEveryTask) { RoutedLlm.qcOf() }
     private fun read(title: String, vararg links: String) = ScriptedLlm.taskJson(title, "Read", "Read it and note the findings.", *links)
 
     private fun cycleRow(id: String) = fake.page(id)
@@ -144,14 +152,14 @@ class CycleProcessorTest {
     private fun writes(operation: String) = fake.requests.drop(mark).filter { it.operation == operation }
     private fun pageUrl(page: NotionPage) = "https://www.notion.so/${page.id.replace("-", "")}"
 
-    // ── Acceptance: a Queued cycle on an Active goal is planned ───────────────
+    // ── A Queued cycle on an Active goal is planned, executed and closed ─────
 
     @Test
-    fun `a queued cycle on an active goal is picked up, planned within budget, and finished as a dry run`() {
-        val memo = source("Oct 6 Board memo", "https://example.org/board-memo.pdf")
+    fun `a queued cycle on an active goal is picked up, planned within budget, executed in order and closed with a summary and goal feedback`() {
+        val memo = source("Oct 6 Board memo")
         val c = cycle(goal().id)
         val llm = llmPlan(
-            read("Read the Oct 6 Board memo", pageUrl(memo), "https://example.org/board-memo.pdf"),
+            read("Read the Oct 6 Board memo", pageUrl(memo)),
             ScriptedLlm.taskJson("Check the memo's headline figure", "Check", "Compare the table with the narrative text."),
             ScriptedLlm.taskJson("Consolidate the findings", "Consolidate", "Gather the findings into one list."),
         )
@@ -165,33 +173,36 @@ class CycleProcessorTest {
         val row = cycleRow(c.id)
         assertEquals("Done", row.select("Status"))
         assertEquals("arx-1", row.text("Worker"))
-        assertEquals(0.0, row.number("Tasks Done"))
+        assertEquals(3.0, row.number("Tasks Done"))
         assertEquals(10.0, row.number("Task Budget"), "copied from the goal at start")
         assertEquals("2026-10-12T10:00:00", row.date("Started")!!.start!!.substring(0, 19))
         assertNotNull(row.date("Finished"))
         assertNull(row.date("Lease Until"), "the lease is released")
-        assertTrue(row.text("Summary").startsWith("Dry run: 3 planned tasks written; nothing was executed."), row.text("Summary"))
+        assertTrue(row.text("Summary").startsWith("Executed 3 tasks: 3 done, 0 blocked, 0 failed."), row.text("Summary"))
+        assertTrue(row.text("Goal Feedback").isNotBlank(), "QC writes feedback on the goal")
 
         val tasks = tasksFor(c.id)
         assertEquals(listOf(1.0, 2.0, 3.0), tasks.map { it.number("Order") })
         assertEquals(listOf("Read", "Check", "Consolidate"), tasks.map { it.select("Type") })
-        assertTrue(tasks.all { it.select("Status") == "Planned" && it.number("Plan Version") == 1.0 })
+        assertTrue(tasks.all { it.select("Status") == "Done" && it.number("Plan Version") == 1.0 && it.text("Result").isNotBlank() && it.date("Finished") != null })
         assertEquals(listOf("cycle:CYCLE-1:v1:o1", "cycle:CYCLE-1:v1:o2", "cycle:CYCLE-1:v1:o3"), tasks.map { it.text("Op key") })
-        assertEquals("${pageUrl(memo)}\nhttps://example.org/board-memo.pdf", tasks[0].text("Target Links"))
+        assertEquals(pageUrl(memo), tasks[0].text("Target Links"))
+        assertTrue(tasks[0].text("Result").contains("Oct 6 Board memo") && tasks[0].text("Result").contains(pageUrl(memo)), "the Result cites the page used: ${tasks[0].text("Result")}")
     }
 
     @Test
-    fun `the only things written are the cycle and its tasks, and PPS and Goals are never touched`() {
+    fun `the only things written are the cycle and its tasks, and Goals, PPS and memory are never touched`() {
         source("Memo")
         val g = goal()
         val c = cycle(g.id)
 
         run(processor(llmPlan(read("Read the memo"))))
 
+        val taskIds = tasksFor(c.id).map { it.id }.toSet()
         assertTrue(writes("createPage").isNotEmpty() && writes("createPage").all { it.target == t.tasks }, "a row was created outside Agent Tasks: ${writes("createPage")}")
-        assertTrue(writes("updatePage").isNotEmpty() && writes("updatePage").all { it.target == c.id }, "a page other than the cycle was updated: ${writes("updatePage")}")
-        assertTrue(writes("appendBlocks").isEmpty())
-        assertEquals("Active", fake.page(g.id).select("Status"))
+        assertTrue(writes("updatePage").isNotEmpty() && writes("updatePage").all { it.target == c.id || it.target in taskIds }, "a page other than the cycle or its tasks was updated: ${writes("updatePage")}")
+        assertTrue(writes("appendBlocks").all { it.target == c.id }, "the only body append is the cycle report, on the Cycle's own page: ${writes("appendBlocks")}")
+        assertEquals("Active", fake.page(g.id).select("Status"), "the goal's own Status is never touched")
     }
 
     @Test
@@ -209,7 +220,7 @@ class CycleProcessorTest {
 
     @Test
     fun `goals that are not active are ignored whatever else they are`() {
-        for (status in listOf("Queued", "Met", "Abandoned", "Expired")) {
+        for (status in listOf("Queued", "Met", "Abandoned", "Expired")) { // the live options; Done and Stopped (the design's) read the same way
             val c = cycle(goal(status = status, title = status).id)
             assertTrue(run(processor(llmPlan(read("never")))).isEmpty(), status)
             assertEquals("Queued", cycleRow(c.id).select("Status"), status)
@@ -237,8 +248,8 @@ class CycleProcessorTest {
     @Test
     fun `tasks that link outside, lock a standard, delete a row or take a Director step are rejected by code and never written`() {
         val memo = source("Oct 6 Board memo")
-        val outside = runBlocking { fake.createPage(t.claims, mapOf("Claim" to NotionValue.Title("a claim the goal never linked"))) }
-        val c = cycle(goal(links = listOf(pageUrl(memo))).id)
+        val outside = runBlocking { fake.createPage(t.findings, mapOf("Claim" to NotionValue.Title("a finding the goal never mentioned"))) }
+        val c = cycle(goal().id)
         val llm = llmPlan(
             read("Read the Oct 6 Board memo", pageUrl(memo)),
             read("Read a claim the goal never named", pageUrl(outside)),
@@ -254,7 +265,7 @@ class CycleProcessorTest {
             listOf("LINK_NOT_ALLOWED", "LOCKS_OR_CHANGES_ANSWER_STANDARD", "DELETES_OR_OVERWRITES_ROW", "TYPE_NOT_ALLOWED"),
             traces.recent(1).single().rejected.map { it.reason },
         )
-        assertTrue(cycleRow(c.id).text("Summary").contains("4 of 5 proposed tasks were rejected by validation"), cycleRow(c.id).text("Summary"))
+        assertTrue(cycleRow(c.id).text("Summary").contains("4 proposed tasks were rejected by validation"), cycleRow(c.id).text("Summary"))
     }
 
     @Test
@@ -278,7 +289,7 @@ class CycleProcessorTest {
         val c = cycle(goal().id)
         run(processor(llmPlan(ScriptedLlm.taskJson("Delete it", "Check", "Delete the claim row."), ScriptedLlm.taskJson("Gate", "Gate", "Decide."))))
         assertEquals("Failed", cycleRow(c.id).select("Status"))
-        assertTrue(cycleRow(c.id).text("Summary").startsWith("Dry run failed: no valid tasks."), cycleRow(c.id).text("Summary"))
+        assertTrue(cycleRow(c.id).text("Summary").startsWith("Cycle failed: no valid tasks."), cycleRow(c.id).text("Summary"))
         assertTrue(tasksFor(c.id).isEmpty())
     }
 
@@ -312,30 +323,31 @@ class CycleProcessorTest {
     @Test
     fun `the prompt carries Jacob's resolutions and the last cycle's summary`() {
         val g = goal()
-        cycle(g.id, "Done", mapOf("Summary" to NotionValue.RichText("Dry run: 4 planned tasks written; nothing was executed.")))
+        cycle(g.id, "Done", mapOf("Summary" to NotionValue.RichText("Executed 4 tasks: 4 done, 0 blocked, 0 failed. Persona was reconciled.")))
         escalation(g.id, "Box B.")
         cycle(g.id)
         val llm = llmPlan(read("Read something"))
 
         run(processor(llm))
 
-        val prompt = llm.requests.single().prompt
+        val prompt = llm.planRequests.single().prompt
         assertTrue(prompt.contains("Error found [Resolved]: Which box is right? => Box B."), prompt)
-        assertTrue(prompt.contains("LAST CYCLE (CYCLE-1) SUMMARY:") && prompt.contains("4 planned tasks written"), prompt)
+        assertTrue(prompt.contains("LAST CYCLE SUMMARY:") && prompt.contains("Persona was reconciled"), prompt)
     }
 
     @Test
-    fun `the links of the goal are reported in the trace, a page that is not a row being skipped`() {
+    fun `the mentions of the goal's scope are reported in the trace, a page that is not readable being skipped`() {
         val howItWorks = fake.createPlainPage(listOf("The locking protocol."))
         source("Memo")
-        val c = cycle(goal(links = listOf(sourcesDatabaseUrl, "https://www.notion.so/${howItWorks.replace("-", "")}")).id)
+        val c = cycle(goal(scope = scopeOf("", sourcesMention, pageMention(howItWorks, "How this ledger works"))).id)
 
         run(processor(llmPlan(read("Read the memo"))))
 
         val trace = traces.recent(1).single()
         assertEquals(listOf("table", "skipped"), trace.links.map { it.kind })
-        assertTrue(trace.links[1].detail!!.startsWith("not_a_configured_row"))
-        assertTrue(cycleRow(c.id).text("Summary").contains("1 linked page was skipped"), cycleRow(c.id).text("Summary"))
+        assertTrue(trace.links[1].detail!!.startsWith("not_readable"))
+        assertEquals("not_readable", trace.scope!!.skipped.single().reason)
+        assertTrue(cycleRow(c.id).text("Summary").contains("1 Scope mention was skipped"), cycleRow(c.id).text("Summary"))
     }
 
     // ── Acceptance: a restart mid-cycle ──────────────────────────────────────
@@ -361,26 +373,27 @@ class CycleProcessorTest {
     }
 
     @Test
-    fun `a cycle taken over after its plan was fully written is completed without asking the model or writing again`() {
-        val c = cycle(goal().id, "Running", deadWorker(mapOf("Summary" to NotionValue.RichText("Dry run in progress: writing 3 planned tasks."))))
+    fun `a cycle taken over after its plan was fully written is executed from that plan, without planning again or writing the plan again`() {
+        val c = cycle(goal().id, "Running", deadWorker(mapOf("Summary" to NotionValue.RichText("Cycle in progress: writing 3 planned tasks."))))
         (1..3).forEach { taskRow(c.id, it) }
         val llm = llmPlan(read("never asked"))
         val creates = fake.requestCount("createPage")
 
         run(processor(llm, worker = "arx-2"))
 
-        assertTrue(llm.requests.isEmpty(), "the model was asked again")
+        assertTrue(llm.planRequests.isEmpty(), "the model was asked to plan again")
         assertEquals(creates, fake.requestCount("createPage"), "rows were created again")
         assertEquals(3, tasksFor(c.id).size)
         assertEquals("Done", cycleRow(c.id).select("Status"))
-        assertTrue(cycleRow(c.id).text("Summary").contains("Resumed after a restart"))
+        assertEquals(3, llm.taskRequests.size, "each planned task is run once")
+        assertEquals(listOf("Done", "Done", "Done"), tasksFor(c.id).map { it.select("Status") })
     }
 
     @Test
     fun `a cycle taken over with only part of its plan written is failed on purpose, never completed from a guess`() {
-        val c = cycle(goal().id, "Running", deadWorker(mapOf("Summary" to NotionValue.RichText("Dry run in progress: writing 4 planned tasks."))))
+        val c = cycle(goal().id, "Running", deadWorker(mapOf("Summary" to NotionValue.RichText("Cycle in progress: writing 4 planned tasks."))))
         (1..2).forEach { taskRow(c.id, it) }
-        val llm = llmPlan(read("never asked"))
+        val llm = RoutedLlm() // any model call at all fails this test
         val creates = fake.requestCount("createPage")
 
         run(processor(llm, worker = "arx-2"))
@@ -397,7 +410,7 @@ class CycleProcessorTest {
     fun `tasks found with no record of how many were meant are not treated as a finished plan`() {
         val c = cycle(goal().id, "Running", deadWorker())
         taskRow(c.id, 1)
-        run(processor(llmPlan(read("never")), worker = "arx-2"))
+        run(processor(RoutedLlm(), worker = "arx-2"))
         assertEquals("Failed", cycleRow(c.id).select("Status"))
         assertTrue(cycleRow(c.id).text("Summary").contains("1 of an unknown number"), cycleRow(c.id).text("Summary"))
     }
@@ -407,7 +420,7 @@ class CycleProcessorTest {
         val g = goal()
         val live = cycle(g.id, "Running", mapOf("Worker" to NotionValue.RichText("other-director"), "Lease Until" to NotionValue.DateValue("2026-10-12T10:01:00.000+00:00")))
         val waiting = cycle(g.id)
-        val llm = llmPlan(read("never"))
+        val llm = RoutedLlm()
 
         assertTrue(run(processor(llm)).isEmpty())
 
@@ -477,7 +490,7 @@ class CycleProcessorTest {
         assertEquals(1, rowsLeft.size)
 
         clockNow = base.plusSeconds(300)
-        val llmAgain = llmPlan(read("never asked"))
+        val llmAgain = RoutedLlm()
         run(processor(llmAgain, worker = "arx-2"))
 
         assertTrue(llmAgain.requests.isEmpty())
@@ -500,8 +513,8 @@ class CycleProcessorTest {
         val second = run(p)
 
         assertEquals(CycleStatus.FAILED, (second.single() as TickResult.Finished).status)
-        assertTrue(cycleRow(c.id).text("Summary").startsWith("Dry run abandoned"), cycleRow(c.id).text("Summary"))
-        assertEquals(1, llm.requests.size, "the model was asked again after the limit")
+        assertTrue(cycleRow(c.id).text("Summary").startsWith("Cycle abandoned"), cycleRow(c.id).text("Summary"))
+        assertEquals(1, llm.planRequests.size, "the model was asked again after the limit")
     }
 
     // ── A claim that another process wins ────────────────────────────────────
@@ -509,7 +522,7 @@ class CycleProcessorTest {
     @Test
     fun `if another worker holds the cycle after the claim, nothing is planned`() {
         val c = cycle(goal().id)
-        val llm = llmPlan(read("never"))
+        val llm = RoutedLlm()
         val racing = object : NotionApi by api {
             override suspend fun updatePage(pageId: String, properties: Map<String, NotionValue>): NotionPage {
                 val result = api.updatePage(pageId, properties)
@@ -571,7 +584,8 @@ class CycleProcessorTest {
     fun `a poll does no more than its limit of cycles`() {
         val g = goal()
         repeat(4) { cycle(g.id) }
-        val limited = CycleProcessor(api, set, CyclePlanDirector(llmPlan(read("Read A"))), traces, "arx-1", { clockNow }, maxCyclesPerTick = 2, sleep = {})
+        val shared = llmPlan(read("Read A"))
+        val limited = CycleProcessor(api, set, CyclePlanDirector(shared), DirectorTaskExecutor(shared), CycleQcDirector(shared), traces, "arx-1", { clockNow }, maxCyclesPerTick = 2, sleep = {})
         assertEquals(2, run(limited).size)
         assertEquals(2, fake.rows(t.cycles).count { it.select("Status") == "Queued" })
     }
@@ -595,8 +609,9 @@ class CycleProcessorTest {
                 return LlmResponse("", toolCalls = listOf(ToolCall(CyclePlanDirector.TOOL_NAME, ScriptedLlm.planOf(read("Read A")))), latencyMs = 100_000, retryCount = 0)
             }
         }
+        val rest = llmPlan(read("Read A")) // answers the task and QC calls at once; only planning is slow
         val p = CycleProcessor(
-            api, set, CyclePlanDirector(slow), traces, "arx-1", { base.plusMillis(currentTime) },
+            api, set, CyclePlanDirector(slow), DirectorTaskExecutor(rest), CycleQcDirector(rest), traces, "arx-1", { base.plusMillis(currentTime) },
             leaseDuration = Duration.ofMinutes(2), heartbeatInterval = Duration.ofSeconds(40), sleep = {},
         )
 
@@ -614,7 +629,7 @@ class CycleProcessorTest {
         job.join()
 
         assertEquals("Done", cycleRow(c.id).select("Status"))
-        assertTrue(fake.requests.count { it.operation == "updatePage" } >= 5, "claim, two heartbeats, progress and finish should all have been written")
+        assertTrue(fake.requests.count { it.operation == "updatePage" } >= 8, "claim, heartbeats, progress, the task's two writes, Tasks Done and finish should all have been written")
         assertTrue(results.single() is TickResult.Finished)
     }
 
@@ -631,14 +646,20 @@ class CycleProcessorTest {
                 return api.updatePage(pageId, properties)
             }
         }
+        // Planning takes 50 seconds; the task and QC answers come at once.
         val model = object : LlmClient {
             override suspend fun complete(request: LlmRequest): LlmResponse {
-                delay(50_000)
-                return LlmResponse("", toolCalls = listOf(ToolCall(CyclePlanDirector.TOOL_NAME, ScriptedLlm.planOf(read("Read A")))), latencyMs = 50_000, retryCount = 0)
+                val tool = request.forcedToolName!!
+                val input = when (tool) {
+                    CyclePlanDirector.TOOL_NAME -> { delay(50_000); ScriptedLlm.planOf(read("Read A")) }
+                    DirectorTaskExecutor.TOOL_NAME -> RoutedLlm.taskDone("Read A: nothing to add.")
+                    else -> RoutedLlm.qcOf()
+                }
+                return LlmResponse("", toolCalls = listOf(ToolCall(tool, input)), latencyMs = 5, retryCount = 0)
             }
         }
         val p = CycleProcessor(
-            slowHeartbeat, set, CyclePlanDirector(model), traces, "arx-1", { base.plusMillis(currentTime) },
+            slowHeartbeat, set, CyclePlanDirector(model), DirectorTaskExecutor(model), CycleQcDirector(model), traces, "arx-1", { base.plusMillis(currentTime) },
             leaseDuration = Duration.ofMinutes(2), heartbeatInterval = Duration.ofSeconds(40), sleep = {},
         )
 
@@ -661,8 +682,9 @@ class CycleProcessorTest {
     fun `the trace records what was decided, in a form that serializes`() {
         source("Memo")
         cycle(goal().id)
+        val llm = RoutedLlm(RoutedLlm.plan(read("Read the memo"), ScriptedLlm.taskJson("Delete", "Check", "Delete the claim row."), rationale = "memo first"), RoutedLlm.doingEveryTask) { RoutedLlm.qcOf(looksMet = "yes") }
 
-        run(processor(llmPlan(read("Read the memo"), ScriptedLlm.taskJson("Delete", "Check", "Delete the claim row."), rationale = "memo first")))
+        run(processor(llm))
         val trace = traces.recent(1).single()
 
         assertEquals("CYCLE-1", trace.cycle)
@@ -674,6 +696,9 @@ class CycleProcessorTest {
         assertEquals(1, trace.accepted.size)
         assertEquals(1, trace.rejected.size)
         assertEquals("cycle:CYCLE-1:v1:o1", trace.writes.single().opKey)
+        assertEquals(1, trace.scope!!.mentions)
+        assertEquals(listOf("done"), trace.execution.map { it.outcome })
+        assertEquals("yes", trace.qc!!.goalLooksMet)
         assertNotNull(trace.finishedAt)
 
         val json = Json.encodeToString(CyclePlanTrace.serializer(), trace)

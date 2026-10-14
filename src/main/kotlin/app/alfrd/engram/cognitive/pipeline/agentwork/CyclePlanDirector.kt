@@ -27,7 +27,7 @@ data class PlanningInput(
     val escalations: List<EscalationNote>,
     val previousCycleLabel: String?,
     val previousSummary: String?,
-    val context: LinkedContext,
+    val context: ScopeContext,
 )
 
 /** What the model proposed. [tasks] is untrusted: [CyclePlanValidator] decides what survives. */
@@ -40,7 +40,28 @@ data class PlanProposal(
     val rejectedReason: String? = null,
     val providerName: String? = null,
     val modelName: String? = null,
+    val answer: AnswerTrace? = null,
+    val given: GivenTrace? = null,
+    /** Set when the plan endpoint failed and the default endpoint served this proposal. */
+    val fallback: FallbackTrace? = null,
 )
+
+/**
+ * A second endpoint for the plan call only. Optional and off by default: without it the plan call goes to the
+ * Director's one model client exactly as before. Tasks and QC never use it.
+ */
+class PlanRoute(
+    val client: LlmClient,
+    val baseUrl: String,
+    val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    val maxTokens: Int = DEFAULT_MAX_TOKENS,
+) {
+    companion object {
+        const val DEFAULT_TIMEOUT_MS = 600_000L
+        /** The last replay used 6,619 of 8,000. */
+        const val DEFAULT_MAX_TOKENS = 12_000
+    }
+}
 
 /**
  * The Director's Orchestrate decision for a Notion-queued cycle: **one structured model call that
@@ -52,7 +73,7 @@ data class PlanProposal(
  * It cannot widen its own reach: the prompt lists the only links it may use and the only task types it
  * may propose, and the validator enforces both whatever the prompt said.
  */
-open class CyclePlanDirector(private val llmClient: LlmClient?) {
+open class CyclePlanDirector(private val llmClient: LlmClient?, private val planRoute: PlanRoute? = null) {
 
     private val logger = LoggerFactory.getLogger(CyclePlanDirector::class.java)
 
@@ -60,19 +81,35 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         val client = llmClient ?: return PlanProposal(emptyList(), null, modelCalled = false, latencyMs = 0, rejectedReason = "no_llm_client")
 
         val startMs = System.currentTimeMillis()
+        val built = PlanPromptBuilder.buildReport(input)
+        val given = built.given()
+        fun request(maxTokens: Int, timeoutMs: Long) = LlmRequest(
+            prompt = built.text,
+            systemPrompt = CyclePrompts.PLAN.text,
+            model = LlmModel.CLAUDE_SONNET_4_5, // label only: LocalLlmClient ignores it and uses its one configured local model
+            maxTokens = maxTokens,
+            timeoutMs = timeoutMs,
+            tools = listOf(PROPOSE_PLAN_TOOL),
+            forcedToolName = TOOL_NAME,
+            temperature = 0.2,
+            reasoning = true,
+        )
+        var fallback: FallbackTrace? = null
         val response = try {
-            client.complete(
-                LlmRequest(
-                    prompt = buildPrompt(input),
-                    systemPrompt = SYSTEM_PROMPT,
-                    model = LlmModel.CLAUDE_SONNET_4_5, // label only: LocalLlmClient ignores it and uses its one configured local model
-                    maxTokens = 3_000,
-                    timeoutMs = TIMEOUT_MS,
-                    tools = listOf(PROPOSE_PLAN_TOOL),
-                    forcedToolName = TOOL_NAME,
-                    temperature = 0.2,
-                ),
-            )
+            try {
+                // The plan endpoint, when one is set; otherwise (and on its failure) the Director's own client.
+                if (planRoute != null) planRoute.client.complete(request(planRoute.maxTokens, planRoute.timeoutMs))
+                else client.complete(request(MAX_TOKENS, TIMEOUT_MS))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (planRoute == null) throw e
+                // Unreachable, timed out or erroring: the default endpoint serves the call, and the record says so.
+                val failedAfter = System.currentTimeMillis() - startMs
+                logger.warn("cycle-plan: plan endpoint {} failed ({}); falling back to the default endpoint", planRoute.baseUrl, e::class.java.simpleName)
+                fallback = FallbackTrace(planRoute.baseUrl, e::class.java.simpleName, failedAfter)
+                client.complete(request(MAX_TOKENS, TIMEOUT_MS))
+            }
         } catch (e: CancellationException) {
             // Shutdown or a cancelled poll is not a model failure: let it propagate so the cycle is left Running for a later reclaim.
             throw e
@@ -80,17 +117,18 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             val latencyMs = System.currentTimeMillis() - startMs
             // Class name only: an exception message from a provider could echo a prompt.
             logger.warn("cycle-plan: LLM call failed: {}", e::class.java.simpleName)
-            return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}")
+            return PlanProposal(emptyList(), null, modelCalled = true, latencyMs = latencyMs, rejectedReason = "llm_call_failed: ${e::class.java.simpleName}", given = given, fallback = fallback)
         }
         val latencyMs = System.currentTimeMillis() - startMs
+        val answer = AnswerTrace.of(response)
 
         val calls = response.toolCalls.filter { it.name == TOOL_NAME }
         if (calls.size > 1) logger.warn("cycle-plan: response carried {} '{}' calls, honoring only the first", calls.size, TOOL_NAME)
         val call = calls.firstOrNull()
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "no_tool_call", response.providerName, response.modelName, answer, given, fallback)
 
         val tasks = (call.input["tasks"] as? JsonArray)
-            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName)
+            ?: return PlanProposal(emptyList(), null, true, latencyMs, "malformed_tool_input", response.providerName, response.modelName, answer, given, fallback)
 
         return PlanProposal(
             tasks = tasks.mapNotNull { (it as? JsonObject)?.let(::parseTask) },
@@ -99,6 +137,9 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
             latencyMs = latencyMs,
             providerName = response.providerName,
             modelName = response.modelName,
+            answer = answer,
+            given = given,
+            fallback = fallback,
         )
     }
 
@@ -118,21 +159,8 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
         const val TOOL_NAME = "propose_cycle_plan"
         const val TIMEOUT_MS = 180_000L
 
-        private val SYSTEM_PROMPT: String = """
-            You are the Director's planner for alfrd. Jacob has queued one cycle against one goal. Your only job is to propose a dry-run plan: an ordered list of tasks that a later step could carry out toward the goal. Nothing is executed or written now.
-
-            Call propose_cycle_plan exactly once.
-
-            Rules you must follow. Code checks every one of them afterwards and discards any task that breaks one:
-            - Propose at most the task budget given. Fewer, sharper tasks beat many vague ones. Skip work the target already covers.
-            - Each task has a short title, a type, and instructions that say what the task would do and what it would look at.
-            - Types you may use: ${TaskType.PROPOSABLE.joinToString(", ") { it.label }}. Do not use Orchestrate, Gate or QC; the Director does those itself.
-            - target_links may contain only links copied exactly from the "Links you may use" list. Never invent, shorten or guess a link. A task may have none.
-            - Never propose a task that locks, unlocks, finalizes or changes an answer standard. Only people lock answer standards.
-            - Never propose a task that deletes, removes, overwrites or replaces an existing row. A correction is a new row that supersedes the old one, and that is a later step's business.
-            - Stay inside the goal's Scope. If you notice something outside it, you may propose an Escalate task to note it for a later goal, but do not plan work on it.
-            - Read what Jacob resolved on earlier escalations and what the last cycle summarized, and plan from them.
-        """.trimIndent()
+        /** Reasoning counts against this: the local model spent 1.9k to 4.4k tokens thinking about a 2k-token prompt before the call. */
+        const val MAX_TOKENS = 8_000
 
         private val PROPOSE_PLAN_TOOL = ToolDefinition(
             name = TOOL_NAME,
@@ -156,7 +184,7 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
                                 putJsonObject("target_links") {
                                     put("type", "array")
                                     putJsonObject("items") { put("type", "string") }
-                                    put("description", "Links from the allowed list that this task reads. May be empty.")
+                                    put("description", "Handles (like R1, P1 or D1) from the allowed list that this task reads, copied exactly. May be empty.")
                                 }
                             }
                             putJsonArray("required") { add("title"); add("type"); add("instructions") }
@@ -170,89 +198,91 @@ open class CyclePlanDirector(private val llmClient: LlmClient?) {
     }
 }
 
-/** Builds the user-side prompt: the goal, what Jacob has said since, and the only links a task may use. Pure, so it can be read in a test. */
+/** The planner's prompt and what went into it, by row id. */
+class PlanPrompt(val text: String, val shownRowIds: List<String>, val omittedRowIds: List<String>, private val outcomes: Int, private val notUsable: Int) {
+    fun given() = GivenTrace(
+        CyclePrompts.PLAN.ref, text.length, outcomes, shownRowIds.size, shownRowIds.take(GivenTrace.MAX_IDS), emptyList(),
+        emptyList(), omittedRowIds.take(GivenTrace.MAX_IDS), omittedRowIds.size, notUsable + if (omittedRowIds.isEmpty()) 0 else 1,
+    )
+}
+
+/**
+ * Builds the user-side prompt: the goal, what Jacob has said since, and the only links a task may use. Pure, so
+ * it can be read in a test. The planner sees each row as a short digest (long text is cut, with a marker that
+ * says so); the workers and QC are given the rows in full.
+ */
 object PlanPromptBuilder {
     const val MAX_CHARS = 28_000
 
-    fun build(input: PlanningInput): String {
+    fun build(input: PlanningInput): String = buildReport(input).text
+
+    fun buildReport(input: PlanningInput): PlanPrompt {
         val goal = input.goal
-        return buildString {
-            appendLine("GOAL: ${goal.title}${goal.displayId?.let { " ($it)" }.orEmpty()}")
-            appendLine("Type: ${goal.type?.label ?: "unknown"}")
+        val shownIds = ArrayList<String>()
+        val text = buildString {
+            appendLine("GOAL: ${goal.title}")
             appendLine("Deadline: ${goal.deadline ?: "none"}")
             appendLine()
-            section("Intent", goal.intent)
-            section("Scope", goal.scope, note = "what this goal may touch; stay inside it")
-            section("Metric", goal.metric)
-            section("Done criteria", goal.doneCriteria)
+            if (goal.doneWhen.isNotBlank()) {
+                appendLine("DONE WHEN (a check anyone could apply; plan so it can be checked from your tasks' results): ${PromptText.bounded(goal.doneWhen, 6_000, "Done when")}")
+                appendLine()
+            }
             appendLine("TASK BUDGET: ${input.taskBudget} (propose at most this many)")
             appendLine()
 
             val resolved = input.escalations.filter { it.resolution.isNotBlank() }
             if (resolved.isNotEmpty()) {
                 appendLine("WHAT JACOB RESOLVED ON EARLIER ESCALATIONS (read before planning):")
-                resolved.forEach { appendLine("- ${it.kind ?: "Escalation"} [${it.status ?: "?"}]: ${it.ask.oneLine(300)} => ${it.resolution.oneLine(600)}") }
+                resolved.forEach { appendLine("- ${PromptText.stripCodes(it.kind ?: "Escalation")} [${PromptText.stripCodes(it.status ?: "?")}]: ${PromptText.stripCodes(it.ask).oneLine(300)} => ${PromptText.stripCodes(it.resolution).oneLine(600)}") }
                 appendLine()
             }
             if (!input.previousSummary.isNullOrBlank()) {
-                appendLine("LAST CYCLE${input.previousCycleLabel?.let { " ($it)" }.orEmpty()} SUMMARY:")
-                appendLine(input.previousSummary.oneLine(900))
+                appendLine("LAST CYCLE SUMMARY:")
+                appendLine(PromptText.stripCodes(input.previousSummary).oneLine(900))
                 appendLine()
             }
 
             val context = input.context
-            appendLine("LINKS YOU MAY USE (target_links must be copied exactly from this list):")
-            // The goal's own links first (at most a dozen): a table or an outside URL the goal names is allowed by
-            // the validator, so the model has to be able to see it. Rows come after and are cut first if room runs out.
-            var goalLinks = 0
-            for (outcome in context.outcomes) {
-                when (outcome) {
-                    is LinkOutcome.TableListed -> appendLine("- ${outcome.link}  [table: ${outcome.table}, ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more not listed" else ""}]")
-                    is LinkOutcome.External -> appendLine("- ${outcome.link}  [outside link on the goal]")
-                    else -> continue
-                }
-                goalLinks++
-            }
+            appendLine("SCOPE: the goal's @-mentions put these in reach (write each handle, like R1, P1 or D1, exactly as listed to link it):")
+            context.outcomes.filter { it !is ScopeOutcome.Skipped }.forEach { appendLine("- " + describe(it, context.handles)) }
+            appendLine()
+            appendLine("LINKS YOU MAY USE (pages and rows in scope; write the handle in target_links):")
             val budgetForRows = MAX_CHARS - length - 1_500
             var used = 0
             var shown = 0
             for (row in context.rows) {
                 val line = buildString {
-                    append("- ${row.pageUrl}  [${row.table}] ${row.title.oneLine(200)}")
+                    append("- ${context.handles.handleFor(row.pageId) ?: row.pageUrl}  [${row.table}] ${row.title.oneLine(200)}")
                     if (row.facts.isNotEmpty()) append("  | ${row.facts.joinToString("; ")}")
-                    row.externalUrl?.let { append("  | external: $it") }
+                    if (row.factsOmitted > 0) append("; (+${row.factsOmitted} more properties not listed here)")
                 }
                 if (used + line.length > budgetForRows) break
                 appendLine(line)
                 used += line.length + 1
                 shown++
+                shownIds += row.pageId
             }
             if (shown < context.rows.size) appendLine("(${context.rows.size - shown} more rows not shown: out of room)")
-            if (context.rows.isEmpty() && goalLinks == 0) appendLine("(none: this goal links to no readable page, so tasks have no links)")
+            if (context.rows.isEmpty() && context.outcomes.none { it is ScopeOutcome.TableListed }) appendLine("(none: nothing in this goal's scope could be read, so tasks have no links)")
             appendLine()
 
             val skipped = context.skipped
             if (skipped.isNotEmpty()) {
-                appendLine("LINKS ON THE GOAL THAT COULD NOT BE USED (do not use them):")
-                skipped.forEach { appendLine("- ${it.link}: ${it.reason.name.lowercase().replace('_', ' ')}") }
+                appendLine("MENTIONS ON THE GOAL THAT COULD NOT BE USED (do not use them):")
+                skipped.forEach { appendLine("- ${it.mention.title.ifBlank { it.mention.id }}: ${it.reason.name.lowercase().replace('_', ' ')}") }
                 appendLine()
             }
-            if (goal.targetLinksText.isNotBlank()) {
-                appendLine("TARGET LINKS AS WRITTEN ON THE GOAL: ${goal.targetLinksText.oneLine(600)}")
-                appendLine()
-            }
-            append("Propose the dry-run plan now.")
+            append("Propose the plan now.")
         }.take(MAX_CHARS)
+        val omitted = input.context.rows.map { it.pageId }.filter { it !in shownIds }
+        return PlanPrompt(text, shownIds, omitted, input.context.outcomes.count { it !is ScopeOutcome.Skipped }, input.context.skipped.size)
     }
 
-    private fun StringBuilder.section(label: String, text: String, note: String? = null) {
-        if (text.isBlank()) return
-        appendLine("${label.uppercase()}${note?.let { " ($it)" }.orEmpty()}: ${text.oneLine(1_500)}")
-        appendLine()
+    private fun describe(outcome: ScopeOutcome, handles: Handles): String = when (outcome) {
+        is ScopeOutcome.TableListed -> "${handles.handleFor(outcome.mention.id) ?: notionPageUrl(outcome.mention.id)}  [database ${outcome.mention.title.ifBlank { outcome.table }}, table ${outcome.table}: ${outcome.rows} row(s) listed below${if (outcome.truncated) ", more exist" else ""}]"
+        is ScopeOutcome.PageRead -> "${handles.handleFor(outcome.pageId) ?: notionPageUrl(outcome.pageId)}  page ${outcome.mention.title.ifBlank { outcome.label }} (${outcome.label})"
+        is ScopeOutcome.Skipped -> ""
     }
 
-    private fun String.oneLine(max: Int): String {
-        val line = replace(Regex("\\s+"), " ").trim()
-        return if (line.length <= max) line else line.take(max - 1) + "…"
-    }
+    private fun String.oneLine(max: Int): String = PromptText.excerpt(this, max)
 }

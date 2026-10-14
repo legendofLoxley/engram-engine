@@ -22,7 +22,7 @@ NotionTable(name, dataSourceId, access, pageBodyAppend, idempotencyKeyProperty, 
 | `pageBodyAppend` | Blocks may be appended to this table's pages (the memory ledger in Sessions). Off by default. Writable tables only. |
 | `idempotencyKeyProperty` | Opt in to idempotent creates (section 3). Off by default. Writable tables only. |
 | `allowIncomingRelations` | A row of another table may be given a relation to a row of this one. Defaults to true for read-write, false for read-only. |
-| `databaseId` | Optional. The id of the database that holds this data source, when something links to the database and not to the data source (a goal's Target Links do). It is never sent to Notion as an id to query; it only lets the Director recognise a link to this table. It must differ from `dataSourceId`, and the registry counts it when it checks sets for overlap. |
+| `databaseId` | Optional. The id of the database that holds this data source, when something names the database and not the data source (an @-mention of a database in a goal's Scope does). It is never sent to Notion as an id to query; it only lets the Director recognise a mention of this table. It must differ from `dataSourceId`, and the registry counts it when it checks sets for overlap. |
 | `readablePages` | Plain pages (such as the persona page) that can be read and never written. |
 
 The allowlist is static: it is fixed when the guard is built. Which rows a particular goal may touch
@@ -54,7 +54,7 @@ ids above are placeholders: the real ones are the `collection://` ids on the des
 A run that must not write somewhere tightens the same set instead of keeping a second config:
 
 ```kotlin
-val plannerView = config.tableSet.withReadOnly(listOf("claims", "evidence"))   // dry run: PPS read-only
+val readOnlyView = config.tableSet.withReadOnly(listOf("claims"))   // a run that must not write the ledger
 ```
 
 Tightening is the only direction offered, and an unknown table name is an error (a typo cannot leave
@@ -79,7 +79,7 @@ contents or a token.
 | create | the table is in the set **and read-write**, and, if it opted in, the row carries a non-blank idempotency key |
 | update | the page came back from a table in the set, that table is **read-write**, and the update does not touch the idempotency key |
 | append blocks | the page is known, its table is **read-write** and has `pageBodyAppend` |
-| retrieve / list blocks | the page is a readable page, or its table is in the set (read-only tables included) |
+| retrieve / list blocks | the page is a readable page, or its table is in the set (read-only tables included), **or** the id is a block the guard itself returned from such a page and that reported children (one level at a time). A block id the guard never returned is refused, however real it is; listing never makes a block writable |
 | any relation value | every target is a known page whose table accepts incoming relations |
 
 Why relations are checked: Notion mirrors a dual relation onto its target row. Writing a relation
@@ -192,10 +192,16 @@ tests, not by a 400 against production.
 does not return them; a page read does. Do not decide anything from them, and do not expect them in a
 `query` result. (The live probe reports which properties appear only on a page read.)
 
-**Rich text carries the URLs it contains.** `RichText.links` holds a run's hyperlink and, for a page or
-database mention, the URL built from the mentioned id. A mention's `plain_text` is only its title, so
-without this the destination of a mention is lost. This is how the Director learns what a goal's
-Target Links point at.
+**Rich text carries its links and its mentions, separately.** `RichText.links` holds a run's hyperlink and,
+for a page or database mention, the URL built from the mentioned id. `RichText.mentions` holds only the
+*page and database mentions*, typed (`PAGE` or `DATABASE`), with the mentioned id and the title as written.
+A mention's `plain_text` is only its title, so without this the destination of a mention is lost. A
+hyperlink, a URL typed as text, and a user, date or link-preview mention are **not** mentions. A goal's
+Scope is read through `mentions` and nothing else (section 6). Writes never carry mentions.
+
+**Blocks.** `NotionBlockRead` carries `type`, its text segments, `has_children`, and a to-do's `checked`
+state. Block reading is read-only and one level deep: a block that reports children is listed by its own
+id, and the children's children are not.
 
 **Numbers are `Double`.** Notion's number is a double, so a count or an Order read back is a `Double` and
 is converted deliberately (`toInt()`); a whole number is not guaranteed to look like one in JSON.
@@ -203,24 +209,82 @@ is converted deliberately (`toInt()`); a whole number is not guaranteed to look 
 **Times written to Notion** use millisecond precision with an explicit offset. `OffsetDateTime.toString()`
 drops zero seconds (`10:02Z`), which Notion does not read as a time of day.
 
-## 6. The Agent Work + PPS set
+## 6. The Agent Work + PPS + alfrd memory set
 
-`deploy/config/notion-agent-worker.json` is the one worked example of a non-memory set: eight tables,
-two of them writable.
+`deploy/config/notion-agent-worker.json` is the one worked example of a non-memory set: fourteen
+tables and one readable page, two tables writable.
 
-| Table | Access | Notes |
+| Table(s) | Access | Notes |
 |---|---|---|
-| Goals, Escalations | read-only | Read in this increment; the Director never writes them |
-| Cycles | read-write | Claimed, heartbeated and finished by the Director |
-| Agent Tasks | read-write | Created with an idempotency key (`Op key`) |
-| PPS Questions, Claims, Sources, Evidence | read-only | The guard, not planner code, keeps this increment from writing the ledger |
+| Cycles | read-write, page-body append | Claimed, heartbeated, finished by the Director; Summary and Goal Feedback are written here, and a one-page report is appended to the Cycle's own page body when it finishes (no other table takes a body append) |
+| Agent Tasks | read-write | Created with an idempotency key (`Op key`); each task's Result, Status, Started and Finished are written here |
+| Goals, Escalations | read-only | The Director reads a goal and its Escalations' Resolution text; it never writes a goal, not even its Status |
+| PPS Questions, **Findings**, Sources | read-only | Findings is the old Claims table (same data source id, renamed 2026-10-12). Evidence is archived and **not in the set** |
+| alfrd memory: Containers, Items, Entities, Connections, Sessions, Sources, Template Changes | read-only | Jacob's real teamspace. Names carry a `memory-` prefix because PPS already has a table called `sources` |
+| Persona (plain page `3f1d0721d4e481d588c6f320f5fa25f8`) | read-only page | Required. Allowlisted in `readablePages` like the reading pages below |
+| Reading pages (`reading-essay-excerpt`, `3f8d0721d4e481deb87bec779d10acfc`) | read-only pages | Extra plain pages the Director may read when a goal's Scope mentions them. Listed by id in the same `readablePages` allowlist |
 
-`AgentWorkTables.requireDryRunShape` refuses a configuration that makes anything else writable, that
-drops a table, or that adds a readable page. Loosening the dry run is therefore an edit to that check
-in a later increment, not a one-line change to a JSON file. A relation property is replaced as a
-whole, so no dual relation is ever written into a read-only table (a rewrite could silently remove
-links the guard cannot see): the Director writes the relation from the Agent Tasks side only.
+`AgentWorkTables.requireShape` refuses a configuration that makes anything else writable, that drops a
+table, that adds a fifteenth one (even read-only), that allows a page-body append on any table but Cycles, that drops the Persona
+page, or that allowlists a readable page whose name does not start with `reading-`. Loosening this is therefore an edit to that check, not a one-line change
+to a JSON file, except for adding a reading page (below). The same check refuses a read-only table that accepts incoming relations, because Notion
+would mirror a relation written from another table onto its rows. A relation property is replaced as a
+whole, so no dual relation is ever written into a read-only table: the Director writes the relation from
+the Agent Tasks side only, and the guard refuses a relation into any read-only table.
+
+### What a goal is, as the Director reads it
+
+The converged goal schema. The Director reads, from Goals: **Goal** (title), **Done when**, **Scope** (rich
+text), **Serves** (relation to Containers, recorded and not dereferenced), **Status**, **Cycle Budget**,
+**Replan Cap**, **Deadline**; plus the Resolution text of the goal's Escalations and the previous cycle's
+Summary. It does not read Intent, Metric, Done Criteria, Target Links, Target Space, Goal Type, Metric
+Locked or Metric Note. They may still sit on the live database; nothing depends on them, and a test puts a
+sentinel in each to prove none reaches a model or widens a scope.
+
+### Scope is machine-checkable
+
+Scope is the rich text of the goal, and **only its page and database @-mentions count**. Words are ignored
+(and reported in the trace as ignored prose), and so are hyperlinks, URLs typed as text, and mentions of
+people, dates or link previews. From the mentions the code builds one allowed set:
+
+- every mentioned page;
+- every mentioned database (by database id or data source id, or a database pasted as a page mention) and
+  each of that table's rows, up to a per-table limit, oldest first;
+- nothing else. An external URL is never allowed, and a table that was not mentioned is not allowed even
+  when its rows look similar.
+
+A link addresses a page only by the id in its **path**: an allowed id in the URL's user-info, query or
+fragment (`https://<id>@www.notion.so/other`, `…/other#<id>`) does not put `other` in scope, and a URL
+with user-info is refused outright. One function (`notionPageIdInPath`) turns a link into an id for the
+plan check, the execution check, the table lookup and the citations, so the page that was checked is the
+page that is read.
+
+Every link on a proposed task must be in that set (rejected at planning, in `CyclePlanValidator`); every
+page the executor stages for a task must be in it (checked again at execution, so a task row edited in
+Notion after planning cannot reach a page outside Scope); and the guard refuses, below both, any page that
+is not in a configured table or on the readable-page allowlist. A goal whose Scope has no page or database
+mentions fails its cycle with the reason, and a suggested Scope rewrite in Goal Feedback; the Director does
+not guess what was meant. A goal whose mentions all turn out unreadable fails the same way, naming each.
+
+### Registry: no overlap with a memory store
+
+`NotionSetRegistry` is invoked when the channel starts (`NotionCycleRuntime.fromEnvironment(..., otherSets)`),
+with this set and any other table set the process is configured with, and refuses a shared token
+reference, a shared table or database id, a shared readable page, or a shared name. The alfrd memory
+tables above are read **through this set's token**, which is also why a Notion-backed memory store
+(a separate test teamspace, currently paused) must not be given any of these ids: the check would refuse
+it. The refusal is proven in tests with a stand-in store set; there is no real store configuration on the
+box today, so the check has never compared this set against one. When that store is configured, its set
+must be passed to the runtime as `otherSets`, or the check does not see it.
 
 The token is `tokenRef: "file:/…/.notion-worker-token"`. It is a different token from any read-only
 Notion token used for Hermes ingestion and from every alfrd memory set's token; the registry refuses a
 shared reference, and `verifyDistinctTokens` refuses two references that resolve to one secret.
+
+### Adding a page the Director may read
+
+Add `{ "name": "reading-<short-name>", "pageId": "<32 hex characters>" }` to `readablePages` in
+`deploy/config/notion-agent-worker.json`, connect the integration to the page (or a page above it), and
+restart `engram-dev`. The name must start with `reading-`; the page is then readable when a goal's Scope
+mentions it, never writable, and only the ids listed are readable. A mentioned page that is not listed is
+skipped with a message naming the `readablePages` allowlist.

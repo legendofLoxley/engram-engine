@@ -2,6 +2,8 @@ package app.alfrd.engram.cognitive.pipeline.agentwork
 
 import app.alfrd.engram.notion.AllowlistedNotionApi
 import app.alfrd.engram.notion.FakeNotionApi
+import app.alfrd.engram.notion.MentionKind
+import app.alfrd.engram.notion.NotionMention
 import app.alfrd.engram.notion.NotionValue
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -19,8 +21,10 @@ class AgentWorkMappersTest {
     private lateinit var fake: FakeNotionApi
     private lateinit var t: AgentWorkTemplate
 
-    private val sourcesDatabase = "https://www.notion.so/6e9ea25de7334d899d7a52783509ff54"
-    private val howItWorks = "https://www.notion.so/3f6d0721d4e4814d9f91f290a1eea863"
+    private val sourcesDatabaseId = "6e9ea25d-e733-4d89-9d7a-52783509ff54"
+    private val personaId = "3f1d0721-d4e4-81d5-88c6-f320f5fa25f8"
+    private val sourcesMention = NotionMention(MentionKind.DATABASE, sourcesDatabaseId, "PPS Sources")
+    private val personaMention = NotionMention(MentionKind.PAGE, personaId, "Persona")
 
     @BeforeEach
     fun setUp() {
@@ -28,23 +32,15 @@ class AgentWorkMappersTest {
         t = fake.installAgentWorkTemplate(set)
     }
 
-    /** A goal shaped like the real "PPS: read before lock": prose Scope, Target Links made of page mentions, budget 10, cap 3. */
-    private fun realisticGoal(status: String = "Draft") = runBlocking {
+    /** A goal shaped like the converged schema: a sentence, a check, a Scope of mentions with some prose around them, a budget and a cap. */
+    private fun convergedGoal(status: String = "Draft", scope: NotionValue.RichText = scopeOf("Look only at", sourcesMention, personaMention)) = runBlocking {
         fake.createPage(
             t.goals,
             mapOf(
-                "Goal" to NotionValue.Title("PPS: read before lock"),
-                "Goal Type" to NotionValue.Select("Work"),
+                "Goal" to NotionValue.Title("Reconcile Persona with what alfrd currently knows"),
                 "Status" to NotionValue.Select(status),
-                "Intent" to NotionValue.RichText("Read the primary PPS documents the locking protocol requires before answer standards are locked."),
-                "Scope" to NotionValue.RichText("The 10 listed primary documents and the A/B comparison, and the PPS claims, sources and evidence rows they bear on. Nothing else in the ledger. No answer standards or locking."),
-                "Metric" to NotionValue.RichText("Of these 10 items, how many are read in full."),
-                "Done Criteria" to NotionValue.RichText("All 10 items done."),
-                "Target Space" to NotionValue.Select("PPS Evidence Ledger"),
-                "Target Links" to NotionValue.RichText(
-                    "PPS Sources: Sources ; How this ledger works (locking protocol): How this ledger works ; Claims, Answer standards view",
-                    links = listOf(sourcesDatabase, howItWorks),
-                ),
+                "Done when" to NotionValue.RichText("Every claim in Persona is marked supported, contradicted or unchecked."),
+                "Scope" to scope,
                 "Cycle Budget" to NotionValue.NumberValue(10.0),
                 "Replan Cap" to NotionValue.NumberValue(3.0),
                 "Deadline" to NotionValue.DateValue("2026-10-24"),
@@ -91,55 +87,102 @@ class AgentWorkMappersTest {
     // ── Goal ─────────────────────────────────────────────────────────────────
 
     @Test
-    fun `a goal is read the way the real one is laid out`() = runBlocking {
-        val row = realisticGoal()
-        val goal = GoalMapper.fromPage(fake.retrievePage(row.id))
+    fun `a goal is read the way the converged schema lays it out`() = runBlocking {
+        val goal = GoalMapper.fromPage(fake.retrievePage(convergedGoal().id))
 
-        assertEquals("PPS: read before lock", goal.title)
+        assertEquals("Reconcile Persona with what alfrd currently knows", goal.title)
         assertEquals("GOAL-1", goal.displayId)
-        assertEquals(GoalType.WORK, goal.type)
         assertEquals(GoalStatus.DRAFT, goal.status)
+        assertEquals("Every claim in Persona is marked supported, contradicted or unchecked.", goal.doneWhen)
         assertEquals(10, goal.cycleBudget)
         assertEquals(3, goal.replanCap)
         assertEquals("2026-10-24", goal.deadline)
-        assertEquals("PPS Evidence Ledger", goal.targetSpace)
-        assertTrue(goal.intent.startsWith("Read the primary PPS documents"))
+        assertEquals(emptyList<String>(), goal.serves)
     }
 
     @Test
-    fun `the links of a goal are the hrefs its Target Links carry, because the text shows only titles`() = runBlocking {
-        val goal = GoalMapper.fromPage(fake.retrievePage(realisticGoal().id))
-        assertTrue(goal.targetLinksText.contains("PPS Sources: Sources"))
-        assertEquals(listOf(sourcesDatabase, howItWorks), goal.targetLinks)
+    fun `Serves is read as the Containers the goal is for, by id`() = runBlocking {
+        val container = fake.createPage(t.containers, mapOf("Name" to NotionValue.Title("alfrd")))
+        val row = fake.createPage(t.goals, mapOf("Goal" to NotionValue.Title("g"), "Serves" to NotionValue.Relation(listOf(container.id))))
+        assertEquals(listOf(container.id), GoalMapper.fromPage(fake.retrievePage(row.id)).serves)
     }
 
     @Test
-    fun `Scope is prose, so it contributes no links`() = runBlocking {
-        val goal = GoalMapper.fromPage(fake.retrievePage(realisticGoal().id))
-        assertTrue(goal.scope.startsWith("The 10 listed primary documents"))
-        assertFalse(goal.targetLinks.any { goal.scope.contains(it) })
+    fun `only the page and database mentions in Scope count, in order`() = runBlocking {
+        val scope = GoalMapper.fromPage(fake.retrievePage(convergedGoal().id)).scope
+        assertEquals(listOf(sourcesMention, personaMention), scope.mentions)
+        assertTrue(scope.hasMentions)
     }
 
     @Test
-    fun `urls typed into Target Links are links too, after the attached ones`() = runBlocking {
-        val row = runBlocking {
-            fake.createPage(
-                t.goals,
-                mapOf("Goal" to NotionValue.Title("g"), "Target Links" to NotionValue.RichText("mention + typed https://example.org/memo.pdf.", links = listOf(sourcesDatabase))),
-            )
-        }
-        assertEquals(listOf(sourcesDatabase, "https://example.org/memo.pdf"), GoalMapper.fromPage(fake.retrievePage(row.id)).targetLinks)
+    fun `prose in Scope is ignored and reported, not turned into scope`() = runBlocking {
+        val scope = GoalMapper.fromPage(fake.retrievePage(convergedGoal().id)).scope
+        assertEquals("Look only at", scope.proseExcerpt)
+        assertEquals("Lookonlyat".length, scope.proseChars)
+
+        val onlyProse = GoalScope.fromRichText(NotionValue.RichText("The 10 listed primary documents, nothing about locking."))
+        assertFalse(onlyProse.hasMentions)
+        assertTrue(onlyProse.proseChars > 0)
     }
 
     @Test
-    fun `an unknown status or type is read as null rather than failing`() = runBlocking {
+    fun `text made only of mentions has no prose to report`() {
+        val scope = GoalScope.fromRichText(scopeOf("", sourcesMention, personaMention))
+        assertEquals(0, scope.proseChars)
+        assertEquals("", scope.proseExcerpt)
+        assertEquals(emptyList<String>(), scope.ignoredLinks)
+    }
+
+    @Test
+    fun `a hyperlink or a URL typed in Scope is not a mention and is reported, never counted`() {
+        val scope = GoalScope.fromRichText(
+            NotionValue.RichText(
+                "PPS Sources see https://example.org/spec and https://www.notion.so/99999999999949998999999999999999",
+                links = listOf("https://www.notion.so/99999999999949998999999999999999", sourcesDatabaseId.let { "https://www.notion.so/${it.replace("-", "")}" }),
+                mentions = listOf(sourcesMention),
+            ),
+        )
+        assertEquals(listOf(sourcesMention), scope.mentions)
+        assertTrue("https://example.org/spec" in scope.ignoredLinks)
+        assertTrue("https://www.notion.so/99999999999949998999999999999999" in scope.ignoredLinks, "a Notion link that is not a mention is still not scope")
+        assertFalse(scope.ignoredLinks.any { it.contains(sourcesDatabaseId.replace("-", "")) }, "the mention's own href is not a separate link")
+    }
+
+    @Test
+    fun `a missing or empty Scope is no scope at all`() = runBlocking {
+        assertFalse(GoalScope.fromRichText(null).hasMentions)
+        val bare = GoalMapper.fromPage(fake.retrievePage(fake.createPage(t.goals, mapOf("Goal" to NotionValue.Title("bare"))).id))
+        assertFalse(bare.scope.hasMentions)
+        assertEquals(0, bare.scope.proseChars)
+    }
+
+    @Test
+    fun `the retired goal fields are not read, whatever they hold`() = runBlocking {
+        val sentinel = "RETIRED-FIELD-SENTINEL"
+        val row = fake.createPage(
+            t.goals,
+            mapOf(
+                "Goal" to NotionValue.Title("g"), "Scope" to scopeOf("", sourcesMention),
+                "Intent" to NotionValue.RichText(sentinel), "Metric" to NotionValue.RichText(sentinel), "Metric Note" to NotionValue.RichText(sentinel),
+                "Target Links" to NotionValue.RichText(sentinel, links = listOf("https://www.notion.so/99999999999949998999999999999999")),
+                "Target Space" to NotionValue.Select("PPS Evidence Ledger"), "Goal Type" to NotionValue.Select("Review"),
+            ),
+        )
+        val goal = GoalMapper.fromPage(fake.retrievePage(row.id))
+        assertFalse(goal.toString().contains(sentinel), "a retired field leaked into the goal: $goal")
+        assertEquals(listOf(sourcesMention), goal.scope.mentions)
+    }
+
+    @Test
+    fun `an unknown status is read as null rather than failing, and the design's own words are known too`() = runBlocking {
         val row = fake.createPage(t.goals, mapOf("Goal" to NotionValue.Title("bare")))
         val goal = GoalMapper.fromPage(fake.retrievePage(row.id))
         assertNull(goal.status)
-        assertNull(goal.type)
         assertNull(goal.cycleBudget)
-        assertEquals("", goal.scope)
-        assertEquals(emptyList<String>(), goal.targetLinks)
+        assertEquals("", goal.doneWhen)
+        assertEquals(GoalStatus.DONE, GoalStatus.fromLabel("Done"))
+        assertEquals(GoalStatus.STOPPED, GoalStatus.fromLabel("Stopped"))
+        assertEquals(GoalStatus.MET, GoalStatus.fromLabel("Met"))
     }
 
     // ── Cycle ────────────────────────────────────────────────────────────────
@@ -150,7 +193,7 @@ class AgentWorkMappersTest {
 
     @Test
     fun `a cycle is read with its status, goal, budget and lease`() = runBlocking {
-        val goal = realisticGoal()
+        val goal = convergedGoal()
         val row = cycleRow(
             "Running",
             mapOf(
@@ -216,28 +259,41 @@ class AgentWorkMappersTest {
     }
 
     @Test
-    fun `finishing as Done records the end, zero tasks done, the summary, and releases the lease`() {
-        val props = CycleMapper.finish(CycleStatus.DONE, now, "Dry run: 3 planned tasks.")
+    fun `finishing as Done records the end, the tasks done, the summary and the goal feedback, and releases the lease`() {
+        val props = CycleMapper.finish(CycleStatus.DONE, now, "Executed 3 tasks.", tasksDone = 3, goalFeedback = "Done when was vague.")
         assertEquals(NotionValue.Select("Done"), props["Status"])
-        assertEquals(NotionValue.NumberValue(0.0), props["Tasks Done"])
-        assertEquals(NotionValue.RichText("Dry run: 3 planned tasks."), props["Summary"])
+        assertEquals(NotionValue.NumberValue(3.0), props["Tasks Done"])
+        assertEquals(NotionValue.RichText("Executed 3 tasks."), props["Summary"])
+        assertEquals(NotionValue.RichText("Done when was vague."), props["Goal Feedback"])
         assertEquals(now, (props["Finished"] as NotionValue.DateValue).toInstant())
         assertNull((props["Lease Until"] as NotionValue.DateValue).start, "the lease must be cleared")
         assertFalse("Worker" in props, "who ran the cycle is kept")
+        assertFalse("Status" in CycleMapper.tasksDone(2) || "Summary" in CycleMapper.tasksDone(2))
+    }
+
+    @Test
+    fun `finishing without feedback leaves Goal Feedback untouched`() {
+        assertFalse("Goal Feedback" in CycleMapper.finish(CycleStatus.FAILED, now, "x", tasksDone = 0))
+    }
+
+    @Test
+    fun `Tasks Done is set from a count, so a repeat after a restart cannot overcount`() {
+        assertEquals(mapOf("Tasks Done" to NotionValue.NumberValue(4.0)), CycleMapper.tasksDone(4))
+        assertEquals(CycleMapper.tasksDone(4), CycleMapper.tasksDone(4))
     }
 
     @Test
     fun `a cycle can finish only as Done or Failed`() {
-        CycleMapper.finish(CycleStatus.FAILED, now, "x")
+        CycleMapper.finish(CycleStatus.FAILED, now, "x", 0)
         for (bad in listOf(CycleStatus.QUEUED, CycleStatus.RUNNING, CycleStatus.PAUSED, CycleStatus.CANCELLED)) {
-            assertThrows(IllegalArgumentException::class.java) { CycleMapper.finish(bad, now, "x") }
+            assertThrows(IllegalArgumentException::class.java) { CycleMapper.finish(bad, now, "x", 0) }
         }
     }
 
     @Test
     fun `no cycle write carries a computed value`() = runBlocking {
         val cycle = CycleMapper.fromPage(fake.retrievePage(cycleRow().id))
-        val all = CycleMapper.claim(cycle, "w", now, lease, 10) + CycleMapper.heartbeat(lease) + CycleMapper.progress("p") + CycleMapper.finish(CycleStatus.DONE, now, "s")
+        val all = CycleMapper.claim(cycle, "w", now, lease, 10) + CycleMapper.heartbeat(lease) + CycleMapper.progress("p") + CycleMapper.finish(CycleStatus.DONE, now, "s", 1, "f") + CycleMapper.tasksDone(1)
         assertTrue(all.values.none { it.isReadOnly })
     }
 
@@ -304,11 +360,47 @@ class AgentWorkMappersTest {
         assertTrue(title.length <= 2000)
     }
 
-    // ── Escalation ───────────────────────────────────────────────────────────
+    @Test
+    fun `starting a task sets Running and when, and nothing else`() {
+        val props = AgentTaskMapper.start(now)
+        assertEquals(setOf("Status", "Started"), props.keys)
+        assertEquals(NotionValue.Select("Running"), props["Status"])
+    }
+
+    @Test
+    fun `a task settles in one write - its final Status, its Result and when it finished`() {
+        for (status in listOf(TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.FAILED)) {
+            val props = AgentTaskMapper.settle(status, "what was found", now)
+            assertEquals(setOf("Status", "Result", "Finished"), props.keys, status.label)
+            assertEquals(NotionValue.Select(status.label), props["Status"])
+            assertEquals(NotionValue.RichText("what was found"), props["Result"])
+            assertTrue(props.values.none { it.isReadOnly })
+        }
+        for (bad in listOf(TaskStatus.PLANNED, TaskStatus.RUNNING, TaskStatus.SUPERSEDED)) {
+            assertThrows(IllegalArgumentException::class.java) { AgentTaskMapper.settle(bad, "x", now) }
+        }
+    }
+
+    @Test
+    fun `a task row is read with its Result and the links on its row, and Done Blocked Failed and Superseded are settled`() = runBlocking {
+        val row = fake.createPage(
+            t.tasks,
+            mapOf(
+                "Task" to NotionValue.Title("t"), "Status" to NotionValue.Select("Done"), "Result" to NotionValue.RichText("found"),
+                "Target Links" to NotionValue.RichText("https://www.notion.so/aaaaaaaaaaaa4aaa8aaa000000000001\nhttps://www.notion.so/bbbbbbbbbbbb4bbb8bbb000000000002"),
+            ),
+        )
+        val task = AgentTaskMapper.fromPage(fake.retrievePage(row.id))
+        assertEquals("found", task.result)
+        assertEquals(2, task.targetLinks.size)
+        assertTrue(task.settled)
+        assertTrue(task.copy(status = TaskStatus.BLOCKED).settled && task.copy(status = TaskStatus.FAILED).settled && task.copy(status = TaskStatus.SUPERSEDED).settled)
+        assertFalse(task.copy(status = TaskStatus.PLANNED).settled || task.copy(status = TaskStatus.RUNNING).settled, "a Running task was interrupted and runs again")
+    }
 
     @Test
     fun `an escalation is read with its resolution and what it belongs to`() = runBlocking {
-        val goal = realisticGoal()
+        val goal = convergedGoal()
         val row = fake.createPage(
             t.escalations,
             mapOf(

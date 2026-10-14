@@ -14,9 +14,14 @@ class CyclePlanValidatorTest {
     private val outsideRow = "https://www.notion.so/aaaaaaaaaaaa4aaa8aaa000000000099"
     private val memoPdf = "https://example.org/board-memo.pdf"
 
-    private val allowed = AllowedLinks(
+    private val databaseUrl = "https://www.notion.so/dddddddddddd4ddd8ddd000000000001"
+    private val rowOfDatabase = "https://www.notion.so/eeeeeeeeeeee4eee8eee000000000001"
+
+    /** Two mentioned pages, one mentioned database, and one listed row of that database. Nothing external, ever. */
+    private val allowed = AllowedScope(
         pageIds = setOf("aaaaaaaa-aaaa-4aaa-8aaa-000000000001", "aaaaaaaa-aaaa-4aaa-8aaa-000000000002"),
-        externalUrls = setOf(memoPdf),
+        databaseIds = setOf("dddddddd-dddd-4ddd-8ddd-000000000001"),
+        rowIds = setOf("eeeeeeee-eeee-4eee-8eee-000000000001"),
     )
 
     private fun task(
@@ -35,14 +40,14 @@ class CyclePlanValidatorTest {
     @Test
     fun `a good task is accepted with its links, and order is assigned by code`() {
         val plan = validate(
-            task("Read the Oct 6 Board memo", "Read", links = arrayOf(memoRow, memoPdf)),
+            task("Read the Oct 6 Board memo", "Read", links = arrayOf(memoRow, databaseUrl)),
             task("Check the audit's headline figure", "Check", links = arrayOf(auditRow)),
             task("Consolidate the findings", "Consolidate"),
         )
         assertTrue(plan.rejected.isEmpty())
         assertEquals(listOf(1, 2, 3), plan.tasks.map { it.order })
         assertEquals(listOf(TaskType.READ, TaskType.CHECK, TaskType.CONSOLIDATE), plan.tasks.map { it.type })
-        assertEquals(listOf(memoRow, memoPdf), plan.tasks[0].targetLinks)
+        assertEquals(listOf(memoRow, databaseUrl), plan.tasks[0].targetLinks)
         assertEquals(emptyList<String>(), plan.tasks[2].targetLinks, "a task need not link anything")
     }
 
@@ -137,6 +142,31 @@ class CyclePlanValidatorTest {
     }
 
     @Test
+    fun `a mentioned page, a mentioned database and a row of a mentioned database are all in scope`() {
+        val plan = validate(
+            task("Page", links = arrayOf(memoRow)),
+            task("Database", links = arrayOf(databaseUrl)),
+            task("Row", links = arrayOf(rowOfDatabase)),
+        )
+        assertTrue(plan.rejected.isEmpty(), plan.rejected.toString())
+        assertEquals(3, plan.tasks.size)
+    }
+
+    @Test
+    fun `an external URL is never in scope, even one that sits in a Sources row the goal can read`() {
+        val rejection = validate(task(links = arrayOf(memoPdf))).onlyRejection()
+        assertEquals(RejectReason.LINK_NOT_ALLOWED, rejection.reason)
+        assertEquals(RejectReason.LINK_NOT_ALLOWED, validate(task(links = arrayOf("https://www.notion.so.evil.example/aaaaaaaaaaaa4aaa8aaa000000000001"))).onlyRejection().reason, "a lookalike host")
+        assertEquals(RejectReason.LINK_NOT_ALLOWED, validate(task(links = arrayOf("https://evil.example/notion.so/aaaaaaaaaaaa4aaa8aaa000000000001"))).onlyRejection().reason, "a Notion-looking path on another host")
+    }
+
+    @Test
+    fun `a page or row that Scope does not reach is rejected, however Notion-looking the link is`() {
+        assertEquals(RejectReason.LINK_NOT_ALLOWED, validate(task(links = arrayOf(outsideRow))).onlyRejection().reason)
+        assertEquals(RejectReason.LINK_NOT_ALLOWED, validate(task(links = arrayOf("https://www.notion.so/eeeeeeeeeeee4eee8eee000000000002"))).onlyRejection().reason, "a row beyond the ones listed")
+    }
+
+    @Test
     fun `a task is rejected as a whole for one bad link, with the good ones not rescued`() {
         val plan = validate(task("Mixed", links = arrayOf(memoRow, outsideRow)), task("Clean", links = arrayOf(memoRow)))
         assertEquals(listOf("Clean"), plan.tasks.map { it.title })
@@ -169,7 +199,7 @@ class CyclePlanValidatorTest {
 
     @Test
     fun `with nothing allowed, every link is rejected and a task without links still passes`() {
-        val plan = CyclePlanValidator.validate(listOf(task(links = arrayOf(memoRow)), task("No links")), 10, AllowedLinks.NONE)
+        val plan = CyclePlanValidator.validate(listOf(task(links = arrayOf(memoRow)), task("No links")), 10, AllowedScope.NONE)
         assertEquals(listOf("No links"), plan.tasks.map { it.title })
         assertEquals(RejectReason.LINK_NOT_ALLOWED, plan.onlyRejection().reason)
     }

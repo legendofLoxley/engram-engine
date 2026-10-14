@@ -2,13 +2,23 @@
   "setName": "agent-worker",
   "tokenRef": "file:/home/halo/development/hermes-webui-dev/.notion-worker-token",
   "tables": [
-    { "name": "goals",       "dataSourceId": "2ee6db65-bade-4662-a3e5-0246bd5b733f", "databaseId": "20d47dc9f97c445ea99cf87bfc70f376", "access": "read-only" },
-    { "name": "cycles",      "dataSourceId": "545ccad7-35ac-4131-b69c-cdbd278fe774", "databaseId": "80a97bf409394cab9701a8d162a45cda", "access": "read-write" },
-    { "name": "agent-tasks", "dataSourceId": "894c2022-6542-4312-b6bd-fb746f87af41", "databaseId": "b1c17008b6b941e5b541d3ea9d19b4d7", "access": "read-write", "idempotencyKeyProperty": "Op key" },
-    { "name": "escalations", "dataSourceId": "b1794330-8d8a-47c4-81a4-30603528ea55", "databaseId": "89d30c7db5834772b494301657631510", "access": "read-only" },
-    { "name": "questions",   "dataSourceId": "1bcee51b-37ac-41a3-897b-9d107f34be8f", "databaseId": "2115d7a81d2e4e588a88bb62a8f1769d", "access": "read-only" },
-    { "name": "claims",      "dataSourceId": "b3a341cb-8915-4521-a1e4-59d0b87ea242", "databaseId": "b99dc17f7bd9408a9e28cf3ac4fad04e", "access": "read-only" },
-    { "name": "sources",     "dataSourceId": "99b80257-9ec4-4c2c-bf41-4ea0cfc66994", "databaseId": "6e9ea25de7334d899d7a52783509ff54", "access": "read-only" },
-    { "name": "evidence",    "dataSourceId": "275e6390-ba93-40e6-a887-790ed35345ad", "databaseId": "73f9afe3d9d24e9f8c95dc0819e6f380", "access": "read-only" }
+    { "name": "goals",                    "dataSourceId": "2ee6db65-bade-4662-a3e5-0246bd5b733f", "databaseId": "20d47dc9f97c445ea99cf87bfc70f376", "access": "read-only" },
+    { "name": "cycles",                   "dataSourceId": "545ccad7-35ac-4131-b69c-cdbd278fe774", "databaseId": "80a97bf409394cab9701a8d162a45cda", "access": "read-write", "pageBodyAppend": true },
+    { "name": "agent-tasks",              "dataSourceId": "894c2022-6542-4312-b6bd-fb746f87af41", "databaseId": "b1c17008b6b941e5b541d3ea9d19b4d7", "access": "read-write", "idempotencyKeyProperty": "Op key" },
+    { "name": "escalations",              "dataSourceId": "b1794330-8d8a-47c4-81a4-30603528ea55", "databaseId": "89d30c7db5834772b494301657631510", "access": "read-only" },
+    { "name": "questions",                "dataSourceId": "1bcee51b-37ac-41a3-897b-9d107f34be8f", "databaseId": "2115d7a81d2e4e588a88bb62a8f1769d", "access": "read-only" },
+    { "name": "findings",                 "dataSourceId": "b3a341cb-8915-4521-a1e4-59d0b87ea242", "databaseId": "b99dc17f7bd9408a9e28cf3ac4fad04e", "access": "read-only" },
+    { "name": "sources",                  "dataSourceId": "99b80257-9ec4-4c2c-bf41-4ea0cfc66994", "databaseId": "6e9ea25de7334d899d7a52783509ff54", "access": "read-only" },
+    { "name": "memory-containers",        "dataSourceId": "d67376eb-af39-4ee5-bae1-76b7875e15f5", "databaseId": "63cc7ee32d704e2585baffac739cef93", "access": "read-only" },
+    { "name": "memory-items",             "dataSourceId": "e6e42d42-cb55-4ad1-8dd3-36e64fdad1fb", "databaseId": "9ab7917ebda1471dbad8e1d6304b575b", "access": "read-only" },
+    { "name": "memory-entities",          "dataSourceId": "c128ebfe-466e-4bd8-ab9f-8b6bc062354b", "databaseId": "d8fd7ff9f7a64602bd638e67f68ac91e", "access": "read-only" },
+    { "name": "memory-connections",       "dataSourceId": "1e931e85-7f0a-42ec-bbfb-12ccfe3f6c11", "databaseId": "5672364e71bd4ba19fa3ebe11da6b036", "access": "read-only" },
+    { "name": "memory-sessions",          "dataSourceId": "50a754a0-1172-4250-ac22-e93d66332a52", "databaseId": "387d735e446a44d4ac3cf1c711a40c4d", "access": "read-only" },
+    { "name": "memory-sources",           "dataSourceId": "977743ba-9eb5-4150-bcbf-4dc4c8d408e7", "databaseId": "668dc895f790492f950d89d2ef0a4aa2", "access": "read-only" },
+    { "name": "memory-template-changes",  "dataSourceId": "f661f9c4-4fae-450c-9693-12de515b7762", "databaseId": "a9b02cef806a4de5a89a86047112c452", "access": "read-only" }
+  ],
+  "readablePages": [
+    { "name": "persona", "pageId": "3f1d0721d4e481d588c6f320f5fa25f8" },
+    { "name": "reading-essay-excerpt", "pageId": "3f8d0721d4e481deb87bec779d10acfc" }
   ]
 }
