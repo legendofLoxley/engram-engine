@@ -39,6 +39,20 @@ object SchemaBootstrap {
                 vt.createProperty("metadata", Type.STRING)      // JSON
             }
 
+            // A passage of a Source: where it sits (page, section, message), its text and a hash of that text.
+            // Linked from its Source by CONTAINS (position = ordinal) and quoted by items (QUOTES, Item -> Chunk).
+            // Never a Phrase subtype and never ASSERTed, so the Context Horizon cannot surface a chunk as an item.
+            ensureVertex(schema, "Chunk") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("sourceUid", Type.STRING)
+                vt.createProperty("ordinal", Type.INTEGER)
+                vt.createProperty("location", Type.STRING)
+                vt.createProperty("text", Type.STRING)
+                vt.createProperty("hash", Type.STRING)
+                vt.createProperty("createdAt", Type.LONG)
+            }
+
             ensureVertex(schema, "User") { vt ->
                 vt.createProperty("uid", Type.STRING)
                 vt.createProperty("username", Type.STRING)
@@ -310,6 +324,23 @@ object SchemaBootstrap {
             // RELATED_TO carries one. A scoping aid only: ownership is still re-verified through
             // TRUSTS -> Source -> ASSERTS before anything is surfaced.
             ensureProperty(schema, "Phrase",  "ownerEmail",          Type.STRING)
+            // Source gains what a read source needs (all optional; every existing Source row simply has none of them):
+            // where it lives, a hash of the content as read, when it was read, how much of it was read (full |
+            // partial | ocr), the owner, and for an email message the thread it belongs to. One email message
+            // is one Source; the thread is a property. See SourceStore.
+            ensureProperty(schema, "Source",  "locator",             Type.STRING)
+            ensureProperty(schema, "Source",  "contentHash",         Type.STRING)
+            ensureProperty(schema, "Source",  "readAt",              Type.LONG)
+            ensureProperty(schema, "Source",  "readMode",            Type.STRING)
+            ensureProperty(schema, "Source",  "threadId",            Type.STRING)
+            ensureProperty(schema, "Source",  "ownerEmail",          Type.STRING)
+            // QUOTES is now Item -> Chunk: the item quotes that passage. It carries who recorded the item (the
+            // writer: director, user, hermes) and, separately, who asserted the claim (the claimant: a sender, an
+            // author), plus the owner for scoping. No score of any kind is computed from it.
+            ensureProperty(schema, "QUOTES",  "writer",              Type.STRING)
+            ensureProperty(schema, "QUOTES",  "claimant",            Type.STRING)
+            ensureProperty(schema, "QUOTES",  "ownerEmail",          Type.STRING)
+            ensureProperty(schema, "QUOTES",  "createdAt",           Type.LONG)
             // Same properties as the ensureVertex blocks above, repeated so a database that already ran
             // an earlier revision of those blocks picks them up.
             ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)
@@ -393,6 +424,9 @@ object SchemaBootstrap {
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Source",      "uid")
             ensureIndex(schema, "Source",      "name")
+            ensureIndex(schema, "Source",      "contentHash")
+            ensureIndex(schema, "Chunk",       "uid")
+            ensureIndex(schema, "Chunk",       "sourceUid")
             ensureIndex(schema, "User",        "uid")
             ensureIndex(schema, "User",        "email")
             ensureIndex(schema, "ScoreType",   "uid")

@@ -44,6 +44,16 @@ data class RecordItem(
     val askWhichProject: Boolean = false,
     /** A short label for a task or event (see [OperationParser.acceptableTitle]); the item's text when present, with [quote] kept as its source. */
     val title: String? = null,
+    /**
+     * The chunk this item was taken from, when it came from a read source rather than from the user's own words. Set only by
+     * code that holds the chunk (never by [OperationParser]): [quote] must then be a verbatim passage of that chunk, and the
+     * item is tied to it on apply. Null for everything the user says.
+     */
+    val chunkUid: String? = null,
+    /** Who asserted the claim, when it is someone other than the writer (a sender, an author). Only meaningful with [chunkUid]. */
+    val claimant: String? = null,
+    /** Who recorded the item, for an item from a source: `director`, `user` or `hermes`. Only meaningful with [chunkUid]. */
+    val writer: String? = null,
 ) : HorizonOperation { override val verb get() = "record_item" }
 
 @Serializable
