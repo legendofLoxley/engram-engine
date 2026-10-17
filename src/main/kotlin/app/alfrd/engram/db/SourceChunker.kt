@@ -36,8 +36,8 @@ object SourceChunker {
 
     /**
      * Drops the quoted reply history of an email body: the "On <date>, <name> wrote:" line and everything after it,
-     * an "-----Original Message-----" or "From:" header block and everything after it, and any line (with its
-     * surrounding block) that starts with ">". What the writer wrote above them stays.
+     * an "-----Original Message-----" or "From:" header block and everything after it, and every line that itself starts
+     * with ">" (only that line is dropped, not the lines around it). What the writer wrote stays.
      */
     fun stripQuotedReplies(body: String): String {
         val kept = ArrayList<String>()

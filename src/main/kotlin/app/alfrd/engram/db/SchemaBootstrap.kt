@@ -341,6 +341,9 @@ object SchemaBootstrap {
             ensureProperty(schema, "QUOTES",  "claimant",            Type.STRING)
             ensureProperty(schema, "QUOTES",  "ownerEmail",          Type.STRING)
             ensureProperty(schema, "QUOTES",  "createdAt",           Type.LONG)
+            // The operation key of the source item that made this edge, namespaced by owner: how a replayed commit finds the
+            // item again, whether it was newly created or matched an item already on the list (see SourceStore.itemForOpKey).
+            ensureProperty(schema, "QUOTES",  "opKey",               Type.STRING)
             // Same properties as the ensureVertex blocks above, repeated so a database that already ran
             // an earlier revision of those blocks picks them up.
             ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)
@@ -427,6 +430,7 @@ object SchemaBootstrap {
             ensureIndex(schema, "Source",      "contentHash")
             ensureIndex(schema, "Chunk",       "uid")
             ensureIndex(schema, "Chunk",       "sourceUid")
+            ensureIndex(schema, "QUOTES",      "opKey")
             ensureIndex(schema, "User",        "uid")
             ensureIndex(schema, "User",        "email")
             ensureIndex(schema, "ScoreType",   "uid")

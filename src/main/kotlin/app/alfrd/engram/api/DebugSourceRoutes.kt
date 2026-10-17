@@ -3,6 +3,7 @@ package app.alfrd.engram.api
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
+import app.alfrd.engram.cognitive.pipeline.horizon.CommitFailedException
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.ItemKind
 import app.alfrd.engram.cognitive.pipeline.horizon.SourceCommitService
@@ -69,6 +70,8 @@ fun Application.configureDebugSourceRoutes(
         authenticate("debug-token") {
             route("/debug") {
                 post("/sources/commit") {
+                    // The loopback check comes before the body is read: a caller that is not local gets 403 whatever it sent.
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
                     val req = call.receive<DebugSourceCommitRequest>()
                     val email = call.userOrRefuse(req.syntheticUserId) ?: return@post
                     DebugConverseService.ensureSyntheticUser(db, email)
@@ -83,6 +86,8 @@ fun Application.configureDebugSourceRoutes(
                         )
                     } catch (e: IllegalArgumentException) {
                         return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "bad request")))
+                    } catch (e: CommitFailedException) {
+                        return@post call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to (e.message ?: "commit failed")))
                     }
                     call.respond(HttpStatusCode.OK, report)
                 }

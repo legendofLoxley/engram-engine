@@ -54,6 +54,8 @@ data class RecordItem(
     val claimant: String? = null,
     /** Who recorded the item, for an item from a source: `director`, `user` or `hermes`. Only meaningful with [chunkUid]. */
     val writer: String? = null,
+    /** The operation key for an item from a source, derived from its content (see [SourceCommitService]); used in place of `requestId:index`. Only meaningful with [chunkUid]. */
+    val itemKey: String? = null,
 ) : HorizonOperation { override val verb get() = "record_item" }
 
 @Serializable

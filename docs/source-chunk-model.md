@@ -13,7 +13,7 @@ User -TRUSTS-> Source -CONTAINS(position = ordinal)-> Chunk <-QUOTES(writer, cla
   All new properties are optional, so no existing row changes.
 - **Chunk** (new vertex): `ownerEmail`, `sourceUid`, `ordinal`, `location` (`section: <heading>`, `part n`, `message, part n`), `text`, `hash`.
   Documents are cut at headings and paragraph edges up to 1,500 characters, with no overlap. For email the quoted reply history ("On … wrote:",
-  `>` lines, "Original Message" and Outlook header blocks) is dropped before chunking. A chunk is never ASSERTed and is not a Phrase, so the Context
+  `>` lines (each such line only), "Original Message" and Outlook header blocks) is dropped before chunking. A chunk is never ASSERTed and is not a Phrase, so the Context
   Horizon cannot surface it as an item.
 - **Items** keep being made by the existing Horizon operations. `record_item` gains three optional fields (`chunkUid`, `claimant`, `writer`) that only
   code holding a chunk sets; the applier checks the quote is a passage of that chunk and the chunk is the user's, records the item as usual, and adds

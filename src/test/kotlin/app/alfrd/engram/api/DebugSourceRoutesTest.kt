@@ -130,4 +130,29 @@ class DebugSourceRoutesTest {
             assertTrue(n(manager, "Source") <= 2) // the source itself may be stored; no item is
         }
     }
+
+    @Test
+    fun `a caller that is not local gets 403 on commit whatever it sent, before the body is read`() = withDb { manager ->
+        testApplication {
+            application { module(manager, isLoopback = { false }) }
+            for (body in listOf("not json at all", "{}", """{"syntheticUserId":""}""", commitBody())) {
+                val r = client.post("/debug/sources/commit") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody(body) }
+                assertEquals(HttpStatusCode.Forbidden, r.status, body.take(30))
+            }
+            assertEquals(0L, n(manager, "Source"))
+        }
+    }
+
+    @Test
+    fun `an unknown readMode is a 400 and writes nothing`() = withDb { manager ->
+        testApplication {
+            application { module(manager) }
+            val r = client.post("/debug/sources/commit") {
+                header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json")
+                setBody(commitBody().replace("\"title\":\"Re: Venue\"", "\"title\":\"Re: Venue\",\"readMode\":\"skimmed\""))
+            }
+            assertEquals(HttpStatusCode.BadRequest, r.status)
+            assertEquals(0L, n(manager, "Source"))
+        }
+    }
 }

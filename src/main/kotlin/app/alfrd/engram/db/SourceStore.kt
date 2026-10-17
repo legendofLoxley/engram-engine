@@ -63,6 +63,7 @@ class SourceStore(private val db: Database) {
 
     fun ingest(userEmail: String, input: SourceInput): IngestResult {
         require(input.type in TYPES) { "unknown source type" }
+        require(input.readMode in READ_MODES) { "readMode must be one of: ${READ_MODES.joinToString(", ")}" }
         require(input.locator.isNotBlank() && input.text.isNotBlank()) { "a source needs a locator and text" }
         val hash = SourceChunker.contentHash(input.text)
         synchronized(LOCK) {
@@ -130,21 +131,36 @@ class SourceStore(private val db: Database) {
      * not the user's; a second call for the same pair writes nothing. [writer] is who recorded the item; [claimant], when
      * given, is who asserted the claim — kept apart from it.
      */
-    fun linkItem(userEmail: String, itemUid: String, chunkUid: String, writer: String, claimant: String?): LinkOutcome = synchronized(LOCK) {
+    fun linkItem(userEmail: String, itemUid: String, chunkUid: String, writer: String, claimant: String?, opKey: String? = null): LinkOutcome = synchronized(LOCK) {
         val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return LinkOutcome.REFUSED
         val chunk = chunkVertex(userEmail, chunkUid) ?: return LinkOutcome.REFUSED
-        if (item.getEdges(Vertex.DIRECTION.OUT, "QUOTES").any { it.inVertex.identity == chunk.identity }) return LinkOutcome.ALREADY_LINKED
+        val existing = item.getEdges(Vertex.DIRECTION.OUT, "QUOTES").firstOrNull { it.inVertex.identity == chunk.identity }
+        if (existing != null) {
+            // Linked already (an earlier commit that did not record a key): keep the key on the edge so a replay finds it.
+            if (opKey != null && existing.get("opKey") == null) db.transaction { existing.modify().set("opKey", "$userEmail|$opKey").save() }
+            return LinkOutcome.ALREADY_LINKED
+        }
         db.transaction {
             item.modify().newEdge("QUOTES", chunk, false).apply {
                 set("writer", writer)
                 claimant?.takeIf { it.isNotBlank() }?.let { set("claimant", it) }
                 set("ownerEmail", userEmail)
                 set("createdAt", System.currentTimeMillis())
+                opKey?.let { set("opKey", "$userEmail|$it") }
                 save()
             }
         }
         LinkOutcome.CREATED
     }
+
+    /**
+     * The item a source operation [opKey] was applied to, or null if none was. The key is on the QUOTES edge, so this finds the
+     * item whether the operation created it or matched one already on the list, and whatever has happened to that item since
+     * (resolved, or pushed out of the recent-items window the duplicate check scans).
+     */
+    fun itemForOpKey(userEmail: String, opKey: String): String? =
+        db.query("sql", "SELECT @out.uid AS uid FROM QUOTES WHERE opKey = :k AND ownerEmail = :o LIMIT 1", mapOf("k" to "$userEmail|$opKey", "o" to userEmail))
+            .use { rs -> if (rs.hasNext()) rs.next().toMap()["uid"] as? String else null }
 
     /** Every chunk [itemUid] quotes, with its location, its source and the writer and claimant. Empty for an item this user does not own. */
     fun provenanceOf(userEmail: String, itemUid: String): List<ItemProvenance> {
@@ -185,6 +201,7 @@ class SourceStore(private val db: Database) {
     companion object {
         const val EMAIL = "email_message"
         val TYPES = setOf("notion_page", "document", EMAIL)
+        val READ_MODES = listOf("full", "partial", "ocr")
         /** One lock for the process: a find-then-create must not interleave with another. */
         private val LOCK = Any()
     }
