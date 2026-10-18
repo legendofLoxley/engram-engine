@@ -1,5 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline.horizon
 
+import app.alfrd.engram.db.LinkOutcome
+import app.alfrd.engram.db.SourceChunker
+import app.alfrd.engram.db.SourceStore
 import org.slf4j.LoggerFactory
 import java.time.ZoneId
 
@@ -114,6 +117,8 @@ data class AppliedOperation(
 class HorizonOperationApplier(
     private val structure: HorizonStructureStore,
     private val graph: HorizonGraphStore,
+    /** Needed only for a [RecordItem] that names a chunk; without it such an operation is refused. */
+    private val sources: SourceStore? = null,
 ) {
     private val logger = LoggerFactory.getLogger(HorizonOperationApplier::class.java)
 
@@ -127,7 +132,7 @@ class HorizonOperationApplier(
         val createdContainerUids = mutableMapOf<String, String>()
         return operations.mapIndexed { index, op ->
             try {
-                applyOne(userEmail, cycleSeq, "$requestId:$index", op, createdContainerUids, zone)
+                applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone)
             } catch (e: Exception) {
                 logger.warn("apply ${op.verb} failed for userEmail=$userEmail: ${e.message}")
                 AppliedOperation(op, applied = false, summary = "Could not apply ${op.verb}")
@@ -148,24 +153,8 @@ class HorizonOperationApplier(
             record?.let { createdContainerUids[OperationParser.normalizeName(op.name)] = it.uid }
             AppliedOperation(op, record != null, if (record != null) "Created ${op.kind.name.lowercase()} \"${record.name}\"" else "Could not create ${op.kind.name.lowercase()} \"${op.name}\"")
         }
-        is RecordItem -> duplicateOf(userEmail, opKey, op)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone) } ?: run {
-            val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
-            // The model rarely files an item even when the message plainly names its project, and an unfiled
-            // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
-            // words say it belongs — only when that is unambiguous. See [ProjectInference].
-            val inferred = if (stated == null && !op.askWhichProject) {
-                ProjectInference.infer("${op.quote} ${op.title ?: ""}", structure.listContainers(userEmail, ContainerKind.PROJECT))
-            } else null
-            val projectUid = stated ?: inferred?.uid
-            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
-            if (record == null) {
-                AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
-            } else {
-                op.about.forEach { structure.linkAbout(userEmail, cycleSeq, record.uid, it) }
-                val filed = inferred?.let { " (filed under \"${it.name}\", from what you said)" } ?: ""
-                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed", record.uid, record.text)
-            }
-        }
+        is RecordItem -> if (op.chunkUid != null) applyFromChunk(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
+            else recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
         is ResolveItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val done = structure.resolve(userEmail, cycleSeq, op.targetUid, resolved = true)
@@ -207,6 +196,51 @@ class HorizonOperationApplier(
             AppliedOperation(op, done, if (done) "Linked ${labelOf(userEmail, op.fromUid)} with ${labelOf(userEmail, op.toUid)}" else "Could not link those items")
         }
         is HoldForChoice -> AppliedOperation(op, true, "Held \"${op.quote}\" without saving it, pending the user's choice")
+    }
+
+    /** A [RecordItem] as the user's own words: the duplicate check, then project inference, then the write. */
+    private suspend fun recordPlain(
+        userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
+    ): AppliedOperation = duplicateOf(userEmail, opKey, op)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone) } ?: run {
+            val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
+            // The model rarely files an item even when the message plainly names its project, and an unfiled
+            // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
+            // words say it belongs — only when that is unambiguous. See [ProjectInference].
+            val inferred = if (stated == null && !op.askWhichProject) {
+                ProjectInference.infer("${op.quote} ${op.title ?: ""}", structure.listContainers(userEmail, ContainerKind.PROJECT))
+            } else null
+            val projectUid = stated ?: inferred?.uid
+            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
+            if (record == null) {
+                AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
+            } else {
+                op.about.forEach { structure.linkAbout(userEmail, cycleSeq, record.uid, it) }
+                val filed = inferred?.let { " (filed under \"${it.name}\", from what you said)" } ?: ""
+                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed", record.uid, record.text)
+            }
+        
+    }
+
+    /**
+     * An item taken from a read source: the quote must be a passage of the named chunk (checked here, in code), and the item
+     * is then recorded exactly as any other and tied to the chunk. This also holds when it turns out to be an item already on
+     * the list: that item gains this chunk as a further place it was found. Recording the same chunk twice adds nothing.
+     */
+    private suspend fun applyFromChunk(
+        userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
+    ): AppliedOperation {
+        val store = sources ?: return AppliedOperation(op, false, "Could not record from a source: no source store")
+        // A key already applied is a replay: the item (created, or matched when it was first applied) is found by the key on
+        // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
+        store.itemForOpKey(userEmail, opKey)?.let { return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)", existingUid = it) }
+        val chunk = store.chunk(userEmail, op.chunkUid!!) ?: return AppliedOperation(op, false, "Could not record from a source: that chunk is not yours")
+        if (op.quote.isBlank() || !SourceChunker.normalize(chunk.text).contains(SourceChunker.normalize(op.quote))) {
+            return AppliedOperation(op, false, "Could not record from a source: the quote is not in the chunk")
+        }
+        val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
+        val uid = result.resultUid ?: result.existingUid ?: return result
+        val linked = store.linkItem(userEmail, uid, chunk.uid, op.writer?.takeIf { it.isNotBlank() } ?: "director", op.claimant, opKey)
+        return if (linked == LinkOutcome.REFUSED) result.copy(applied = false, summary = "Recorded but could not be tied to its chunk") else result
     }
 
     /**
