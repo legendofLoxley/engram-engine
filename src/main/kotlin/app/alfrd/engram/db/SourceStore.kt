@@ -128,17 +128,26 @@ class SourceStore(private val db: Database) {
 
     /**
      * Ties [itemUid] (an item this user owns) to [chunkUid] (a chunk this user owns) with `QUOTES`. Refused when either is
-     * not the user's; a second call for the same pair writes nothing. [writer] is who recorded the item; [claimant], when
-     * given, is who asserted the claim — kept apart from it.
+     * not the user's. [writer] is who recorded the item; [claimant], when given, is who asserted the claim, kept apart from it.
+     *
+     * **One link per operation key.** Several drafts can lead to the same item from the same chunk (two wordings of one task,
+     * both matching the task already on the list); each draft's key has its own edge, so each is found again on a replay. A
+     * second call with the same key writes nothing. An older edge for the pair that carries no key is adopted by the first key
+     * that arrives. Without a key, one link per pair.
      */
     fun linkItem(userEmail: String, itemUid: String, chunkUid: String, writer: String, claimant: String?, opKey: String? = null): LinkOutcome = synchronized(LOCK) {
         val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return LinkOutcome.REFUSED
         val chunk = chunkVertex(userEmail, chunkUid) ?: return LinkOutcome.REFUSED
-        val existing = item.getEdges(Vertex.DIRECTION.OUT, "QUOTES").firstOrNull { it.inVertex.identity == chunk.identity }
-        if (existing != null) {
-            // Linked already (an earlier commit that did not record a key): keep the key on the edge so a replay finds it.
-            if (opKey != null && existing.get("opKey") == null) db.transaction { existing.modify().set("opKey", "$userEmail|$opKey").save() }
-            return LinkOutcome.ALREADY_LINKED
+        val key = opKey?.let { "$userEmail|$it" }
+        val pair = item.getEdges(Vertex.DIRECTION.OUT, "QUOTES").filter { it.inVertex.identity == chunk.identity }
+        if (key == null) {
+            if (pair.isNotEmpty()) return LinkOutcome.ALREADY_LINKED
+        } else {
+            if (pair.any { it.get("opKey") == key }) return LinkOutcome.ALREADY_LINKED
+            pair.firstOrNull { it.get("opKey") == null }?.let { keyless ->
+                db.transaction { keyless.modify().set("opKey", key).save() }
+                return LinkOutcome.ALREADY_LINKED
+            }
         }
         db.transaction {
             item.modify().newEdge("QUOTES", chunk, false).apply {
@@ -146,7 +155,7 @@ class SourceStore(private val db: Database) {
                 claimant?.takeIf { it.isNotBlank() }?.let { set("claimant", it) }
                 set("ownerEmail", userEmail)
                 set("createdAt", System.currentTimeMillis())
-                opKey?.let { set("opKey", "$userEmail|$it") }
+                key?.let { set("opKey", it) }
                 save()
             }
         }
@@ -165,6 +174,7 @@ class SourceStore(private val db: Database) {
     /** Every chunk [itemUid] quotes, with its location, its source and the writer and claimant. Empty for an item this user does not own. */
     fun provenanceOf(userEmail: String, itemUid: String): List<ItemProvenance> {
         val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return emptyList()
+        // An item can have several links to one chunk (one per draft that led to it); it is shown once.
         return item.getEdges(Vertex.DIRECTION.OUT, "QUOTES").mapNotNull { edge ->
             val chunk = edge.inVertex.asVertex()
             val source = sourceByUid(userEmail, chunk.get("sourceUid") as? String ?: return@mapNotNull null) ?: return@mapNotNull null
@@ -173,7 +183,7 @@ class SourceStore(private val db: Database) {
                 sourceType = source.type, sourceLocator = source.locator, sourceTitle = source.title, readMode = source.readMode,
                 writer = edge.get("writer") as? String, claimant = edge.get("claimant") as? String,
             )
-        }
+        }.distinct()
     }
 
     private fun chunkVertex(userEmail: String, uid: String): Vertex? =

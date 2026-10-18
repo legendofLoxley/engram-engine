@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit
 class SourceCommitDefectsTest {
 
     private lateinit var manager: DatabaseManager
+    private lateinit var tempDir: java.io.File
     private lateinit var db: Database
     private lateinit var store: SourceStore
     private lateinit var structure: ArcadeHorizonStructureStore
@@ -49,7 +50,8 @@ class SourceCommitDefectsTest {
 
     @BeforeEach
     fun setUp() {
-        manager = DatabaseManager(Files.createTempDirectory("engram-defects-test-").resolve("db").toString())
+        tempDir = Files.createTempDirectory("engram-defects-test-").toFile()
+        manager = DatabaseManager(tempDir.resolve("db").toString())
         db = manager.getDatabase()
         SchemaBootstrap.bootstrap(db)
         DebugConverseService.ensureSyntheticUser(db, ana)
@@ -58,7 +60,7 @@ class SourceCommitDefectsTest {
     }
 
     @AfterEach
-    fun tearDown() = manager.close()
+    fun tearDown() { manager.close(); tempDir.deleteRecursively() }
 
     private fun service(cycles: CycleSequencer = ArcadeCycleSequencer(db)) =
         SourceCommitService(store, structure, HorizonOperationApplier(structure, ArcadeHorizonGraphStore(db), store), cycles)

@@ -30,6 +30,7 @@ import java.util.UUID
 class SourceStoreTest {
 
     private lateinit var manager: DatabaseManager
+    private lateinit var tempDir: java.io.File
     private lateinit var db: Database
     private lateinit var store: SourceStore
     private lateinit var commit: SourceCommitService
@@ -38,8 +39,8 @@ class SourceStoreTest {
 
     @BeforeEach
     fun setUp() {
-        val dir = Files.createTempDirectory("engram-sources-test-")
-        manager = DatabaseManager(dir.resolve("db").toString())
+        tempDir = Files.createTempDirectory("engram-sources-test-").toFile()
+        manager = DatabaseManager(tempDir.resolve("db").toString())
         db = manager.getDatabase()
         SchemaBootstrap.bootstrap(db)
         DebugConverseService.ensureSyntheticUser(db, ana)
@@ -50,7 +51,7 @@ class SourceStoreTest {
     }
 
     @AfterEach
-    fun tearDown() = manager.close()
+    fun tearDown() { manager.close(); tempDir.deleteRecursively() }
 
     private val doc = SourceInput(
         type = "notion_page", locator = "https://www.notion.so/abc123", title = "Kitchen plan",

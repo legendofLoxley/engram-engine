@@ -336,7 +336,7 @@ class ArcadeHorizonStructureStore(
                 findOwnedItemByOpKey(userEmail, namespacedKey)?.let { existing ->
                     // A key already known is a retry of the same write only if it is the same item. A different kind or text under
                     // the same key is a different item, and is refused rather than silently answered with the old one.
-                    if (existing.typeName == kind.typeName && (existing.get("text") as? String)?.trim() == text.trim()) return@mutate existing.toItemRecord()
+                    if (existing.typeName == kind.typeName && ItemWords.normalize(existing.get("text") as? String ?: "") == ItemWords.normalize(text)) return@mutate existing.toItemRecord()
                     logger.warn("createItem: operation key already used by a different item — refusing")
                     return@mutate null
                 }
