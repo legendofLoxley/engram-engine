@@ -22,12 +22,15 @@ class BackupIncludesCommittedWritesProofTest {
         val base = Files.createTempDirectory("engram-backup-proof-").toFile()
         try {
             val manager = DatabaseManager(File(base, "db").path)
-            val db = manager.getDatabase()
-            SchemaBootstrap.bootstrap(db)
-            db.transaction { db.newVertex("User").set("uid", "u1").set("email", "e@test.internal").set("username", "x").save() }
-            if (waitForFlush) (db as DatabaseInternal).pageManager.waitAllPagesOfDatabaseAreFlushed(db)
-            val zip = ArcadeSnapshot.backupInto(db, File(base, "bk").also { it.mkdirs() }, "graph.zip")
-            manager.close()
+            val zip = try {
+                val db = manager.getDatabase()
+                SchemaBootstrap.bootstrap(db)
+                db.transaction { db.newVertex("User").set("uid", "u1").set("email", "e@test.internal").set("username", "x").save() }
+                if (waitForFlush) (db as DatabaseInternal).pageManager.waitAllPagesOfDatabaseAreFlushed(db)
+                ArcadeSnapshot.backupInto(db, File(base, "bk").also { it.mkdirs() }, "graph.zip")
+            } finally {
+                manager.close() // before the directory is deleted, also when a round throws
+            }
             val scratch = File(base, "restored/db")
             ArcadeSnapshot.extractZip(zip, scratch)
             val restored = DatabaseFactory(scratch.path).open()
