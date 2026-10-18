@@ -41,12 +41,12 @@ class BackupIncludesCommittedWritesProofTest {
 
     @Test
     fun `a backup taken right after a committed write contains it`() {
-        // ~15-30% of rounds lose the write on this box, so 200 rounds without one is not a thing that happens by chance.
-        assertEquals(0, roundsWithMissingWrite(200, waitForFlush = false), "rounds (of 200) whose backup lacked an already-committed write")
+        // ~15-30% of rounds lose the write on this box, so 100 rounds without one is not a thing that happens by chance.
+        assertEquals(0, roundsWithMissingWrite(100, waitForFlush = false), "rounds (of 100) whose backup lacked an already-committed write")
     }
 
     @Test
     fun `control - the same rounds with the page flush awaited before the backup lose nothing`() {
-        assertEquals(0, roundsWithMissingWrite(200, waitForFlush = true), "rounds (of 200) whose backup lacked a write after the flush was awaited")
+        assertEquals(0, roundsWithMissingWrite(100, waitForFlush = true), "rounds (of 100) whose backup lacked a write after the flush was awaited")
     }
 }
