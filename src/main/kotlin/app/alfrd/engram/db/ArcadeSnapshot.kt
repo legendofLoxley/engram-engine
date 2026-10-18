@@ -2,6 +2,7 @@ package app.alfrd.engram.db
 
 import com.arcadedb.GlobalConfiguration
 import com.arcadedb.database.Database
+import com.arcadedb.database.DatabaseInternal
 import java.io.File
 import java.util.zip.ZipInputStream
 
@@ -23,6 +24,9 @@ object ArcadeSnapshot {
     /** Runs `BACKUP DATABASE` into [directory] and returns the zip it wrote, `<directory>/<dbName>/<fileName>`. */
     fun backupInto(db: Database, directory: File, fileName: String): File = synchronized(processWide) {
         require('/' !in fileName && '\\' !in fileName) { "the backup file name must be bare" }
+        // `BACKUP DATABASE` zips the files on disk, and a commit returns before the page-flush thread has written its pages,
+        // so without this a transaction that has already committed can be missing from the zip.
+        (db as DatabaseInternal).pageManager.waitAllPagesOfDatabaseAreFlushed(db)
         GlobalConfiguration.SERVER_BACKUP_DIRECTORY.setValue(directory.absolutePath)
         db.command("sql", "BACKUP DATABASE file://$fileName")
         val file = File(File(directory, db.name), fileName)
