@@ -36,7 +36,12 @@ data class DebugItemBody(val kind: String, val text: String, val quote: String, 
 data class DebugSourceCommitRequest(val syntheticUserId: String, val source: DebugSourceBody, val items: List<DebugItemBody> = emptyList(), val writer: String = "director")
 
 @Serializable
-data class DebugChunk(val ordinal: Int, val location: String, val chars: Int, val text: String)
+data class DebugChunk(
+    val ordinal: Int, val location: String, val chars: Int, val text: String,
+    // Set for a chunk of a paged file (PDF); absent for every other chunk.
+    val page: Int? = null, val printedPage: String? = null, val section: String? = null, val kind: String? = null,
+    val extractor: String? = null, val ocrConfidence: Double? = null,
+)
 
 @Serializable
 data class DebugSourceView(
@@ -95,7 +100,7 @@ fun Application.configureDebugSourceRoutes(
                     val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
                     call.respond(HttpStatusCode.OK, store.sources(email).map { s ->
                         DebugSourceView(s.uid, s.type, s.locator, s.title, s.readMode, s.threadId, s.contentHash,
-                            store.chunks(email, s.uid).map { DebugChunk(it.ordinal, it.location, it.text.length, it.text) })
+                            store.chunks(email, s.uid).map { DebugChunk(it.ordinal, it.location, it.text.length, it.text, it.page, it.printedPage, it.section, it.kind, it.extractor, it.ocrConfidence) })
                     })
                 }
                 get("/items/{uid}/provenance") {

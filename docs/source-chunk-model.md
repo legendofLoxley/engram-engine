@@ -37,5 +37,8 @@ User -TRUSTS-> Source -CONTAINS(position = ordinal)-> Chunk <-QUOTES(writer, cla
   there. An item written by an earlier attempt whose link was lost is linked on the retry and reported as `healed`, not `created`.
 - No score or confidence is computed from any of this, and memory text is never logged: logs carry counts and ids.
 
+A PDF is read into page-located chunks (page, printed page, section, tables as their own chunks, OCR where there is no text layer) by
+[pdf-source-extraction.md](pdf-source-extraction.md); it uses the same `SourceStore.ingest` and the same idempotence, with the SHA-256 of the file as the hash.
+
 Debug harness (loopback, debug token, synthetic identities only, never owner-jacob): `POST /debug/sources/commit`, `GET /debug/sources`,
 `GET /debug/items/{uid}/provenance`. It stands in for the Hermes fetch assignment, which is not built yet.

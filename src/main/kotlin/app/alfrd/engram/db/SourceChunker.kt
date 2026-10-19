@@ -2,8 +2,26 @@ package app.alfrd.engram.db
 
 import java.security.MessageDigest
 
-/** A passage cut from a source: [location] says where it sits (a section, a part, an email message), [text] is the passage. */
-data class ChunkDraft(val location: String, val text: String)
+/**
+ * A passage cut from a source: [location] says where it sits (a section, a part, an email message), [text] is the passage.
+ *
+ * The rest is only set for a chunk that comes from a paged file (see `app.alfrd.engram.pdf`): the physical [page] (1-based), the
+ * [printedPage] as printed on it (null when none was found), the [section] it sits in, its [kind] (`text` or `table`), how it was read
+ * ([extractor] `textlayer` or `ocr`, with the engine's own [ocrConfidence]), and where on the page it is ([box], JSON) and, for a table,
+ * its rows and cells ([table], JSON).
+ */
+data class ChunkDraft(
+    val location: String,
+    val text: String,
+    val page: Int? = null,
+    val printedPage: String? = null,
+    val section: String? = null,
+    val kind: String? = null,
+    val extractor: String? = null,
+    val ocrConfidence: Double? = null,
+    val box: String? = null,
+    val table: String? = null,
+)
 
 /**
  * Cuts a source's text into chunks, and fingerprints it. Pure: no graph, no clock, no logging.
@@ -98,7 +116,7 @@ object SourceChunker {
     }
 
     /** Paragraphs packed up to [MAX_CHARS]; a single paragraph longer than that is cut at the last space before the limit. */
-    private fun split(text: String): List<String> {
+    internal fun split(text: String): List<String> {
         val pieces = ArrayList<String>()
         val current = StringBuilder()
         fun flush() { if (current.isNotBlank()) pieces += current.toString().trim(); current.clear() }
