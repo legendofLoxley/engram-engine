@@ -28,7 +28,7 @@ data class DebugPdfCommitRequest(
 )
 
 @Serializable
-data class DebugPdfSourceInfo(val uid: String, val type: String, val locator: String, val title: String, val readMode: String, val fileSha256: String?, val pageCount: Int?, val ocrPages: Int?, val unreadPages: Int?)
+data class DebugPdfSourceInfo(val uid: String, val type: String, val locator: String, val title: String, val readMode: String, val fileSha256: String?, val pageCount: Int?, val ocrPages: Int?, val unreadPages: Int?, val drive: app.alfrd.engram.db.DriveFacts? = null)
 
 @Serializable
 data class DebugPdfChunkInfo(
@@ -93,7 +93,7 @@ fun Application.configureDebugPdfSourceRoutes(
                     call.respond(
                         HttpStatusCode.OK,
                         DebugPdfProvenance(
-                            DebugPdfSourceInfo(s.uid, s.type, s.locator, s.title, s.readMode, s.fileSha256, s.pageCount, s.ocrPages, s.unreadPages),
+                            DebugPdfSourceInfo(s.uid, s.type, s.locator, s.title, s.readMode, s.fileSha256, s.pageCount, s.ocrPages, s.unreadPages, s.drive),
                             store.chunks(email, s.uid).map {
                                 DebugPdfChunkInfo(it.ordinal, it.uid, it.kind, it.page, it.printedPage, it.section, it.location, it.extractor, it.ocrConfidence, it.text.length)
                             },

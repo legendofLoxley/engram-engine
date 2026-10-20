@@ -104,6 +104,90 @@ internal object TableDetector {
         return out
     }
 
+    private val NUMBER = Regex("""^[(\-–−]?[$€£]?\d[\d,]*(\.\d+)?[%)]?[KMB]?$""")
+
+    /**
+     * A table with no drawn grid: figures standing in the same columns, line after line (a designed page's side-by-side comparison, often
+     * with only a rule between rows). Rows are the baselines that carry two or more figures; a run of at least three such rows whose figures
+     * stand in the same columns is a table. Each row's label is the text left of the first column in that row's band (wrapped labels
+     * included), starting at the left edge the labels share, so a sidebar further left is not taken; the header is the text above the
+     * first row, set against the columns by position.
+     */
+    fun numericGrid(words: List<Word>): List<Pair<PdfTable, List<Word>>> {
+        val nums = words.filter { NUMBER.matches(it.text) }
+        val numRows = PageLayout.lines(nums).filter { r -> r.size >= 2 && r.zipWithNext().all { (a, b) -> b.box.x0 - a.box.x1 > 1.5 * a.size } }
+            .sortedBy { it.first().box.y1 }
+        val out = ArrayList<Pair<PdfTable, List<Word>>>()
+        var i = 0
+        while (i < numRows.size) {
+            val cols = numRows[i].map { it.box.cx }
+            var j = i + 1
+            while (j < numRows.size) {
+                val prev = numRows[j - 1]; val row = numRows[j]
+                val size = max(row.first().size, 1.0)
+                if (row.first().box.y1 - prev.first().box.y1 > 6 * size) break
+                if (!row.all { w -> cols.any { abs(it - w.box.cx) <= 14 } }) break
+                j++
+            }
+            val built = if (j - i >= 3) buildNumericTable(words, numRows.subList(i, j), cols) else null
+            if (built != null) { out += built; i = j } else i++
+        }
+        return out
+    }
+
+    private fun buildNumericTable(words: List<Word>, rows: List<List<Word>>, cols: List<Double>): Pair<PdfTable, List<Word>>? {
+        val numeric = rows.flatten().toSet()
+        val baselines = rows.map { it.first().box.y1 }
+        val gap = baselines.zipWithNext { a, b -> b - a }.sorted().let { it[it.size / 2] }
+        val size = rows.first().first().size
+        fun band(r: Int) = (if (r == 0) baselines[0] - gap / 2 else (baselines[r - 1] + baselines[r]) / 2) to
+            (if (r == rows.lastIndex) baselines[r] + gap / 2 else (baselines[r] + baselines[r + 1]) / 2)
+        val firstCol = cols.min()
+        val others = words.filter { it !in numeric }
+        // Where this table's labels start: the left edge most rows' label text shares.
+        val lefts = rows.mapNotNull { row ->
+            val onLine = others.filter { abs(it.box.y1 - row.first().box.y1) <= 0.5 * size && it.box.x1 < row.first().box.x0 }.sortedByDescending { it.box.x0 }
+            var edge: Word? = null
+            for (w in onLine) { if (edge == null || edge.box.x0 - w.box.x1 <= 1.5 * size) edge = w else break }
+            edge?.box?.x0
+        }
+        if (lefts.size * 2 < rows.size) return null
+        val left = lefts.sorted()[lefts.size / 2] - 6
+        val labelWords = others.filter { it.box.x0 >= left && it.box.x1 <= firstCol + 4 }
+        val tableRows = ArrayList<List<String>>(); val used = ArrayList<Word>(); used += numeric
+        rows.indices.forEach { r ->
+            val (top, bottom) = band(r)
+            val mine = labelWords.filter { it.box.cy in top..bottom }
+            used += mine
+            val label = PageLayout.lines(mine).joinToString(" ") { l -> l.joinToString(" ") { it.text } }
+            tableRows += listOf(label) + cols.map { c -> PageLayout.lines(rows[r].filter { abs(it.box.cx - c) <= 14 }).joinToString(" ") { l -> l.joinToString(" ") { it.text } } }
+        }
+        // The header: the lines directly above the first row, as many as stand at the header's own line pitch (a caption or heading
+        // further up is left out), each phrase placed in the label column or the nearest figure column by its position.
+        val pitchOfCols = cols.sorted().zipWithNext { a, b -> b - a }.sorted().let { it[it.size / 2] }
+        val candidates = PageLayout.lines(others.filter { it.box.cy < baselines[0] - 0.5 * size && it.box.x0 >= left && it.box.x1 <= cols.max() + 0.6 * pitchOfCols && it.size <= 1.5 * size && it !in used })
+            .sortedByDescending { it.first().box.y1 }
+        val headerLines = ArrayList<List<Word>>()
+        for (line in candidates) {
+            val base = line.first().box.y1
+            val ok = if (headerLines.isEmpty()) baselines[0] - base <= 1.3 * gap
+            else headerLines.last().first().box.y1 - base <= 2.0 * max(line.first().size, 1.0)
+            if (!ok || headerLines.size >= 5) break
+            headerLines += line
+        }
+        val header = Array(cols.size + 1) { ArrayList<String>() }
+        for (line in headerLines.reversed()) for (phrase in PageLayout.segments(line, 1.6)) {
+            val cx = phrase.map { it.box }.reduce(Box::union).cx
+            val k = cols.indices.minByOrNull { abs(cols[it] - cx) }!!
+            val idx = if (cx < firstCol - 0.5 * pitchOfCols) 0 else k + 1
+            header[idx] += phrase.joinToString(" ") { it.text }
+            used += phrase
+        }
+        if (header.any { it.isNotEmpty() }) tableRows.add(0, header.map { it.joinToString(" ") })
+        val box = used.map { it.box }.reduce(Box::union)
+        return PdfTable(box, tableRows, "aligned") to used
+    }
+
     fun aligned(words: List<Word>): List<Pair<PdfTable, List<Word>>> {
         val lines = PageLayout.lines(words)
         val rows = lines.map { l -> PageLayout.segments(l, gutter = 1.6) }
@@ -117,7 +201,9 @@ internal object TableDetector {
             if (j - i >= 3) {
                 val body = rows.subList(i, j).flatMap { r -> r.drop(1) }
                 val numeric = body.count { seg -> seg.joinToString(" ") { it.text }.any { it.isDigit() } }
-                if (numeric * 2 >= body.size) {
+                // Mostly figures, or four or more rows of short cells (at most six words each): prose in columns has longer lines.
+                val short = j - i >= 4 && rows.subList(i, j).all { r -> r.all { seg -> seg.size <= 6 && seg.sumOf { it.text.length + 1 } <= 46 } }
+                if (numeric * 2 >= body.size || short) {
                     val cells = rows.subList(i, j).map { r -> r.map { seg -> seg.joinToString(" ") { it.text } } }
                     val all = lines.subList(i, j).flatten()
                     out += PdfTable(all.map { it.box }.reduce(Box::union), cells, "aligned") to all
@@ -130,10 +216,15 @@ internal object TableDetector {
     }
 
     private fun alignedWith(a: List<List<Word>>, b: List<List<Word>>): Boolean =
-        a.indices.all { k -> abs(a[k].first().box.x0 - b[k].first().box.x0) <= 6 || abs(a[k].last().box.x1 - b[k].last().box.x1) <= 6 }
+        // A column lines up when the two cells overlap horizontally, or share a left edge, a right edge or a centre (a header is often padded
+        // differently from its cells).
+        a.indices.all { k ->
+            val a0 = a[k].first().box.x0; val a1 = a[k].last().box.x1; val b0 = b[k].first().box.x0; val b1 = b[k].last().box.x1
+            min(a1, b1) - max(a0, b0) > 0 || abs(a0 - b0) <= 6 || abs(a1 - b1) <= 6 || abs((a0 + a1) - (b0 + b1)) <= 12
+        }
 
     private fun verticalGapOk(prev: List<Word>, next: List<Word>): Boolean =
-        next.minOf { it.box.y0 } - prev.maxOf { it.box.y1 } <= 1.6 * max(prev.maxOf { it.size }, 1.0)
+        next.minOf { it.box.y0 } - prev.maxOf { it.box.y1 } <= 3.2 * max(prev.maxOf { it.size }, 1.0)
 
     private fun cellText(ws: List<Word>): String =
         PageLayout.lines(ws).joinToString(" ") { l -> l.joinToString(" ") { it.text } }.trim()

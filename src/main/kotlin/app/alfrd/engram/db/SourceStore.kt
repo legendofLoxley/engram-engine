@@ -6,6 +6,25 @@ import com.arcadedb.graph.Vertex
 import org.slf4j.LoggerFactory
 import java.util.UUID
 
+/**
+ * Where a Source came from in Google Drive: the file's id (stable across renames), its name and link as of the read, the version Drive
+ * reported (a number that grows with every change) and the content md5, when it was last modified, the Shared Drive it lives in
+ * ([driveId]; null in My Drive), the head revision, and the configured folder it was found in. Kept on the Source so provenance survives
+ * a rename or a move; the page of each chunk is on the chunk.
+ */
+@kotlinx.serialization.Serializable
+data class DriveFacts(
+    val fileId: String,
+    val fileName: String? = null,
+    val webViewLink: String? = null,
+    val version: String? = null,
+    val md5: String? = null,
+    val modifiedTime: String? = null,
+    val driveId: String? = null,
+    val headRevisionId: String? = null,
+    val folderId: String? = null,
+)
+
 /** What is read: one document, page or email message. [text] is the whole text as read; the chunker decides what becomes chunks. */
 data class SourceInput(
     /** `notion_page`, `document` or `email_message`. */
@@ -30,12 +49,15 @@ data class SourceInput(
     /** Pages read by OCR, and pages that yielded nothing (so the Source is not the whole file). */
     val ocrPages: Int? = null,
     val unreadPages: Int? = null,
+    /** Set when the file was fetched from Google Drive. */
+    val drive: DriveFacts? = null,
 )
 
 data class SourceRecord(
     val uid: String, val type: String, val locator: String, val title: String, val readMode: String,
     val threadId: String?, val contentHash: String, val readAt: Long, val chunkCount: Int,
     val fileSha256: String? = null, val pageCount: Int? = null, val ocrPages: Int? = null, val unreadPages: Int? = null,
+    val drive: DriveFacts? = null,
 )
 
 data class ChunkRecord(
@@ -105,6 +127,13 @@ class SourceStore(private val db: Database) {
                     input.pageCount?.let { set("pageCount", it) }
                     input.ocrPages?.let { set("ocrPages", it) }
                     input.unreadPages?.let { set("unreadPages", it) }
+                    input.drive?.let { f ->
+                        set("driveFileId", f.fileId)
+                        f.fileName?.let { set("driveFileName", it) }; f.webViewLink?.let { set("driveWebViewLink", it) }
+                        f.version?.let { set("driveVersion", it) }; f.md5?.let { set("driveMd5", it) }
+                        f.modifiedTime?.let { set("driveModifiedTime", it) }; f.driveId?.let { set("driveId", it) }
+                        f.headRevisionId?.let { set("driveHeadRevisionId", it) }; f.folderId?.let { set("driveFolderId", it) }
+                    }
                     save()
                 }
                 user.modify().newEdge("TRUSTS", source, false).apply { set("scores", "[]"); save() }
@@ -231,6 +260,13 @@ class SourceStore(private val db: Database) {
         chunkCount = countEdges(Vertex.DIRECTION.OUT, "CONTAINS").toInt(),
         fileSha256 = get("fileSha256") as? String, pageCount = (get("pageCount") as? Number)?.toInt(),
         ocrPages = (get("ocrPages") as? Number)?.toInt(), unreadPages = (get("unreadPages") as? Number)?.toInt(),
+        drive = (get("driveFileId") as? String)?.let { id ->
+            DriveFacts(
+                fileId = id, fileName = get("driveFileName") as? String, webViewLink = get("driveWebViewLink") as? String,
+                version = get("driveVersion") as? String, md5 = get("driveMd5") as? String, modifiedTime = get("driveModifiedTime") as? String,
+                driveId = get("driveId") as? String, headRevisionId = get("driveHeadRevisionId") as? String, folderId = get("driveFolderId") as? String,
+            )
+        },
     )
 
     private fun Vertex.toChunk() = ChunkRecord(

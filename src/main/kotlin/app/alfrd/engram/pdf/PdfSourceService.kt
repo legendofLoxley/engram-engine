@@ -20,6 +20,7 @@ data class PdfCommitResult(
     val readMode: String,
     val fileSha256: String,
     val pages: List<PagePrep>,
+    val tables: Int = 0,
 )
 
 /**
@@ -30,7 +31,7 @@ data class PdfCommitResult(
 class PdfSourceService(private val store: SourceStore, private val preparer: PdfPreparer, private val cache: PdfPreparationCache) {
     private val json = Json { encodeDefaults = false }
 
-    fun commit(userEmail: String, bytes: ByteArray, locator: String, title: String? = null): PdfCommitResult {
+    fun commit(userEmail: String, bytes: ByteArray, locator: String, title: String? = null, drive: app.alfrd.engram.db.DriveFacts? = null): PdfCommitResult {
         val r = cache.getOrPrepare(bytes, preparer)
         val p = r.prepared
         val drafts = p.chunks.map { c ->
@@ -46,11 +47,12 @@ class PdfSourceService(private val store: SourceStore, private val preparer: Pdf
             SourceInput(
                 type = "document", locator = locator, title = title?.takeIf { it.isNotBlank() } ?: p.title.ifBlank { locator.substringAfterLast('/').substringAfterLast(':') },
                 text = p.chunks.joinToString("\n\n") { it.text }, readMode = p.readMode, chunks = drafts, fileSha256 = p.sha256,
-                pageCount = p.pageCount, ocrPages = p.ocrPages, unreadPages = p.unreadPages,
+                pageCount = p.pageCount, ocrPages = p.ocrPages, unreadPages = p.unreadPages, drive = drive,
             ),
         )
         return PdfCommitResult(
             ingest.source.uid, ingest.created, ingest.chunksCreated, ingest.source.chunkCount, r.fromCache, p.pageCount, ingest.source.readMode, p.sha256, p.pages,
+            p.chunks.count { it.kind == "table" },
         )
     }
 }

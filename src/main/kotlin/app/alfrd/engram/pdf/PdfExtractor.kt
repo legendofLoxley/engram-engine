@@ -6,6 +6,9 @@ import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.pdfbox.text.TextPosition
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.security.MessageDigest
@@ -99,20 +102,58 @@ class PdfExtractor(private val ocr: OcrEngine? = null) : PdfPreparer {
         return words.sumOf { w -> w.text.count { it == '�' || it in ''..'' || it.isISOControl() } } * 100 / chars > 20
     }
 
+    /**
+     * The words of a page with their boxes, built from the individual glyph positions rather than from PDFBox's own word grouping: a
+     * designed page can write several columns' lines as one run with wide gaps inside it, and PDFBox's grouping splits and joins words
+     * unpredictably on overlapping or scaled lines. Glyphs are grouped into lines by baseline and cut into words at spaces and at gaps
+     * wider than half the glyph height.
+     */
     internal fun textLayerWords(doc: PDDocument, number: Int): List<Word> {
-        val out = ArrayList<Word>()
+        val glyphs = ArrayList<TextPosition>()
         val stripper = object : PDFTextStripper() {
-            override fun writeString(text: String, positions: MutableList<TextPosition>) {
-                if (text.isBlank() || positions.isEmpty()) return
-                val size = positions.maxOf { it.fontSizeInPt.toDouble() }
-                val base = positions.maxOf { it.yDirAdj.toDouble() }
-                val h = positions.maxOf { it.heightDir.toDouble() }.takeIf { it > 0 } ?: (size * 0.8)
-                val bold = positions.all { p -> p.font?.name?.contains("bold", ignoreCase = true) == true || (p.font?.fontDescriptor?.fontWeight ?: 0f) >= 700f }
-                out += Word(text.trim(), Box(positions.minOf { it.xDirAdj.toDouble() }, base - h, positions.maxOf { (it.xDirAdj + it.widthDirAdj).toDouble() }, base), size, bold)
-            }
+            override fun processTextPosition(text: TextPosition) { glyphs += text }
+            override fun writeString(text: String, textPositions: MutableList<TextPosition>) {}
         }
-        stripper.sortByPosition = true; stripper.startPage = number; stripper.endPage = number
+        stripper.startPage = number; stripper.endPage = number
         stripper.getText(doc)
+        return wordsOf(glyphs)
+    }
+
+    private class Glyph(val ch: String, val x0: Double, val x1: Double, val base: Double, val h: Double, val bold: Boolean)
+
+    private fun wordsOf(positions: List<TextPosition>): List<Word> {
+        val glyphs = positions.mapNotNull { p ->
+            val ch = p.unicode ?: return@mapNotNull null
+            // fontSizeInPt ignores a scaling applied to the whole page content (a file can write 10 pt text as 46), so sizes come from
+            // the measured glyph height, which includes it.
+            val h = p.heightDir.toDouble().takeIf { it > 0 } ?: (p.fontSizeInPt * 0.6)
+            val bold = p.font?.name?.contains("bold", ignoreCase = true) == true || (p.font?.fontDescriptor?.fontWeight ?: 0f) >= 700f
+            Glyph(ch, p.xDirAdj.toDouble(), (p.xDirAdj + p.widthDirAdj).toDouble(), p.yDirAdj.toDouble(), h, bold)
+        }.sortedWith(compareBy({ it.base }, { it.x0 }))
+        val lines = ArrayList<MutableList<Glyph>>()
+        for (g in glyphs) {
+            val line = lines.lastOrNull()
+            if (line != null && abs(line.first().base - g.base) <= 0.7 * min(g.h, line.first().h)) line += g else lines += mutableListOf(g)
+        }
+        val out = ArrayList<Word>()
+        for (line in lines) {
+            var cur = ArrayList<Glyph>()
+            fun flush() {
+                val text = cur.joinToString("") { it.ch }.trim()
+                if (text.isNotEmpty()) {
+                    val base = cur.maxOf { it.base }; val h = cur.maxOf { it.h }
+                    out += Word(text, Box(cur.minOf { it.x0 }, base - h, cur.maxOf { it.x1 }, base), h / 0.6, cur.all { it.bold })
+                }
+                cur = ArrayList()
+            }
+            for (g in line.sortedBy { it.x0 }) {
+                if (g.ch.isBlank()) { flush(); continue }
+                val prev = cur.lastOrNull()
+                if (prev != null && g.x0 - prev.x1 > 0.5 * max(g.h, prev.h)) flush()
+                cur += g
+            }
+            flush()
+        }
         return out
     }
 
@@ -125,7 +166,10 @@ class PdfExtractor(private val ocr: OcrEngine? = null) : PdfPreparer {
         if (raw.path == "textlayer") {
             tables += TableDetector.ruled(raw.rulings, raw.words)
             val taken = tables.flatMap { it.second }.toSet()
-            tables += TableDetector.aligned(raw.words.filter { it !in taken })
+            val afterRuled = raw.words.filter { it !in taken }
+            tables += TableDetector.numericGrid(afterRuled)
+            val taken2 = tables.flatMap { it.second }.toSet()
+            tables += TableDetector.aligned(raw.words.filter { it !in taken2 })
         }
         val taken = tables.flatMap { it.second }.toSet()
         val blocks = PageLayout.blocks(raw.words.filter { it !in taken }, bodySize)

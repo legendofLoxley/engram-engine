@@ -37,7 +37,8 @@ internal object PageLayout {
         val lines = ArrayList<MutableList<Word>>()
         for (w in sorted) {
             val line = lines.lastOrNull()
-            if (line != null && abs(line.last().box.y1 - w.box.y1) <= 0.45 * max(w.size, line.last().size)) line += w else lines += mutableListOf(w)
+            // Against the line's first word and the smaller font: a large title must not bridge the baselines of two small lines.
+            if (line != null && abs(line.first().box.y1 - w.box.y1) <= 0.45 * min(w.size, line.first().size)) line += w else lines += mutableListOf(w)
         }
         return lines.map { l -> l.sortedBy { it.box.x0 } }
     }
@@ -60,7 +61,9 @@ internal object PageLayout {
             val target = open.filter { a ->
                 val gap = s.box.y0 - a.lastBottom
                 gap <= 0.9 * max(s.size, a.size) && s.box.y0 > a.lastTop + 0.3 * s.size &&
-                    min(s.box.x1, a.box.x1) - max(s.box.x0, a.box.x0) > 0 && sameStyle(s.size, s.bold, a.size, a.bold)
+                    min(s.box.x1, a.box.x1) - max(s.box.x0, a.box.x0) > 0 && sameStyle(s.size, s.bold, a.size, a.bold) &&
+                    // A short label or count above a long line is not the first line of that line's paragraph.
+                    !(a.lines.size == 1 && a.box.width < 0.3 * s.box.width)
             }.minByOrNull { s.box.y0 - it.lastBottom }
             if (target != null) {
                 target.lines += s.text; target.box = target.box.union(s.box); target.lastTop = s.box.y0; target.lastBottom = max(target.lastBottom, s.box.y1)
@@ -94,15 +97,80 @@ internal object PageLayout {
         return s[s.size / 2]
     }
 
-    /** Reading order by recursive X-Y cut. Ties and unsplittable groups fall back to top-to-bottom, left-to-right. */
+    /**
+     * Reading order. Where a column gutter runs down the region and only a few blocks cross it (a heading or a status line across the top),
+     * the crossing blocks are spanners and the bands between them are read column by column: the whole left column, then the whole right one.
+     * Otherwise recursive X-Y cut: split at the widest empty band, top to bottom or left to right (a horizontal cut has to beat a column
+     * gutter clearly, not tie with it), and recurse. Ties and unsplittable groups fall back to top-to-bottom, left-to-right.
+     */
     fun order(blocks: List<LayoutBlock>): List<LayoutBlock> {
         if (blocks.size <= 1) return blocks
+        spannedColumns(blocks)?.let { return it }
         val h = bestGap(blocks, horizontal = true); val v = bestGap(blocks, horizontal = false)
-        val useH = h != null && (v == null || h.first >= v.first)
+        val useH = h != null && (v == null || h.first > 1.35 * v.first)
         val cut = (if (useH) h else v) ?: return blocks.sortedWith(compareBy({ it.box.y0 }, { it.box.x0 }))
         val (first, second) = blocks.partition { if (useH) it.box.cy < cut.second else it.box.cx < cut.second }
         if (first.isEmpty() || second.isEmpty()) return blocks.sortedWith(compareBy({ it.box.y0 }, { it.box.x0 }))
         return order(first) + order(second)
+    }
+
+    /**
+     * A gutter that few blocks cross, with substantial text on both sides: the x range, at least 4 percent of the region wide (and 20 points),
+     * where the blocks crossing it cover at most 12 percent of the region's text height but at least one block does (a clean gutter needs no
+     * spanners and is left to the plain cut). The blocks are then ordered band by band between the spanners, each band left column then right.
+     */
+    private fun spannedColumns(blocks: List<LayoutBlock>): List<LayoutBlock>? {
+        if (blocks.size < 6) return null
+        val minX = blocks.minOf { it.box.x0 }; val maxX = blocks.maxOf { it.box.x1 }
+        val total = blocks.sumOf { it.box.height }
+        if (total <= 0 || maxX - minX < 100) return null
+        val edges = (blocks.flatMap { listOf(it.box.x0, it.box.x1) } + minX + maxX).distinct().sorted()
+        var best: Pair<Double, Double>? = null
+        var runStart: Double? = null
+        for (i in 0 until edges.size - 1) {
+            val a = edges[i]; val b = edges[i + 1]
+            val low = blocks.filter { it.box.x0 < b && it.box.x1 > a }.sumOf { it.box.height } <= 0.12 * total
+            if (low) {
+                val start = runStart ?: a.also { runStart = it }
+                val current = best
+                if (current == null || b - start > current.second - current.first) best = start to b
+            } else runStart = null
+        }
+        val candidate = best ?: return null
+        // Within the low-occupancy range, the gutter proper is the widest stretch crossed by the least: a column's own figures standing at its
+        // edge raise the occupancy in places but are not what runs across the whole gutter.
+        val inner = edges.filter { it >= candidate.first && it <= candidate.second }
+        fun crossing(a: Double, b: Double) = blocks.filter { it.box.x0 < b && it.box.x1 > a }.sumOf { it.box.height }
+        val minOcc = (0 until inner.size - 1).minOf { crossing(inner[it], inner[it + 1]) }
+        // Of the stretches crossed by the least, the one that divides the text most evenly is the gutter between the columns.
+        val runs = ArrayList<Pair<Double, Double>>()
+        var start: Double? = null
+        for (i in 0 until inner.size - 1) {
+            if (crossing(inner[i], inner[i + 1]) <= minOcc + 1e-6) { if (start == null) start = inner[i]; if (i == inner.size - 2 || crossing(inner[i + 1], inner[i + 2]) > minOcc + 1e-6) { runs += start!! to inner[i + 1]; start = null } }
+            else start = null
+        }
+        fun balance(r: Pair<Double, Double>): Double {
+            val mid = (r.first + r.second) / 2
+            return minOf(blocks.filter { it.box.cx < mid }.sumOf { it.box.height }, blocks.filter { it.box.cx >= mid }.sumOf { it.box.height })
+        }
+        val gutter = runs.maxByOrNull { balance(it) } ?: return null
+        if (gutter.second - gutter.first < max(20.0, 0.04 * (maxX - minX)) || gutter.first <= minX || gutter.second >= maxX) return null
+        val spanners = blocks.filter { it.box.x0 < gutter.second && it.box.x1 > gutter.first }
+        if (spanners.isEmpty()) return null
+        val mid = (gutter.first + gutter.second) / 2
+        val rest = blocks - spanners.toSet()
+        val left = rest.filter { it.box.cx < mid }; val right = rest.filter { it.box.cx >= mid }
+        if (left.size < 2 || right.size < 2 || left.sumOf { it.box.height } < 0.25 * total || right.sumOf { it.box.height } < 0.25 * total) return null
+        fun columns(bs: List<LayoutBlock>) = order(bs.filter { it.box.cx < mid }) + order(bs.filter { it.box.cx >= mid })
+        val out = ArrayList<LayoutBlock>(); val used = HashSet<LayoutBlock>()
+        for (sp in spanners.sortedBy { it.box.y0 }) {
+            val above = rest.filter { it !in used && it.box.cy < sp.box.y0 }
+            used += above; out += columns(above)
+            val row = (rest.filter { it !in used && it.box.cy in sp.box.y0..sp.box.y1 } + sp).sortedBy { it.box.x0 }
+            used += row; out += row
+        }
+        out += columns(rest.filter { it !in used })
+        return out
     }
 
     /** The widest empty band across [blocks] (width, position of its middle), or null when no band is wider than 1.5 points. */

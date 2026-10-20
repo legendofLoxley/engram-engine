@@ -81,6 +81,7 @@ object PdfSourceCli {
     fun report(name: String, p: PreparedPdf): String = buildString {
         appendLine("$name  sha256=${p.sha256}")
         appendLine("title=\"${p.title}\" pages=${p.pageCount} readMode=${p.readMode} ocrEngine=${p.ocrEngine} chunks=${p.chunks.size} (text ${p.chunks.count { it.kind == "text" }}, table ${p.chunks.count { it.kind == "table" }})")
+        appendLine("coverage: ${p.pages.count { it.path == "textlayer" }} text-layer page(s), ${p.ocrPages} OCR page(s), ${p.unreadPages} unread page(s); tables ${p.chunks.count { it.kind == "table" }}")
         p.pages.forEach {
             appendLine(
                 "  pdf p.${it.page}  printed=${it.printedPage ?: "-"}  path=${it.path}  tables=${it.tables}  chars=${it.chars}" +

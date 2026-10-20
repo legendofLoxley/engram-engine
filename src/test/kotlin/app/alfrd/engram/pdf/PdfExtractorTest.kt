@@ -158,4 +158,77 @@ class PdfExtractorTest {
         val e = org.junit.jupiter.api.assertThrows<IllegalArgumentException> { PdfExtractor().prepare("not a pdf".toByteArray()) }
         assertTrue(e.message!!.contains("PDF"))
     }
+
+    @Test
+    fun `a designed page with a table that has only horizontal rules keeps rows and cells, and the narrative columns stay apart`() {
+        val p = PdfExtractor().prepare(PdfFixtures.scenarios())
+        assertEquals(listOf(1), p.pages.map { it.tables })
+        val table = p.chunks.single { it.kind == "table" }
+        val rows = requireNotNull(table.table).rows
+        assertEquals("aligned", table.table!!.method)
+        assertEquals(listOf("Measure", "SCENARIO A", "SCENARIO B", "STATUS QUO"), rows[0])
+        assertEquals(listOf("Students attending a school above the threshold", "80%", "73%", "48%"), rows.single { it[0].startsWith("Students attending") })
+        assertEquals(listOf("Historically Underserved Students in Sustainable Schools", "83%", "78%", "46%"), rows.single { it[0].startsWith("Historically") })
+        assertEquals(6, rows.size)
+        // The sidebar beside the table is not swallowed by it, and is not repeated in it.
+        val narrative = p.chunks.filter { it.kind == "text" }.joinToString("\n") { it.text }
+        assertTrue(narrative.contains("WELL RESOURCED SCHOOLS"), narrative)
+        assertTrue(rows.none { r -> r.any { it.contains("Consistent access") } })
+        assertFalse(narrative.contains("Multilingual"), narrative)
+    }
+
+    @Test
+    fun `columns whose first lines share one text run still come out as three blocks, each with its own figure`() {
+        val p = PdfExtractor().prepare(PdfFixtures.scenarios())
+        val blocks = p.chunks.filter { it.kind == "text" }.flatMap { it.blocks }
+        val a = blocks.single { it.text.contains("About 80%") }; val b = blocks.single { it.text.contains("About 73%") }; val q = blocks.single { it.text.contains("About 48%") }
+        assertTrue(a.box.x1 < b.box.x0 && b.box.x1 < q.box.x0, "${a.box} ${b.box} ${q.box}")
+        assertTrue(a.text.startsWith("Closures") && b.text.startsWith("A smaller set") && q.text.startsWith("No schools close"), "${a.text} | ${b.text} | ${q.text}")
+        assertFalse(a.text.contains("73%") || b.text.contains("80%") || q.text.contains("73%"))
+        assertEquals(3, blocks.count { it.text.startsWith("SCENARIO") || it.text.startsWith("STATUS") }, blocks.map { it.text }.toString())
+        val joined = p.chunks.filter { it.kind == "text" }.joinToString("\n") { it.text }
+        assertTrue(joined.indexOf("About 80%") < joined.indexOf("About 73%") && joined.indexOf("About 73%") < joined.indexOf("About 48%"))
+    }
+
+    @Test
+    fun `a large title between the baselines of a small two-line note does not pull the note's words into one line`() {
+        val p = PdfExtractor().prepare(PdfFixtures.scenarios())
+        val blocks = p.chunks.filter { it.kind == "text" }.flatMap { it.blocks }
+        // Each line stays whole (never "2031 All figures school are ..."), whether or not the two are joined into one block.
+        val note = blocks.filter { it.text.contains("projections") || it.text.contains("unless noted") }.map { it.text.replace('\n', ' ') }.joinToString(" ")
+        assertTrue(note.contains("All figures are projections for the") && note.contains("2031 school year unless noted."), blocks.map { it.text }.toString())
+        assertTrue(blocks.any { it.text == "The three scenarios" })
+    }
+
+    @Test
+    fun `a table of short text cells with no lines is found, and three columns of prose are not taken for one`() {
+        val p = PdfExtractor().prepare(PdfFixtures.textTable())
+        assertEquals(listOf(1), p.pages.map { it.tables })
+        val rows = requireNotNull(p.chunks.single { it.kind == "table" }.table).rows
+        assertEquals(5, rows.size)
+        assertEquals(listOf("ID", "School Represented", "School Level", "School Type"), rows[0])
+        assertEquals(listOf("P-005-C", "Creative Science School at Bridger", "K-8", "Focus Option"), rows[3])
+        val narrative = p.chunks.filter { it.kind == "text" }.joinToString("\n") { it.text }
+        assertTrue(narrative.contains("The committee met several times over") && narrative.contains("Staff agreed to return"), narrative)
+        assertFalse(narrative.contains("Atkinson"))
+    }
+
+    @Test
+    fun `parallel columns of cards are read column by column, so each card stays under its own scenario heading`() {
+        val p = PdfExtractor().prepare(PdfFixtures.poster())
+        val text = p.chunks.filter { it.kind == "text" }.joinToString("\n") { it.text }
+        val a = text.indexOf("SCENARIO A"); val b = text.indexOf("SCENARIO B")
+        assertTrue(a in 0 until b, text)
+        // Every card of A comes before B's heading, every card of B after it.
+        assertTrue(text.indexOf("Joseph A0") in a until b && text.indexOf("Joseph A1") in a until b, text)
+        assertTrue(text.indexOf("Joseph B0") > b && text.indexOf("Joseph B1") > b, text)
+    }
+
+    @Test
+    fun `a count standing at the edge of a card is not merged into the top of the list below it`() {
+        val p = PdfExtractor().prepare(PdfFixtures.poster())
+        val blocks = p.chunks.filter { it.kind == "text" }.flatMap { it.blocks }
+        assertTrue(blocks.any { it.text == "14" } && blocks.any { it.text == "38" }, blocks.map { it.text }.toString())
+        assertTrue(blocks.none { it.text.startsWith("14 Beach") || it.text.startsWith("38 Beach") })
+    }
 }
