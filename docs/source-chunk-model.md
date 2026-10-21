@@ -42,3 +42,5 @@ A PDF is read into page-located chunks (page, printed page, section, tables as t
 
 Debug harness (loopback, debug token, synthetic identities only, never owner-jacob): `POST /debug/sources/commit`, `GET /debug/sources`,
 `GET /debug/items/{uid}/provenance`. It stands in for the Hermes fetch assignment, which is not built yet.
+
+Claims made from a Source's chunks (two local passes, established on agreement, Settled or Re-checking) are described in `docs/claim-extraction.md`.

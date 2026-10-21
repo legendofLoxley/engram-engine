@@ -73,6 +73,9 @@ data class IngestResult(
     val chunksCreated: Int,
 )
 
+/** The claimant, quote and date a linked source item was recorded with. [quote] is null for a link made before the quote was kept. */
+data class LinkedDraft(val claimant: String?, val quote: String?, val dueAt: Long?)
+
 enum class LinkOutcome { CREATED, ALREADY_LINKED, REFUSED }
 
 /** Where an item came from: its chunk and location, the source, who recorded it and who claimed it. */
@@ -192,7 +195,10 @@ class SourceStore(private val db: Database) {
      * second call with the same key writes nothing. An older edge for the pair that carries no key is adopted by the first key
      * that arrives. Without a key, one link per pair.
      */
-    fun linkItem(userEmail: String, itemUid: String, chunkUid: String, writer: String, claimant: String?, opKey: String? = null): LinkOutcome = synchronized(LOCK) {
+    fun linkItem(
+        userEmail: String, itemUid: String, chunkUid: String, writer: String, claimant: String?, opKey: String? = null,
+        draftQuote: String? = null, draftDueAt: Long? = null, runId: String? = null,
+    ): LinkOutcome = synchronized(LOCK) {
         val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return LinkOutcome.REFUSED
         val chunk = chunkVertex(userEmail, chunkUid) ?: return LinkOutcome.REFUSED
         val key = opKey?.let { "$userEmail|$it" }
@@ -213,6 +219,9 @@ class SourceStore(private val db: Database) {
                 set("ownerEmail", userEmail)
                 set("createdAt", System.currentTimeMillis())
                 key?.let { set("opKey", it) }
+                draftQuote?.let { set("draftQuote", it) }
+                draftDueAt?.let { set("draftDueAt", it) }
+                runId?.let { set("runId", it) }
                 save()
             }
         }
@@ -227,6 +236,15 @@ class SourceStore(private val db: Database) {
     fun itemForOpKey(userEmail: String, opKey: String): String? =
         db.query("sql", "SELECT @out.uid AS uid FROM QUOTES WHERE opKey = :k AND ownerEmail = :o LIMIT 1", mapOf("k" to "$userEmail|$opKey", "o" to userEmail))
             .use { rs -> if (rs.hasNext()) rs.next().toMap()["uid"] as? String else null }
+
+    /** What the draft that made the link under [opKey] said (null where there is no such link). */
+    fun draftOfOpKey(userEmail: String, opKey: String): LinkedDraft? =
+        db.query("sql", "SELECT claimant, draftQuote, draftDueAt FROM QUOTES WHERE opKey = :k AND ownerEmail = :o LIMIT 1", mapOf("k" to "$userEmail|$opKey", "o" to userEmail))
+            .use { rs ->
+                if (!rs.hasNext()) null else rs.next().toMap().let { m ->
+                    LinkedDraft(m["claimant"] as? String, m["draftQuote"] as? String, (m["draftDueAt"] as? Number)?.toLong())
+                }
+            }
 
     /** Every chunk [itemUid] quotes, with its location, its source and the writer and claimant. Empty for an item this user does not own. */
     fun provenanceOf(userEmail: String, itemUid: String): List<ItemProvenance> {

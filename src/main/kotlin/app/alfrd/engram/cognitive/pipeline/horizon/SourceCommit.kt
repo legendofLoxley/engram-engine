@@ -1,8 +1,8 @@
 package app.alfrd.engram.cognitive.pipeline.horizon
 
-import app.alfrd.engram.db.IngestResult
 import app.alfrd.engram.db.SourceChunker
 import app.alfrd.engram.db.SourceInput
+import app.alfrd.engram.db.SourceRecord
 import app.alfrd.engram.db.SourceStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
@@ -68,7 +68,21 @@ class SourceCommitService(
     private val applier: HorizonOperationApplier,
     private val cycles: CycleSequencer,
 ) {
-    suspend fun commit(userEmail: String, input: SourceInput, items: List<SourceItemDraft>, writer: String = "director"): CommitReport =
+    suspend fun commit(userEmail: String, input: SourceInput, items: List<SourceItemDraft>, writer: String = "director", runId: String? = null): CommitReport =
+        commitWith(userEmail, items, writer, runId) { store.ingest(userEmail, input).let { Triple(it.source, it.created, it.chunksCreated) } }
+
+    /**
+     * Commits [items] to a Source that is already stored and owned by [userEmail], with the same checks, keys and replay behaviour
+     * as [commit]. For items made later from chunks already read, such as a claim extraction. [runId] is kept on each item's link.
+     */
+    suspend fun commitStored(userEmail: String, sourceUid: String, items: List<SourceItemDraft>, writer: String = "director", runId: String? = null): CommitReport =
+        commitWith(userEmail, items, writer, runId) {
+            Triple(store.sourceByUid(userEmail, sourceUid) ?: throw IllegalArgumentException("unknown source"), false, 0)
+        }
+
+    private suspend fun commitWith(
+        userEmail: String, items: List<SourceItemDraft>, writer: String, runId: String?, load: () -> Triple<SourceRecord, Boolean, Int>,
+    ): CommitReport =
         PerUserCycleLock.withLock(userEmail) {
             // Refuse drafts that are one item but disagree, before anything is written.
             val digests = items.map { itemDigest(it) }
@@ -80,9 +94,9 @@ class SourceCommitService(
                 }
             }
 
-            val ingest: IngestResult = store.ingest(userEmail, input)
-            val chunks = store.chunks(userEmail, ingest.source.uid)
-            val requestId = "src:${ingest.source.uid}"
+            val (source, sourceCreated, chunksCreated) = load()
+            val chunks = store.chunks(userEmail, source.uid)
+            val requestId = "src:${source.uid}"
 
             val unique = digests.indices.filter { firstOf.getValue(digests[it]) == it }
             val ops = unique.map { i ->
@@ -90,8 +104,25 @@ class SourceCommitService(
                 RecordItem(
                     kind = d.kind, quote = d.quote, title = d.text, dueAt = d.dueAt,
                     chunkUid = chunks.firstOrNull { it.ordinal == d.chunk }?.uid ?: "no-such-chunk",
-                    claimant = d.claimant, writer = writer, itemKey = "$requestId:${digests[i]}",
+                    claimant = d.claimant, writer = writer, itemKey = "$requestId:${digests[i]}", runId = runId,
                 )
+            }
+
+            // A replay must be the same item: what the earlier call recorded under this key (its quote, claimant and date) is compared
+            // with this draft, and a difference is refused before anything is written. A link made before the quote was kept has
+            // nothing to compare and is accepted as it always was.
+            ops.forEachIndexed { k, op ->
+                val before = store.draftOfOpKey(userEmail, op.itemKey!!)?.takeIf { it.quote != null } ?: return@forEachIndexed
+                val d = items[unique[k]]
+                val differs = buildList {
+                    if (SourceChunker.normalize(before.quote!!) != SourceChunker.normalize(d.quote)) add("quote")
+                    if ((before.claimant?.trim()?.takeIf { it.isNotEmpty() }) != (d.claimant?.trim()?.takeIf { it.isNotEmpty() })) add("claimant")
+                    if (before.dueAt != d.dueAt) add("date")
+                }
+                require(differs.isEmpty()) {
+                    "this item was already recorded from this source with a different ${differs.joinToString(" and ")}; " +
+                        "a replay must repeat what was recorded (nothing was written)"
+                }
             }
             val linkedBefore = ops.map { store.itemForOpKey(userEmail, it.itemKey!!) != null }
             val itemBefore = ops.map { structure.itemByOpKey(userEmail, it.itemKey!!) != null }
@@ -125,7 +156,7 @@ class SourceCommitService(
                 if (firstOf.getValue(digests[i]) == i) r else r.copy(created = false, healed = false)
             }
             CommitReport(
-                sourceUid = ingest.source.uid, sourceCreated = ingest.created, chunksTotal = chunks.size, chunksCreated = ingest.chunksCreated,
+                sourceUid = source.uid, sourceCreated = sourceCreated, chunksTotal = chunks.size, chunksCreated = chunksCreated,
                 items = out, itemsCreated = out.count { it.created }, itemsAlreadyThere = out.count { it.applied && !it.created },
                 itemsHealed = out.count { it.healed },
             )

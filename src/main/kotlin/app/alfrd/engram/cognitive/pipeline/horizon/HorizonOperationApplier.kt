@@ -230,16 +230,18 @@ class HorizonOperationApplier(
         userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
     ): AppliedOperation {
         val store = sources ?: return AppliedOperation(op, false, "Could not record from a source: no source store")
-        // A key already applied is a replay: the item (created, or matched when it was first applied) is found by the key on
-        // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
-        store.itemForOpKey(userEmail, opKey)?.let { return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)", existingUid = it) }
+        // The chunk and the quote are checked on every path, a replay included: a replay is answered "already there" only for a quote
+        // that is really in the chunk.
         val chunk = store.chunk(userEmail, op.chunkUid!!) ?: return AppliedOperation(op, false, "Could not record from a source: that chunk is not yours")
         if (op.quote.isBlank() || !SourceChunker.normalize(chunk.text).contains(SourceChunker.normalize(op.quote))) {
             return AppliedOperation(op, false, "Could not record from a source: the quote is not in the chunk")
         }
+        // A key already applied is a replay: the item (created, or matched when it was first applied) is found by the key on
+        // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
+        store.itemForOpKey(userEmail, opKey)?.let { return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)", existingUid = it) }
         val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
         val uid = result.resultUid ?: result.existingUid ?: return result
-        val linked = store.linkItem(userEmail, uid, chunk.uid, op.writer?.takeIf { it.isNotBlank() } ?: "director", op.claimant, opKey)
+        val linked = store.linkItem(userEmail, uid, chunk.uid, op.writer?.takeIf { it.isNotBlank() } ?: "director", op.claimant, opKey, draftQuote = op.quote, draftDueAt = op.dueAt, runId = op.runId)
         return if (linked == LinkOutcome.REFUSED) result.copy(applied = false, summary = "Recorded but could not be tied to its chunk") else result
     }
 
