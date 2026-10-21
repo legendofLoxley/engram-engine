@@ -46,7 +46,7 @@ fun Application.configureDebugDriveSourceRoutes(
         }
     }
     suspend fun ApplicationCall.shelfOrRefuse(): DriveShelf? = shelf() ?: run {
-        respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "drive is not configured: set GOOGLE_DRIVE_CREDENTIALS_FILE (a mode-600 file outside the repo) and GOOGLE_DRIVE_FOLDER_ID"))
+        respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "drive is not configured: set GOOGLE_DRIVE_FOLDER_ID and provide the service-account key (GOOGLE_DRIVE_CREDENTIALS_FILE, default ~/.config/engram/google-drive-sa.json; mode 600, outside the repo)"))
         null
     }
 

@@ -118,9 +118,9 @@ class DriveShelfService(
 }
 
 /**
- * The shelf as configured on the box: `GOOGLE_DRIVE_CREDENTIALS_FILE` (a path; the file holds the secrets, mode 600, outside the repo) and
- * `GOOGLE_DRIVE_FOLDER_ID`. The credentials are read when first used, not at start, so a missing or too-open file is an error on the call
- * that needs it and not a failure to boot. Absent configuration means no shelf.
+ * The shelf as configured on the box: the service-account key (`GOOGLE_DRIVE_CREDENTIALS_FILE`, else `~/.config/engram/google-drive-sa.json` if it is
+ * there; mode 600, outside the repo) and `GOOGLE_DRIVE_FOLDER_ID`. The key is read when first used, not at start, so a missing or too-open file is an
+ * error on the call that needs it and not a failure to boot. Absent configuration means no shelf.
  */
 class ConfiguredDriveShelf(private val db: Database, private val credentialsPath: String, override val folderId: String) : DriveShelf {
     private var service: DriveShelfService? = null
@@ -139,7 +139,7 @@ class ConfiguredDriveShelf(private val db: Database, private val credentialsPath
 
     companion object {
         fun fromEnvironment(db: Database): DriveShelf? {
-            val path = System.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE")?.takeIf { it.isNotBlank() } ?: return null
+            val path = GoogleCredentials.credentialsPath() ?: return null
             val folder = System.getenv("GOOGLE_DRIVE_FOLDER_ID")?.takeIf { it.isNotBlank() } ?: return null
             return ConfiguredDriveShelf(db, path, folder)
         }

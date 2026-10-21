@@ -37,8 +37,8 @@ class DriveShelfServiceTest {
             val db = manager.getDatabase(); SchemaBootstrap.bootstrap(db); DebugConverseService.ensureSyntheticUser(db, user)
             val store = SourceStore(db)
             val http = DriveHttp.client(setOf(server.hostName))
-            val creds = GoogleCredentials.parse("""{"client_id":"$FAKE_CLIENT_ID","client_secret":"$FAKE_CLIENT_SECRET","refresh_token":"$FAKE_REFRESH"}""")
-            val drive = DriveClient(GoogleAccessTokens(creds, http, server.url("/token").toString()), http, server.url("/").toString().trimEnd('/'), sleep = {})
+            val creds = GoogleCredentials.parse(TestKeys.keyJson(server.url("/token").toString()))
+            val drive = DriveClient(GoogleAccessTokens(creds, http), http, server.url("/").toString().trimEnd('/'), sleep = {})
             g.folder(folderId)
             val pdfs = PdfSourceService(store, PdfExtractor(null), PdfPreparationCache(File(dir, "cache")))
             block(Env(g, DriveShelfService(drive, pdfs, store, folderId), store, manager))
@@ -146,7 +146,7 @@ class DriveShelfServiceTest {
             e.shelf.ingest(user); e.g.corrupt.clear(); e.shelf.ingest(user); e.shelf.ingest(user)
         } finally { root.detachAppender(appender) }
         val text = appender.list.joinToString("\n") { it.formattedMessage + (it.throwableProxy?.message ?: "") }
-        for (secret in listOf(FAKE_REFRESH, FAKE_CLIENT_SECRET, "ACCESS-", "Bearer", "Background", "Student enrollment")) assertFalse(text.contains(secret), "log contains $secret")
+        for (secret in TestKeys.leakMarkers + listOf("ACCESS-", "Bearer", "Background", "Student enrollment")) assertFalse(text.contains(secret), "log contains $secret")
         assertTrue(appender.list.any { it.formattedMessage.startsWith("drive:") }, "the run is logged, with counts and ids")
     }
 

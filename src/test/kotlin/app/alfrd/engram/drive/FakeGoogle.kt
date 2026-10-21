@@ -13,9 +13,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 fun md5(b: ByteArray) = MessageDigest.getInstance("MD5").digest(b).joinToString("") { "%02x".format(it) }
 
-const val FAKE_CLIENT_ID = "client-id-123.apps.example"
-const val FAKE_CLIENT_SECRET = "SECRET-CLIENT-9f8e7d"
-const val FAKE_REFRESH = "REFRESH-TOKEN-xyz-1a2b3c"
+const val JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 
 /** A stand-in for the two Google endpoints the connector uses: the token endpoint and Drive v3 files (list, metadata, media). */
 class FakeGoogle : Dispatcher() {
@@ -26,7 +24,12 @@ class FakeGoogle : Dispatcher() {
 
     val files = LinkedHashMap<String, Entry>()
     val requests = CopyOnWriteArrayList<RecordedRequest>()
-    var tokenScope = "https://www.googleapis.com/auth/drive.readonly"
+    /** What the token response reports as its scope; a real service-account response reports none, so the default is none. */
+    var tokenScope: String? = null
+    /** The claims of every assertion that was verified, in order. */
+    val claims = CopyOnWriteArrayList<JsonObject>()
+    val headers = CopyOnWriteArrayList<JsonObject>()
+    var publicKey: java.security.PublicKey = TestKeys.pair.public
     var tokenCalls = 0
     var expiresIn = 3600
     /** Statuses to answer with, once each, before a files request succeeds. */
@@ -58,10 +61,25 @@ class FakeGoogle : Dispatcher() {
         if (url.encodedPath == "/token") {
             if (request.method != "POST") return MockResponse().setResponseCode(405)
             val form = request.body.clone().readUtf8().split('&').associate { it.substringBefore('=') to java.net.URLDecoder.decode(it.substringAfter('='), "UTF-8") }
-            if (form["grant_type"] != "refresh_token" || form["refresh_token"] != FAKE_REFRESH || form["client_id"] != FAKE_CLIENT_ID || form["client_secret"] != FAKE_CLIENT_SECRET)
-                return MockResponse().setResponseCode(400).setBody("""{"error":"invalid_grant","error_description":"echo $FAKE_REFRESH"}""")
+            fun bad(code: String) = MockResponse().setResponseCode(400).setBody("""{"error":"$code","error_description":"echo ${form["assertion"]?.take(30)}"}""")
+            if (form["grant_type"] != JWT_BEARER) return bad("unsupported_grant_type")
+            val parts = form["assertion"]?.split('.') ?: return bad("invalid_request")
+            if (parts.size != 3) return bad("invalid_grant")
+            val signature = runCatching {
+                java.security.Signature.getInstance("SHA256withRSA").run {
+                    initVerify(publicKey); update("${parts[0]}.${parts[1]}".toByteArray()); verify(java.util.Base64.getUrlDecoder().decode(parts[2]))
+                }
+            }.getOrDefault(false)
+            if (!signature) return bad("invalid_grant")
+            val header = kotlinx.serialization.json.Json.parseToJsonElement(String(java.util.Base64.getUrlDecoder().decode(parts[0]))) as JsonObject
+            val claim = kotlinx.serialization.json.Json.parseToJsonElement(String(java.util.Base64.getUrlDecoder().decode(parts[1]))) as JsonObject
+            if ((claim["iss"] as? JsonPrimitive)?.content != FAKE_SA_EMAIL) return bad("invalid_grant")
+            if ((claim["aud"] as? JsonPrimitive)?.content != request.requestUrl.toString()) return bad("invalid_grant")
+            if ((claim["scope"] as? JsonPrimitive)?.content != "https://www.googleapis.com/auth/drive.readonly") return bad("invalid_scope")
+            headers += header; claims += claim
             tokenCalls++; currentToken = "ACCESS-$tokenCalls"
-            return MockResponse().setBody("""{"access_token":"$currentToken","expires_in":$expiresIn,"scope":"$tokenScope","token_type":"Bearer"}""")
+            val scope = tokenScope?.let { ""","scope":"$it"""" }.orEmpty()
+            return MockResponse().setBody("""{"access_token":"$currentToken","expires_in":$expiresIn$scope,"token_type":"Bearer"}""")
         }
         if (request.getHeader("Authorization") != "Bearer $currentToken" || currentToken.isEmpty()) return MockResponse().setResponseCode(401).setBody("{}")
         if (request.method != "GET") return MockResponse().setResponseCode(405)

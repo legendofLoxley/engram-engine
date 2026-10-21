@@ -56,8 +56,8 @@ class DebugDriveSourceRoutesTest {
         try {
             val db = manager.getDatabase(); SchemaBootstrap.bootstrap(db)
             val http = DriveHttp.client(setOf(server.hostName))
-            val creds = GoogleCredentials.parse("""{"client_id":"$FAKE_CLIENT_ID","client_secret":"$FAKE_CLIENT_SECRET","refresh_token":"$FAKE_REFRESH"}""")
-            val drive = DriveClient(GoogleAccessTokens(creds, http, server.url("/token").toString()), http, server.url("/").toString().trimEnd('/'), sleep = {})
+            val creds = GoogleCredentials.parse(TestKeys.keyJson(server.url("/token").toString()))
+            val drive = DriveClient(GoogleAccessTokens(creds, http), http, server.url("/").toString().trimEnd('/'), sleep = {})
             g.folder(folderId)
             val store = SourceStore(db)
             block(manager, dir, g, DriveShelfService(drive, PdfSourceService(store, PdfExtractor(null), PdfPreparationCache(File(dir, "cache"))), store, folderId))
@@ -156,7 +156,7 @@ class DebugDriveSourceRoutesTest {
             application { module(m, dir, { badCreds }) }
             val r = client.post("/debug/sources/drive") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody(post()) }
             assertEquals(HttpStatusCode.ServiceUnavailable, r.status); assertTrue(r.bodyAsText().contains("600"))
-            assertFalse(r.bodyAsText().contains(FAKE_REFRESH))
+            TestKeys.leakMarkers.forEach { assertFalse(r.bodyAsText().contains(it)) }
         }
     }
 }

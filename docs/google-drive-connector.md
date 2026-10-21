@@ -8,8 +8,11 @@ Code: `app.alfrd.engram.drive`; routes `POST /debug/sources/drive`, `GET /debug/
 
 - The only HTTP client is `DriveHttp`. It refuses, before the request leaves, anything but a `GET` under `/drive/v3/` and the token endpoint's `POST /token`,
   to `www.googleapis.com` / `oauth2.googleapis.com` over https. No PUT, PATCH, DELETE, upload, share, move or send call exists in the code, and redirects are not followed.
-- The access token's scope is checked on every refresh: anything beyond `drive.readonly`, `drive.metadata.readonly`, `gmail.readonly` (and the identity scopes
-  `openid`, `email`, `profile`) is refused, naming the scope. A credential that can write is not used.
+- Auth is a Google **service account**: the key file is read, a JWT is signed with it (RS256) and exchanged at the key's `token_uri` for an access token. The scope asked
+  for is the constant `https://www.googleapis.com/auth/drive.readonly`; there is no way to ask for another. If Google reports a scope on the token and it reaches beyond read-only
+  (anything but `drive.readonly`, `drive.metadata.readonly`, `gmail.readonly` and the identity scopes `openid`, `email`, `profile`), the token is refused, naming the scope. The account is
+  also only a Viewer of the Shared Drive, so Drive would refuse a write on that ground as well.
+- The key file's `token_uri` is only reached through the same guard, so a key file cannot send the signed assertion to another host or path.
 - The configured folder is the ingestion boundary: `GOOGLE_DRIVE_FOLDER_ID`. Only its direct children are read; sub-folders are listed as skipped, not entered;
   only `application/pdf` is fetched. The route never takes a folder from the caller.
 - Shared Drives: every files call carries `supportsAllDrives=true`; listings also `includeItemsFromAllDrives=true` and `corpora=allDrives`.
@@ -30,36 +33,35 @@ it was read at (the existing source-versioning contract). The same bytes under a
 
 ## What is verified, and what is not
 
-- **Tested against a fake Google** (mock web server): token refresh and caching, scope refusal, the read-only guard, `supportsAllDrives`/`includeItemsFromAllDrives`,
-  pagination, retries, md5 checking, boundary and skipping, idempotent reruns, changed content, provenance, the routes and the CLI.
-- **Not yet run against real Google from this repository's sandbox**: that needs the credentials below, which are not (and must never be) in the sandbox or the repo.
-  The three real PDFs were read for the extraction results in [pdf-source-extraction.md](pdf-source-extraction.md) through a separate Drive connector in the
-  development session, which is not the engine's Drive client.
+- **Tested against a fake Google** (mock web server that verifies the JWT signature with the public key): the key file (owner-only mode, every group/other bit refused, malformed and non-RSA
+  keys, wrong `type`), the JWT header and claims (`iss`, `scope`, `aud`, `iat`, `exp`, no `sub`) and signature, the token exchange and caching until a minute before expiry,
+  scope enforcement, the read-only HTTP guard, `supportsAllDrives`/`includeItemsFromAllDrives`, pagination, retries, md5 checking, boundary and skipping, idempotent reruns,
+  changed content, provenance, the routes and the CLI, and that no key material reaches a log or a message.
+- **Not yet run against real Google from this repository's sandbox**: that needs the key below, which is not (and must never be) in the sandbox or the repo. The three real PDFs were read
+  for the extraction results in [pdf-source-extraction.md](pdf-source-extraction.md) through a separate Drive connector in the development session, which is not the engine's Drive client.
 
-## Running the real three-document test on the box
+## Service-account setup and the real three-document test on the box
 
-You need, from Jacob, through a secure channel (never chat, Notion, the repo, logs or an environment variable's value):
+**The account.** `alfrd-drive-reader@alfrd-box.iam.gserviceaccount.com` (project `alfrd-box`), a **Viewer** member of Shared Drive *PPS*. The Google Drive API has to be enabled in the project
+`alfrd-box`. No domain-wide delegation is used (the assertion has no `sub`), and nothing is done on behalf of a user.
 
-1. **Membership.** The dedicated alfrd Google user is a member of Shared Drive *PPS* with a view-only role (Viewer; or the *Evidence* folder shared to it as Viewer).
-   A 404 from `--check` means the account cannot see the folder.
-2. **An OAuth client** (type Desktop app) in a Google Cloud project, consent for the alfrd user with the single scope
-   `https://www.googleapis.com/auth/drive.readonly` (add `gmail.readonly` only for the later email phase). Use an *Internal* user type (Workspace) or publish the app:
-   refresh tokens of an external app left in *Testing* expire after 7 days and the run then fails with `invalid_grant`.
-3. **A refresh token** for that user and client, obtained once on a trusted machine by signing in as the alfrd user (for example with the OAuth consent flow of
-   your choice, or `gcloud auth application-default login --client-id-file=client.json --scopes=https://www.googleapis.com/auth/drive.readonly`, whose
-   output file has these three fields; that route is not tested here).
-
-Put them in one JSON file, **outside the repo**, beside the box's other secrets, readable by the engine's user only:
+**The key.** One JSON key for that account, as downloaded from Google (`type` `service_account`, `client_email`, `private_key`, `token_uri`; other fields are ignored). It goes on the box, **outside
+the repo**, readable by the user that runs the engine only:
 
 ```
-/home/halo/development/hermes-webui-dev/.google-drive-credentials.json      # mode 600, owner = the user that runs the engine
-{"client_id": "...", "client_secret": "...", "refresh_token": "..."}          # extra fields are ignored
+/home/halo/.config/engram/google-drive-sa.json        # mode 600, owner = the user that runs the engine
+install -d -m 700 /home/halo/.config/engram
+install -m 600 /path/where/you/saved/the/key.json /home/halo/.config/engram/google-drive-sa.json
+stat -c '%a %U' /home/halo/.config/engram/google-drive-sa.json      # expect: 600 halo
 ```
 
-`chmod 600` it. The engine refuses a file with any group or other permission bit, and refuses any file whose token reaches beyond read-only. Then, in the environment of the
-engine's service (set by whoever owns the box; this change does not touch the service files, the deploy scripts, `.do/app.yaml` or `CLAUDE.md`): 
-`GOOGLE_DRIVE_CREDENTIALS_FILE=<that path>` (a path, not the secret), `GOOGLE_DRIVE_FOLDER_ID=1RPbk1LKygWEFBpImRdjtovnQOHNNWeu8`, `DEBUG_CONVERSE_ENABLED=true`,
-`DEBUG_CONVERSE_TOKEN=<the existing debug token>`, optionally `ENGRAM_PDF_CACHE_DIR`. Tesseract (`apt install tesseract-ocr`) is optional for these three files (all pages have a text layer).
+The engine refuses a file with any group or other permission bit, before it reads it. Move the key onto the box by a secure channel, delete the downloaded copy, and never put it in the repo,
+chat, Notion, a log or an environment variable's value. The key is the only secret: the folder id and the service-account address are not.
+
+**Configuration** (in the environment of the engine's service, set by whoever owns the box; this change does not touch the service files, the deploy scripts, `.do/app.yaml` or `CLAUDE.md`):
+`GOOGLE_DRIVE_FOLDER_ID=1RPbk1LKygWEFBpImRdjtovnQOHNNWeu8` (the *Evidence* folder), `DEBUG_CONVERSE_ENABLED=true`, `DEBUG_CONVERSE_TOKEN=<the existing debug token>`; optionally
+`GOOGLE_DRIVE_CREDENTIALS_FILE` (a path) if the key is not at the default above, and `ENGRAM_PDF_CACHE_DIR`. Tesseract (`apt install tesseract-ocr`) is optional for these three files
+(every page has a text layer); without it, a page with no text layer is recorded `unread`.
 
 With this branch built on the box (the owner's step; nothing here deploys or rebuilds anything):
 
@@ -84,5 +86,15 @@ curl -s -H "Authorization: Bearer $DEBUG_CONVERSE_TOKEN" "http://127.0.0.1:8080/
 
 Expected from the real files as read in the development session (same extractor): districtwide 2 pages / 6 chunks / 1 table; equity audit 157 pages / 381 chunks / 2 tables;
 school-by-school 130 pages / 297 chunks / 0 tables; all `full`, all pages from the text layer. Chunk counts follow the extractor version, so they are a check, not a contract.
-The Drive md5 and the SHA-256 should agree with the file Jacob uploaded. Anything else (a 403, 404, a 503 naming the mode, `invalid_grant`) is reported as it stands:
-the error carries a status or a rule, never a secret.
+The Drive md5 and the SHA-256 should agree with the file that was uploaded.
+
+**If something fails**, the error carries a status or a rule, never the key:
+
+| What you see | Meaning |
+|---|---|
+| `the credentials file must be mode 600` | `chmod 600` the key file (and check it is owned by the engine's user) |
+| `the credentials file is not a service-account key` / `lacks a valid client_email` / `private_key ... not a readable PKCS#8 RSA key` | the file is not the JSON key Google downloads, or it was damaged in transit |
+| `token request failed (status 400, error invalid_grant)` | the key was deleted or disabled in Google, or the box clock is far off |
+| `token request failed (status 403` or `drive request failed (status 403)` | the Drive API is not enabled in project `alfrd-box`, or the account is not allowed in |
+| `drive request failed (status 404)` on the folder | the account is not a member of Shared Drive PPS, or the folder id is wrong |
+| `the token's scope goes beyond read-only` | Google reported a scope wider than `drive.readonly`: stop and look at the key's account |

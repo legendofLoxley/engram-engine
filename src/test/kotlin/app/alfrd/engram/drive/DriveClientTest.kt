@@ -9,14 +9,14 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 
 class DriveClientTest {
-    private val creds = GoogleCredentials.parse("""{"client_id":"$FAKE_CLIENT_ID","client_secret":"$FAKE_CLIENT_SECRET","refresh_token":"$FAKE_REFRESH"}""")
     val folderId = "FOLDER-1"
 
     private fun withDrive(block: (FakeGoogle, DriveClient) -> Unit) {
         val g = FakeGoogle(); val server = MockWebServer(); server.dispatcher = g; server.start()
         try {
             val http = DriveHttp.client(setOf(server.hostName))
-            val client = DriveClient(GoogleAccessTokens(creds, http, server.url("/token").toString()), http, server.url("/").toString().trimEnd('/'), sleep = {})
+            val creds = GoogleCredentials.parse(TestKeys.keyJson(server.url("/token").toString()))
+            val client = DriveClient(GoogleAccessTokens(creds, http), http, server.url("/").toString().trimEnd('/'), sleep = {})
             g.folder(folderId)
             block(g, client)
         } finally { server.shutdown() }

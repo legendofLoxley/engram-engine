@@ -23,20 +23,21 @@ import kotlin.system.exitProcess
  *
  * ```
  * DriveSourceCli --check
- *     Lists the PDFs in the configured folder (GOOGLE_DRIVE_FOLDER_ID) with the credentials in GOOGLE_DRIVE_CREDENTIALS_FILE: name, id, size, version,
+ *     Lists the PDFs in the configured folder (GOOGLE_DRIVE_FOLDER_ID) with the service-account key (GOOGLE_DRIVE_CREDENTIALS_FILE, or the default file): name, id, size, version,
  *     md5, link. Reads nothing but the listing; no download, no graph. The first thing to run on the box.
  * DriveSourceCli --user <label> [--url http://127.0.0.1:8080]
  *     Asks the running engine to fetch the folder and commit each PDF as a Source under the synthetic identity debug+<label>@... (POST /debug/sources/drive;
  *     needs DEBUG_CONVERSE_TOKEN; loopback URLs only; never owner-jacob). The engine reads Drive, on the box.
  * ```
- * The credentials file is a path in the environment; its contents are never printed. Exit status: 0 done, 2 Drive or the engine refused or could not be
+ * The key file is a path; its contents are never printed. Exit status: 0 done, 2 Drive or the engine refused or could not be
  * reached, 64 usage or configuration.
  */
 object DriveSourceCli {
     private val json = Json { prettyPrint = true }
 
-    class Endpoints(val apiBase: String, val tokenUrl: String, val http: OkHttpClient) {
-        companion object { fun production() = Endpoints("https://www.googleapis.com", "https://oauth2.googleapis.com/token", DriveHttp.production()) }
+    /** The token endpoint is the one named in the service-account key file; the guard in [DriveHttp] decides which hosts can be reached. */
+    class Endpoints(val apiBase: String, val http: OkHttpClient) {
+        companion object { fun production() = Endpoints("https://www.googleapis.com", DriveHttp.production()) }
     }
 
     fun run(
@@ -45,12 +46,15 @@ object DriveSourceCli {
     ): Int {
         fun opt(name: String) = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
         if ("--check" in args) {
-            val creds = env["GOOGLE_DRIVE_CREDENTIALS_FILE"]?.takeIf { it.isNotBlank() }
+            val creds = GoogleCredentials.credentialsPath(env)
             val folder = env["GOOGLE_DRIVE_FOLDER_ID"]?.takeIf { it.isNotBlank() }
-            if (creds == null || folder == null) { err.println("set GOOGLE_DRIVE_CREDENTIALS_FILE and GOOGLE_DRIVE_FOLDER_ID"); return 64 }
+            if (creds == null || folder == null) {
+                err.println("set GOOGLE_DRIVE_FOLDER_ID, and put the service-account key at ~/${GoogleCredentials.DEFAULT_RELATIVE_PATH} or set GOOGLE_DRIVE_CREDENTIALS_FILE")
+                return 64
+            }
             return try {
                 val e = endpoints()
-                val drive = DriveClient(GoogleAccessTokens(GoogleCredentials.load(creds), e.http, e.tokenUrl), e.http, e.apiBase)
+                val drive = DriveClient(GoogleAccessTokens(GoogleCredentials.load(creds), e.http), e.http, e.apiBase)
                 val f = drive.folder(folder)
                 out.println("folder ${f.id} \"${f.name}\" shared drive ${f.driveId ?: "(none: My Drive)"}")
                 val children = drive.children(folder)
