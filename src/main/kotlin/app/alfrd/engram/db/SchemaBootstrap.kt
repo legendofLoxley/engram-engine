@@ -344,6 +344,32 @@ object SchemaBootstrap {
             // The operation key of the source item that made this edge, namespaced by owner: how a replayed commit finds the
             // item again, whether it was newly created or matched an item already on the list (see SourceStore.itemForOpKey).
             ensureProperty(schema, "QUOTES",  "opKey",               Type.STRING)
+            // A Source read from a paged file (PDF): the SHA-256 of the original file (also its contentHash), its page count, how many
+            // pages were read by OCR and how many yielded nothing. And what a chunk of such a file knows about where it sits: the
+            // physical page, the page number as printed on it, its section, whether it is text or a table, how it was read (text
+            // layer or OCR, with the OCR engine's own confidence), its box on the page and, for a table, its rows and cells (JSON).
+            ensureProperty(schema, "Source",  "fileSha256",          Type.STRING)
+            ensureProperty(schema, "Source",  "pageCount",           Type.INTEGER)
+            ensureProperty(schema, "Source",  "ocrPages",            Type.INTEGER)
+            ensureProperty(schema, "Source",  "unreadPages",         Type.INTEGER)
+            // A Source fetched from Google Drive keeps the file's identity and version (see DriveFacts); all optional.
+            ensureProperty(schema, "Source",  "driveFileId",         Type.STRING)
+            ensureProperty(schema, "Source",  "driveFileName",       Type.STRING)
+            ensureProperty(schema, "Source",  "driveWebViewLink",    Type.STRING)
+            ensureProperty(schema, "Source",  "driveVersion",        Type.STRING)
+            ensureProperty(schema, "Source",  "driveMd5",            Type.STRING)
+            ensureProperty(schema, "Source",  "driveModifiedTime",   Type.STRING)
+            ensureProperty(schema, "Source",  "driveId",             Type.STRING)
+            ensureProperty(schema, "Source",  "driveHeadRevisionId", Type.STRING)
+            ensureProperty(schema, "Source",  "driveFolderId",       Type.STRING)
+            ensureProperty(schema, "Chunk",   "page",                Type.INTEGER)
+            ensureProperty(schema, "Chunk",   "printedPage",         Type.STRING)
+            ensureProperty(schema, "Chunk",   "section",             Type.STRING)
+            ensureProperty(schema, "Chunk",   "kind",                Type.STRING)
+            ensureProperty(schema, "Chunk",   "extractor",           Type.STRING)
+            ensureProperty(schema, "Chunk",   "ocrConfidence",       Type.DOUBLE)
+            ensureProperty(schema, "Chunk",   "box",                 Type.STRING)
+            ensureProperty(schema, "Chunk",   "table",               Type.STRING)
             // Same properties as the ensureVertex blocks above, repeated so a database that already ran
             // an earlier revision of those blocks picks them up.
             ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)
@@ -428,6 +454,7 @@ object SchemaBootstrap {
             ensureIndex(schema, "Source",      "uid")
             ensureIndex(schema, "Source",      "name")
             ensureIndex(schema, "Source",      "contentHash")
+            ensureIndex(schema, "Source",      "driveFileId")
             ensureIndex(schema, "Chunk",       "uid")
             ensureIndex(schema, "Chunk",       "sourceUid")
             ensureIndex(schema, "QUOTES",      "opKey")

@@ -6,6 +6,25 @@ import com.arcadedb.graph.Vertex
 import org.slf4j.LoggerFactory
 import java.util.UUID
 
+/**
+ * Where a Source came from in Google Drive: the file's id (stable across renames), its name and link as of the read, the version Drive
+ * reported (a number that grows with every change) and the content md5, when it was last modified, the Shared Drive it lives in
+ * ([driveId]; null in My Drive), the head revision, and the configured folder it was found in. Kept on the Source so provenance survives
+ * a rename or a move; the page of each chunk is on the chunk.
+ */
+@kotlinx.serialization.Serializable
+data class DriveFacts(
+    val fileId: String,
+    val fileName: String? = null,
+    val webViewLink: String? = null,
+    val version: String? = null,
+    val md5: String? = null,
+    val modifiedTime: String? = null,
+    val driveId: String? = null,
+    val headRevisionId: String? = null,
+    val folderId: String? = null,
+)
+
 /** What is read: one document, page or email message. [text] is the whole text as read; the chunker decides what becomes chunks. */
 data class SourceInput(
     /** `notion_page`, `document` or `email_message`. */
@@ -19,14 +38,33 @@ data class SourceInput(
     /** Email only: the thread this message belongs to. The message, not the thread, is the Source. */
     val threadId: String? = null,
     val readAt: Long = System.currentTimeMillis(),
+    /** Chunks already cut by a reader that knows the file's layout (a PDF); when given, [text] is not chunked again. */
+    val chunks: List<ChunkDraft>? = null,
+    /**
+     * SHA-256 of the original file's bytes. When given, it is the Source's identity (stored as `contentHash` too): the same file is the
+     * same Source however it was read, and a changed file is a new one. [text] still has to be non-blank but is not hashed.
+     */
+    val fileSha256: String? = null,
+    val pageCount: Int? = null,
+    /** Pages read by OCR, and pages that yielded nothing (so the Source is not the whole file). */
+    val ocrPages: Int? = null,
+    val unreadPages: Int? = null,
+    /** Set when the file was fetched from Google Drive. */
+    val drive: DriveFacts? = null,
 )
 
 data class SourceRecord(
     val uid: String, val type: String, val locator: String, val title: String, val readMode: String,
     val threadId: String?, val contentHash: String, val readAt: Long, val chunkCount: Int,
+    val fileSha256: String? = null, val pageCount: Int? = null, val ocrPages: Int? = null, val unreadPages: Int? = null,
+    val drive: DriveFacts? = null,
 )
 
-data class ChunkRecord(val uid: String, val sourceUid: String, val ordinal: Int, val location: String, val text: String, val hash: String)
+data class ChunkRecord(
+    val uid: String, val sourceUid: String, val ordinal: Int, val location: String, val text: String, val hash: String,
+    val page: Int? = null, val printedPage: String? = null, val section: String? = null, val kind: String? = null,
+    val extractor: String? = null, val ocrConfidence: Double? = null, val box: String? = null, val table: String? = null,
+)
 
 data class IngestResult(
     val source: SourceRecord,
@@ -65,11 +103,11 @@ class SourceStore(private val db: Database) {
         require(input.type in TYPES) { "unknown source type" }
         require(input.readMode in READ_MODES) { "readMode must be one of: ${READ_MODES.joinToString(", ")}" }
         require(input.locator.isNotBlank() && input.text.isNotBlank()) { "a source needs a locator and text" }
-        val hash = SourceChunker.contentHash(input.text)
+        val hash = input.fileSha256 ?: SourceChunker.contentHash(input.text)
         synchronized(LOCK) {
             findSource(userEmail, input.type, input.locator, hash)?.let { return IngestResult(it.toRecord(), created = false, chunksCreated = 0) }
             val user = HorizonOwnership.findUserVertex(db, userEmail) ?: throw IllegalArgumentException("unknown user")
-            val drafts = if (input.type == EMAIL) SourceChunker.chunkEmail(input.text, "message") else SourceChunker.chunkDocument(input.text)
+            val drafts = input.chunks ?: if (input.type == EMAIL) SourceChunker.chunkEmail(input.text, "message") else SourceChunker.chunkDocument(input.text)
             require(drafts.isNotEmpty()) { "nothing to chunk" }
             var sourceUid = ""
             db.transaction {
@@ -85,6 +123,17 @@ class SourceStore(private val db: Database) {
                     set("readMode", input.readMode)
                     set("ownerEmail", userEmail)
                     input.threadId?.let { set("threadId", it) }
+                    input.fileSha256?.let { set("fileSha256", it) }
+                    input.pageCount?.let { set("pageCount", it) }
+                    input.ocrPages?.let { set("ocrPages", it) }
+                    input.unreadPages?.let { set("unreadPages", it) }
+                    input.drive?.let { f ->
+                        set("driveFileId", f.fileId)
+                        f.fileName?.let { set("driveFileName", it) }; f.webViewLink?.let { set("driveWebViewLink", it) }
+                        f.version?.let { set("driveVersion", it) }; f.md5?.let { set("driveMd5", it) }
+                        f.modifiedTime?.let { set("driveModifiedTime", it) }; f.driveId?.let { set("driveId", it) }
+                        f.headRevisionId?.let { set("driveHeadRevisionId", it) }; f.folderId?.let { set("driveFolderId", it) }
+                    }
                     save()
                 }
                 user.modify().newEdge("TRUSTS", source, false).apply { set("scores", "[]"); save() }
@@ -99,6 +148,14 @@ class SourceStore(private val db: Database) {
                         set("text", draft.text)
                         set("hash", SourceChunker.contentHash(draft.text))
                         set("createdAt", now)
+                        draft.page?.let { set("page", it) }
+                        draft.printedPage?.let { set("printedPage", it) }
+                        draft.section?.let { set("section", it) }
+                        draft.kind?.let { set("kind", it) }
+                        draft.extractor?.let { set("extractor", it) }
+                        draft.ocrConfidence?.let { set("ocrConfidence", it) }
+                        draft.box?.let { set("box", it) }
+                        draft.table?.let { set("table", it) }
                         save()
                     }
                     source.newEdge("CONTAINS", chunk, false).apply { set("position", index); save() }
@@ -201,11 +258,23 @@ class SourceStore(private val db: Database) {
         title = get("name") as? String ?: "", readMode = get("readMode") as? String ?: "full", threadId = get("threadId") as? String,
         contentHash = get("contentHash") as? String ?: "", readAt = (get("readAt") as? Number)?.toLong() ?: 0L,
         chunkCount = countEdges(Vertex.DIRECTION.OUT, "CONTAINS").toInt(),
+        fileSha256 = get("fileSha256") as? String, pageCount = (get("pageCount") as? Number)?.toInt(),
+        ocrPages = (get("ocrPages") as? Number)?.toInt(), unreadPages = (get("unreadPages") as? Number)?.toInt(),
+        drive = (get("driveFileId") as? String)?.let { id ->
+            DriveFacts(
+                fileId = id, fileName = get("driveFileName") as? String, webViewLink = get("driveWebViewLink") as? String,
+                version = get("driveVersion") as? String, md5 = get("driveMd5") as? String, modifiedTime = get("driveModifiedTime") as? String,
+                driveId = get("driveId") as? String, headRevisionId = get("driveHeadRevisionId") as? String, folderId = get("driveFolderId") as? String,
+            )
+        },
     )
 
     private fun Vertex.toChunk() = ChunkRecord(
         uid = get("uid") as String, sourceUid = get("sourceUid") as? String ?: "", ordinal = (get("ordinal") as? Number)?.toInt() ?: 0,
         location = get("location") as? String ?: "", text = get("text") as? String ?: "", hash = get("hash") as? String ?: "",
+        page = (get("page") as? Number)?.toInt(), printedPage = get("printedPage") as? String, section = get("section") as? String,
+        kind = get("kind") as? String, extractor = get("extractor") as? String, ocrConfidence = (get("ocrConfidence") as? Number)?.toDouble(),
+        box = get("box") as? String, table = get("table") as? String,
     )
 
     companion object {

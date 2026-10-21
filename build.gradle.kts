@@ -40,6 +40,9 @@ dependencies {
     // S3-compatible object storage client (DigitalOcean Spaces snapshot repository)
     implementation("software.amazon.awssdk:s3:2.54.12")
 
+    // PDF reading for Source chunks (pure JVM: text layer with positions, graphics rulings, page rendering for OCR)
+    implementation("org.apache.pdfbox:pdfbox:3.0.4")
+
     // Logging: SLF4J + Logback (routes JUL from ArcadeDB/Ktor through Logback too)
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("ch.qos.logback:logback-classic:1.5.18")

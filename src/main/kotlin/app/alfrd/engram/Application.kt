@@ -6,6 +6,8 @@ import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureDebugGraphBackupRoutes
+import app.alfrd.engram.api.configureDebugDriveSourceRoutes
+import app.alfrd.engram.api.configureDebugPdfSourceRoutes
 import app.alfrd.engram.api.configureDebugSourceRoutes
 import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
@@ -194,6 +196,9 @@ fun main() {
             configureDebugNotionCycleRoutes(notionStartup)
             configureDebugGraphBackupRoutes(db, localBackup)
             configureDebugSourceRoutes(db)
+            configureDebugPdfSourceRoutes(db)
+            val driveShelf = app.alfrd.engram.drive.ConfiguredDriveShelf.fromEnvironment(db)
+            configureDebugDriveSourceRoutes(db, shelf = { driveShelf })
             log.info("debug-converse endpoint enabled")
         }
         routing {
