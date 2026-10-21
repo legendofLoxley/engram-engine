@@ -6,6 +6,7 @@ import app.alfrd.engram.api.configureDebugActorEventRoutes
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureDebugGraphBackupRoutes
+import app.alfrd.engram.api.configureDebugClaimRoutes
 import app.alfrd.engram.api.configureDebugDriveSourceRoutes
 import app.alfrd.engram.api.configureDebugPdfSourceRoutes
 import app.alfrd.engram.api.configureDebugSourceRoutes
@@ -197,6 +198,7 @@ fun main() {
             configureDebugGraphBackupRoutes(db, localBackup)
             configureDebugSourceRoutes(db)
             configureDebugPdfSourceRoutes(db)
+            configureDebugClaimRoutes(db)
             val driveShelf = app.alfrd.engram.drive.ConfiguredDriveShelf.fromEnvironment(db)
             configureDebugDriveSourceRoutes(db, shelf = { driveShelf })
             log.info("debug-converse endpoint enabled")

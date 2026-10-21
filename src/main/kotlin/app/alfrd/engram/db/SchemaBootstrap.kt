@@ -53,6 +53,29 @@ object SchemaBootstrap {
                 vt.createProperty("createdAt", Type.LONG)
             }
 
+            // One run of the baseline claim extraction over a Source: which model answered, how many passes, how far it got.
+            // Never a Phrase and never ASSERTed, so the Context Horizon cannot surface it. See app.alfrd.engram.claims.
+            ensureVertex(schema, "ExtractionRun") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("runId", Type.STRING)
+                vt.createProperty("sourceUid", Type.STRING)
+                vt.createProperty("status", Type.STRING)
+                vt.createProperty("startedAt", Type.LONG)
+            }
+
+            // Two pass versions of one claim that did not agree (or a quote that is not in its chunk), kept as recorded and never
+            // established as a claim. Same visibility rule as ExtractionRun.
+            ensureVertex(schema, "ClaimDisagreement") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("runId", Type.STRING)
+                vt.createProperty("sourceUid", Type.STRING)
+                vt.createProperty("chunkUid", Type.STRING)
+                vt.createProperty("reason", Type.STRING)
+                vt.createProperty("createdAt", Type.LONG)
+            }
+
             ensureVertex(schema, "User") { vt ->
                 vt.createProperty("uid", Type.STRING)
                 vt.createProperty("username", Type.STRING)
@@ -344,6 +367,39 @@ object SchemaBootstrap {
             // The operation key of the source item that made this edge, namespaced by owner: how a replayed commit finds the
             // item again, whether it was newly created or matched an item already on the list (see SourceStore.itemForOpKey).
             ensureProperty(schema, "QUOTES",  "opKey",               Type.STRING)
+            // What the source draft said when this link was made (its verbatim quote and its date), so a later call that replays the
+            // same item with a different quote or date is refused instead of answered "already there"; and, for a claim, the
+            // extraction run that found it at this chunk.
+            ensureProperty(schema, "QUOTES",  "draftQuote",          Type.STRING)
+            ensureProperty(schema, "QUOTES",  "draftDueAt",          Type.LONG)
+            ensureProperty(schema, "QUOTES",  "runId",               Type.STRING)
+            // A claim established by the baseline extraction (a FACT item tied to its chunk): what kind of assertion, about what, the
+            // claimant as the passes wrote it, the identity key within its Source (a hash of the quote), the run that established it
+            // and whether it is Settled or Re-checking. No score of any kind.
+            ensureProperty(schema, "Phrase",  "claimKind",           Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimSubject",        Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimantAsWritten",   Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimClaimant",       Type.STRING)
+            // The claim's verbatim quote and, when it sits in a particular row, column or box of its chunk, where. The item's text is the
+            // quote, followed by the place in brackets when there is one, so one row quoted for three columns is three claims.
+            ensureProperty(schema, "Phrase",  "claimQuote",          Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimPlace",          Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimSourceUid",      Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimQuoteKey",       Type.STRING)
+            ensureProperty(schema, "Phrase",  "claimRunId",          Type.STRING)
+            ensureProperty(schema, "Phrase",  "checkState",          Type.STRING)
+            ensureProperty(schema, "Phrase",  "recheckRunId",        Type.STRING)
+            ensureProperty(schema, "ExtractionRun", "modelName",     Type.STRING)
+            ensureProperty(schema, "ExtractionRun", "modelEndpoint", Type.STRING)
+            ensureProperty(schema, "ExtractionRun", "promptVersion", Type.STRING)
+            ensureProperty(schema, "ExtractionRun", "passes",        Type.INTEGER)
+            ensureProperty(schema, "ExtractionRun", "chunksTotal",   Type.INTEGER)
+            ensureProperty(schema, "ExtractionRun", "chunksDone",    Type.INTEGER)
+            ensureProperty(schema, "ExtractionRun", "finishedAt",    Type.LONG)
+            ensureProperty(schema, "ExtractionRun", "report",        Type.STRING)
+            ensureProperty(schema, "ClaimDisagreement", "dkey",      Type.STRING)
+            ensureProperty(schema, "ClaimDisagreement", "versionA",  Type.STRING)
+            ensureProperty(schema, "ClaimDisagreement", "versionB",  Type.STRING)
             // A Source read from a paged file (PDF): the SHA-256 of the original file (also its contentHash), its page count, how many
             // pages were read by OCR and how many yielded nothing. And what a chunk of such a file knows about where it sits: the
             // physical page, the page number as printed on it, its section, whether it is text or a table, how it was read (text
@@ -458,6 +514,11 @@ object SchemaBootstrap {
             ensureIndex(schema, "Chunk",       "uid")
             ensureIndex(schema, "Chunk",       "sourceUid")
             ensureIndex(schema, "QUOTES",      "opKey")
+            ensureIndex(schema, "Phrase",      "claimQuoteKey")
+            ensureIndex(schema, "ExtractionRun", "runId")
+            ensureIndex(schema, "ClaimDisagreement", "runId")
+            ensureIndex(schema, "ClaimDisagreement", "chunkUid")
+            ensureIndex(schema, "ClaimDisagreement", "dkey")
             ensureIndex(schema, "User",        "uid")
             ensureIndex(schema, "User",        "email")
             ensureIndex(schema, "ScoreType",   "uid")
