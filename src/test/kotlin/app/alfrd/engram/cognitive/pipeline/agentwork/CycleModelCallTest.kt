@@ -83,7 +83,8 @@ class CycleModelCallTest {
         assertEquals(listOf("CyclePlanDirector.kt", "CycleQcDirector.kt", "CycleTaskExecutor.kt"), opting)
         val others = java.io.File("src/main/kotlin").walkTopDown().filter { it.extension == "kt" && it.path.contains("/agentwork/").not() }
             .filter { it.readText().contains("reasoning = true") }.map { it.name }.toList()
-        assertEquals(emptyList<String>(), others, "chat, the Interpreter and the other directors must keep thinking off")
+        // The claim extraction's forced-tool passes are the one caller outside agentwork that opts in, for the same reason (a long prompt and a forced tool).
+        assertEquals(emptyList<String>(), others - "LocalClaimModel.kt", "chat, the Interpreter and the other directors must keep thinking off")
     }
 
     // ── The trace ────────────────────────────────────────────────────────────
