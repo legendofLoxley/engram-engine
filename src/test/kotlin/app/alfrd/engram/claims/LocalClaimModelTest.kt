@@ -108,9 +108,9 @@ class LocalClaimModelTest {
     }
 
     @Test
-    fun `the built-in prompts are claims-v3 and carry the rules for tables, labelled numbers, headings and page furniture`() {
+    fun `the built-in prompts are claims-v4 and carry the rules for tables, labelled numbers, headings and page furniture`() {
         val d = PromptSet.DEFAULT
-        assertEquals("claims-v3", d.version)
+        assertEquals("claims-v4", d.version)
         assertNotEquals(d.pass1, d.pass2)
         for (p in listOf(d.pass1, d.pass2)) {
             assertTrue(p.contains("the whole row") && p.contains("never a single cell"), "tables: whole row, column header as place")
@@ -118,6 +118,8 @@ class LocalClaimModelTest {
             assertTrue(p.contains("page furniture") && p.contains("Updated <date>"), "no footers or date stamps")
             assertTrue(p.contains("Do not cut one sentence into fragments"))
             assertTrue(p.contains("outermost one that names a scenario"))
+            assertTrue(p.contains("one claim per list item") && p.contains("Never give a whole list as one quote"), "lists are split into items")
+            assertTrue(p.contains("Never reorder them and never add a word that is not there"), "quotes keep the passage's order")
             assertTrue(p.contains("never the name of a card, box, list or program inside it") && p.contains("always give one"), "scenario heading is the place; card names go in the subject")
         }
     }
@@ -139,7 +141,7 @@ class LocalClaimModelTest {
         fun system(i: Int) = Json.parseToJsonElement(bodies[i]).jsonObject["messages"]!!.jsonArray.first().jsonObject["content"]!!.jsonPrimitive.content
         assertEquals("FIRST-WORDING", system(0)); assertEquals("SECOND-WORDING", system(1))
         assertTrue(m.promptVersion.startsWith("custom-"))
-        assertEquals("claims-v3", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
+        assertEquals("claims-v4", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
     }
 
     @Test

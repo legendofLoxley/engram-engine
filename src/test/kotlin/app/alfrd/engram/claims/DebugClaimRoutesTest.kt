@@ -166,7 +166,7 @@ class DebugClaimRoutesTest {
             client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-d"}""") }
             repeat(200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
             val run = json(client.get("/debug/claim-runs/route-run-d?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
-            assertEquals("claims-v3", run["promptVersion"]!!.jsonPrimitive.content)
+            assertEquals("claims-v4", run["promptVersion"]!!.jsonPrimitive.content)
         }
     }
 }
