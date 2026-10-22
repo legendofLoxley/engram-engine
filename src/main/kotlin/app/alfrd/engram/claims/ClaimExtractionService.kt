@@ -115,9 +115,10 @@ class ClaimExtractionService(
     private fun finalReport(r: RunReport) = r.copy(agreementRate = if (r.claimsReported == 0) null else r.claimsAgreed.toDouble() / r.claimsReported)
 
     /** What two passes made of one chunk. */
-    private class Processed(val chunk: ChunkRecord, val compared: ClaimAgreement.Compared?, val failure: String?)
+    private class Processed(val chunk: ChunkRecord, val compared: ClaimAgreement.Compared?, val failure: String?, val skipped: Boolean = false)
 
     private suspend fun process(source: SourceRecord, chunk: ChunkRecord, model: ClaimPassModel, expect: String?, names: MutableSet<String>, resumed: Boolean): Processed {
+        if (!model.reads(chunk)) return Processed(chunk, null, null, skipped = true)
         val results = ArrayList<PassResult>()
         for (pass in 1..2) {
             val started = System.currentTimeMillis()
@@ -182,6 +183,7 @@ class ClaimExtractionService(
 
         done.forEach { p ->
             val chunk = p.chunk
+            if (p.skipped) return@forEach
             if (p.compared == null) {
                 r = r.copy(chunksFailed = r.chunksFailed + 1, failures = r.failures + (p.failure ?: "chunk ${chunk.ordinal} failed"))
                 return@forEach

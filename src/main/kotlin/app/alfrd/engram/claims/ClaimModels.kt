@@ -46,6 +46,12 @@ interface ClaimPassModel {
 
     /** [pass] is 1 or 2. Throws when the pass could not be completed or its answer could not be read. */
     suspend fun extract(source: SourceRecord, chunk: ChunkRecord, pass: Int): PassResult
+
+    /**
+     * Whether this model reads [chunk] at all. A chunk it does not read is skipped: no call, no claims, and the claims other runs made there
+     * are not questioned, because nothing was learned about it. Default: every chunk.
+     */
+    fun reads(chunk: ChunkRecord): Boolean = true
 }
 
 /** The check state of an established claim. There is no number anywhere: a claim is Settled until a later run questions it. */

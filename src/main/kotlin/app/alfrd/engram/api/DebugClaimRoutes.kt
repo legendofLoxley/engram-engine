@@ -43,6 +43,8 @@ data class DebugClaimRunRequest(
     val aliases: Map<String, List<String>> = emptyMap(),
     /** Wording to try instead of the built-in prompts (see [PromptSet.custom]). The run's record names it `custom-<hash>`; it never stores the text. */
     val prompts: DebugClaimPrompts? = null,
+    /** `text` (default): the two local-model passes over the text chunks. `structure`: claims straight from vision chunks' checked entries. */
+    val reader: String = "text",
 )
 
 @Serializable
@@ -106,10 +108,13 @@ fun Application.configureDebugClaimRoutes(
                     if (stored?.status == "complete" && stored.report != null) return@post call.respond(HttpStatusCode.OK, DebugClaimRunStarted(runId, uid, "complete", stored.report))
                     if (active.putIfAbsent("$email|$runId", true) != null) return@post call.respond(HttpStatusCode.Conflict, mapOf("error" to "that run is already in progress"))
                     DebugConverseService.ensureSyntheticUser(db, email)
-                    val expect = if (req.anyModel) null else req.expectModel?.takeIf { it.isNotBlank() } ?: ClaimExtractionService.DEFAULT_EXPECTED_MODEL
+                    if (req.reader !in setOf("text", "structure")) return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "reader must be text or structure"))
+                    val structured = req.reader == "structure"
+                    // A structure run calls no model: the vision model that read each page is on its chunk, checked when the chunk was made.
+                    val expect = if (structured || req.anyModel) null else req.expectModel?.takeIf { it.isNotBlank() } ?: ClaimExtractionService.DEFAULT_EXPECTED_MODEL
                     scope.launch {
                         try {
-                            ClaimExtractionService(sources, claims, commit, resolver).run(email, uid, runId, modelFactory(prompts), expect)
+                            ClaimExtractionService(sources, claims, commit, resolver).run(email, uid, runId, if (structured) app.alfrd.engram.claims.StructuredClaimModel() else modelFactory(prompts), expect)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {

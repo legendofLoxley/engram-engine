@@ -11,9 +11,12 @@ data class CheckedValue(
     val found: Boolean,
     /**
      * For a value under a heading: it occurs in the page's reading-order text after that heading and before the next heading the model put
-     * beside it. Null when that cannot be judged (the heading is not in the text, or it is the heading itself).
+     * beside it. Null when that cannot be judged (the heading or the value is not in the reading-order text, or it is the heading itself).
      */
     val inSection: Boolean?,
+    /** For a number: the words the model printed with it, and whether they are found too. */
+    val label: String = "",
+    val labelFound: Boolean = true,
 )
 
 /**
@@ -75,10 +78,14 @@ object StructureCheck {
                 out += CheckedValue(parents, "heading", s.heading, found(s.heading), null)
                 val from = starts[i]
                 val to = starts.drop(i + 1).filterNotNull().firstOrNull { from == null || it > from } ?: hi
-                fun add(kind: String, v: String) {
-                    out += CheckedValue(path, kind, v, found(v), from?.let { f -> occurrences(text, v).any { it in f until to } })
+                fun add(kind: String, v: String, label: String = "") {
+                    val at = occurrences(text, v)
+                    out += CheckedValue(
+                        path, kind, v, found(v), if (from == null || at.isEmpty()) null else at.any { it in from until to },
+                        label, label.isBlank() || found(label),
+                    )
                 }
-                s.numbers.forEach { add("number", it) }
+                s.numbers.forEach { add("number", it.value, it.label) }
                 s.items.forEach { add("item", it) }
                 s.tables.forEach { t -> t.flatten().forEach { add("cell", it) } }
                 s.charts.forEach { c -> (listOf(c.title).filter { it.isNotBlank() } + c.values).forEach { add("chart", it) } }

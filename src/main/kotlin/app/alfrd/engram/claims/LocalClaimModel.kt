@@ -27,6 +27,9 @@ class LocalClaimModel(
 
     override val promptVersion: String = prompts.version
 
+    /** Structure read from a page image is claimed from by [StructuredClaimModel], not by these passes. */
+    override fun reads(chunk: ChunkRecord): Boolean = chunk.kind != app.alfrd.engram.vision.VisionReading.CHUNK_KIND
+
     override suspend fun extract(source: SourceRecord, chunk: ChunkRecord, pass: Int): PassResult {
         require(pass == 1 || pass == 2) { "pass must be 1 or 2" }
         val response = client.complete(

@@ -21,12 +21,13 @@ import kotlin.system.exitProcess
  *
  * ```
  * ClaimExtractionCli --user <label> (--source <uid> | --locator <locator>) [--run-id R] [--expect-model S | --any-model]
- *                    [--aliases aliases.json] [--prompts prompts.json] [--url http://127.0.0.1:8080] [--poll-seconds 15] [--no-wait]
+ *                    [--aliases aliases.json] [--prompts prompts.json] [--reader text|structure] [--url http://127.0.0.1:8080] [--poll-seconds 15] [--no-wait]
  * ClaimExtractionCli --user <label> --source <uid> --show claims|disagreements [--run-id R] [--url ...]
  * ```
  * Goes through the running engine's debug routes (the embedded graph has one owner at a time), under the synthetic identity
  * debug+<label>@..., needs DEBUG_CONVERSE_TOKEN, loopback only, never owner-jacob. The engine runs the passes against its own local model; this
  * tool cannot name a model server. The default expected model is Qwen3.6-35B-A3B; `--any-model` runs without that check and the run says so.
+ * `--reader structure` makes claims straight from the source's vision chunks (see VisionReadCli) instead of running the text passes.
  * `--prompts` is a JSON object `{"pass1": "...", "pass2": "..."}` with the two system prompts to try instead of the built-in ones; the run's record names
  * them `custom-<hash>` (the text itself is never stored). A run id that finished prints its stored report and starts nothing; one that stopped continues. `--aliases` is a JSON object mapping a
  * canonical claimant to the other names it goes by. Exit status: 0 the run completed with no failed chunk, 3 completed with failed chunks,
@@ -94,6 +95,7 @@ object ClaimExtractionCli {
             opt("--run-id")?.let { put("runId", JsonPrimitive(it)) }
             opt("--expect-model")?.let { put("expectModel", JsonPrimitive(it)) }
             if ("--any-model" in args) put("anyModel", JsonPrimitive(true))
+            opt("--reader")?.let { put("reader", JsonPrimitive(it)) }
             put("aliases", aliases)
             prompts?.let { put("prompts", it) }
         })

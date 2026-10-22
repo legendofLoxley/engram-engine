@@ -426,6 +426,10 @@ object SchemaBootstrap {
             ensureProperty(schema, "Chunk",   "ocrConfidence",       Type.DOUBLE)
             ensureProperty(schema, "Chunk",   "box",                 Type.STRING)
             ensureProperty(schema, "Chunk",   "table",               Type.STRING)
+            // A chunk added later by another reader of the same page (a vision reading): the key that makes adding it idempotent (source,
+            // page, reader version) and, as JSON, the checked entries it holds (heading path, value, the line of the chunk text that states it).
+            ensureProperty(schema, "Chunk",   "readingKey",          Type.STRING)
+            ensureProperty(schema, "Chunk",   "reading",             Type.STRING)
             // Same properties as the ensureVertex blocks above, repeated so a database that already ran
             // an earlier revision of those blocks picks them up.
             ensureProperty(schema, "ProcessedRequest", "opsPlan",    Type.STRING)
@@ -513,6 +517,7 @@ object SchemaBootstrap {
             ensureIndex(schema, "Source",      "driveFileId")
             ensureIndex(schema, "Chunk",       "uid")
             ensureIndex(schema, "Chunk",       "sourceUid")
+            ensureIndex(schema, "Chunk",       "readingKey")
             ensureIndex(schema, "QUOTES",      "opKey")
             ensureIndex(schema, "Phrase",      "claimQuoteKey")
             ensureIndex(schema, "ExtractionRun", "runId")

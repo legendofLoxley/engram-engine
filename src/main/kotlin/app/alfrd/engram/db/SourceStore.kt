@@ -64,6 +64,8 @@ data class ChunkRecord(
     val uid: String, val sourceUid: String, val ordinal: Int, val location: String, val text: String, val hash: String,
     val page: Int? = null, val printedPage: String? = null, val section: String? = null, val kind: String? = null,
     val extractor: String? = null, val ocrConfidence: Double? = null, val box: String? = null, val table: String? = null,
+    /** For a chunk added by a later reading of its page: the reading's key and its checked entries (JSON). */
+    val readingKey: String? = null, val reading: String? = null,
 )
 
 data class IngestResult(
@@ -167,6 +169,34 @@ class SourceStore(private val db: Database) {
             logger.info("source: stored a {} with {} chunk(s)", input.type, drafts.size)
             return IngestResult(requireNotNull(sourceByUid(userEmail, sourceUid)), created = true, chunksCreated = drafts.size)
         }
+    }
+
+    /**
+     * Adds one chunk to a Source already stored, after the chunks it was read with: a later reading of one of its pages (a vision reading).
+     * The Source's identity and its existing chunks are untouched. Idempotent by [readingKey]: a chunk already added under that key is
+     * returned and nothing is written. The new chunk takes the next ordinal. Null when the source is not this user's.
+     */
+    fun appendChunk(userEmail: String, sourceUid: String, draft: ChunkDraft, readingKey: String, reading: String?): Pair<ChunkRecord, Boolean>? = synchronized(LOCK) {
+        db.query("sql", "SELECT FROM Chunk WHERE readingKey = :k AND ownerEmail = :o AND sourceUid = :s", mapOf("k" to readingKey, "o" to userEmail, "s" to sourceUid))
+            .use { rs -> if (rs.hasNext()) return@synchronized rs.next().toElement().asVertex().toChunk() to false }
+        val source = db.query("sql", "SELECT FROM Source WHERE uid = :u AND ownerEmail = :o", mapOf("u" to sourceUid, "o" to userEmail))
+            .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null } ?: return@synchronized null
+        val next = chunks(userEmail, sourceUid).maxOfOrNull { it.ordinal + 1 } ?: 0
+        var uid = ""
+        db.transaction {
+            val chunk = db.newVertex("Chunk").apply {
+                uid = UUID.randomUUID().toString()
+                set("uid", uid); set("ownerEmail", userEmail); set("sourceUid", sourceUid); set("ordinal", next)
+                set("location", draft.location); set("text", draft.text); set("hash", SourceChunker.contentHash(draft.text)); set("createdAt", System.currentTimeMillis())
+                draft.page?.let { set("page", it) }; draft.printedPage?.let { set("printedPage", it) }; draft.section?.let { set("section", it) }
+                draft.kind?.let { set("kind", it) }; draft.extractor?.let { set("extractor", it) }; draft.box?.let { set("box", it) }
+                set("readingKey", readingKey); reading?.let { set("reading", it) }
+                save()
+            }
+            source.modify().newEdge("CONTAINS", chunk, false).apply { set("position", next); save() }
+        }
+        logger.info("source: added a {} chunk at ordinal {}", draft.kind ?: "chunk", next)
+        requireNotNull(chunk(userEmail, uid)) to true
     }
 
     fun sources(userEmail: String): List<SourceRecord> =
@@ -293,6 +323,7 @@ class SourceStore(private val db: Database) {
         page = (get("page") as? Number)?.toInt(), printedPage = get("printedPage") as? String, section = get("section") as? String,
         kind = get("kind") as? String, extractor = get("extractor") as? String, ocrConfidence = (get("ocrConfidence") as? Number)?.toDouble(),
         box = get("box") as? String, table = get("table") as? String,
+        readingKey = get("readingKey") as? String, reading = get("reading") as? String,
     )
 
     companion object {
