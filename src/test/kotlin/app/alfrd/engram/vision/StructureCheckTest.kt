@@ -28,7 +28,7 @@ class StructureCheckTest {
     """.trimIndent()
 
     private fun s(h: String, numbers: List<String> = emptyList(), sub: List<PageSection> = emptyList(), items: List<String> = emptyList()) =
-        PageSection(h, numbers = numbers, items = items, subsections = sub)
+        PageSection(h, numbers = numbers.map { PageNumber(it) }, items = items, subsections = sub)
 
     private val right = listOf(
         s("STATUS QUO", listOf("0", "26%")),
@@ -88,12 +88,33 @@ class StructureCheckTest {
             "\"charts\": [{\"title\": \"Enrollment\", \"values\": [\"82%\"]}], \"subsections\": [{\"heading\": \"CARD\", \"numbers\": [\"38\"]}, {\"numbers\": [\"9\"]}]}]}\n```"
         val sections = PageStructure.parse(answer)
         val a = sections.single()
-        assertEquals(listOf("14", "67"), a.numbers, "a bare JSON number is kept as its text")
+        assertEquals(listOf("14", "67"), a.numbers.map { it.value }, "a bare JSON number is kept as its text")
         assertEquals(listOf(listOf("Measure", "A"), listOf("Close", "14")), a.tables.single())
         assertEquals("Enrollment", a.charts.single().title)
         assertEquals(listOf("CARD"), a.subsections.map { it.heading }, "a section with no heading is dropped")
         assertThrows<IllegalArgumentException> { PageStructure.parse("no json here") }
         assertThrows<IllegalArgumentException> { PageStructure.parse("{\"pages\": []}") }
         assertThrows<IllegalArgumentException> { PageStructure.parse("{not json}") }
+    }
+
+    @Test
+    fun `a number's label must be on the page too`() {
+        val c = StructureCheck.check(listOf(PageSection("SCENARIO A", numbers = listOf(PageNumber("67%"), PageNumber("14", "schools close"), PageNumber("14", "schools open")))), page)
+        assertTrue(c.filter { it.kind == "number" }.all { it.found })
+        assertEquals(listOf(true, true, false), c.filter { it.kind == "number" }.map { it.labelFound })
+    }
+
+    @Test
+    fun `the shapes models drift to are read too`() {
+        val answer = """{"headings": [{"text": "Figure 6.1", "numbers": [{"value": "360", "label": "QEM prototype"}, "450"],
+            "tables": [["School type", "QEM prototype"], ["Elementary", "360"]],
+            "charts": [{"title": "", "y_axis_values": ["300", "350"], "legend": ["Annual enrollment"]}],
+            "children": [{"title": "Note", "items": ["x"]}]}]}"""
+        val f = PageStructure.parse(answer).single()
+        assertEquals("Figure 6.1", f.heading)
+        assertEquals(listOf(PageNumber("360", "QEM prototype"), PageNumber("450")), f.numbers)
+        assertEquals(listOf(listOf(listOf("School type", "QEM prototype"), listOf("Elementary", "360"))), f.tables, "a single table given as rows")
+        assertEquals(listOf("300", "350", "Annual enrollment"), f.charts.single().values)
+        assertEquals("Note", f.subsections.single().heading)
     }
 }
