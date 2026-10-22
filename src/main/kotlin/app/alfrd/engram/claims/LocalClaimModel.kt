@@ -19,16 +19,20 @@ import kotlinx.serialization.json.put
  * passes of a chunk are separate requests with different wording and no shared context, so neither sees the other's answer.
  * The model that answered is the one the server reports on the response.
  */
-class LocalClaimModel(private val client: LocalLlmClient, override val endpoint: String? = null) : ClaimPassModel {
+class LocalClaimModel(
+    private val client: LocalLlmClient,
+    override val endpoint: String? = null,
+    private val prompts: PromptSet = PromptSet.DEFAULT,
+) : ClaimPassModel {
 
-    override val promptVersion: String = PROMPT_VERSION
+    override val promptVersion: String = prompts.version
 
     override suspend fun extract(source: SourceRecord, chunk: ChunkRecord, pass: Int): PassResult {
         require(pass == 1 || pass == 2) { "pass must be 1 or 2" }
         val response = client.complete(
             LlmRequest(
                 prompt = userPrompt(source, chunk),
-                systemPrompt = if (pass == 1) SYSTEM_ONE else SYSTEM_TWO,
+                systemPrompt = if (pass == 1) prompts.pass1 else prompts.pass2,
                 model = LlmModel.CLAUDE_SONNET_4_5, // a label only: the local client ignores it
                 maxTokens = MAX_TOKENS,
                 timeoutMs = TIMEOUT_MS,
@@ -43,34 +47,9 @@ class LocalClaimModel(private val client: LocalLlmClient, override val endpoint:
     }
 
     companion object {
-        const val PROMPT_VERSION = "claims-v1"
         const val TOOL_NAME = "report_claims"
         private const val MAX_TOKENS = 12_000
         private const val TIMEOUT_MS = 20L * 60 * 1000
-
-        private val KINDS = ClaimKind.entries.joinToString(", ") { it.name.lowercase() }
-
-        private val RULES = """
-            A claim is one checkable assertion that the passage explicitly makes: a fact, a number with its units or date, a decision or a vote, a commitment or a deadline, a stated requirement, or an attributed position.
-            Not claims: headings, labels, boilerplate, navigation text, rhetoric, questions, and anything you would have to infer. If the passage does not state it, it is not a claim.
-            Split independent assertions into separate claims. If the passage says the same thing twice, report it once.
-            For every claim give:
-            - quote: the exact words of the passage that make the assertion, copied character for character. Never paraphrase, never join separate sentences, never correct typos.
-            - claimant: the person or organization the passage says made the assertion, as the passage names them. If the passage names nobody, leave it empty. Do not guess.
-            - subject: a few words saying what the claim is about.
-            - kind: one of $KINDS.
-            - place: only if the claim belongs to a particular card, box, section, column or row of the passage, say which. When it sits under a heading, give that heading exactly as it is written (for example SCENARIO A). A number printed near a title belongs to the heading it sits under, not to the one above or beside it. Otherwise leave it empty.
-            If the passage has no claims, report an empty list.
-        """.trimIndent()
-
-        private val SYSTEM_ONE = "You extract claims from a passage of a document.\n\n$RULES\n\nReport the claims in the order they appear in the passage."
-
-        private val SYSTEM_TWO = """
-            Your job is to read one passage of a document and list the assertions it explicitly makes.
-            Work through the passage sentence by sentence, and for each sentence (or table row, or list item) decide whether it makes a checkable assertion.
-
-            $RULES
-        """.trimIndent()
 
         fun userPrompt(source: SourceRecord, chunk: ChunkRecord): String = buildString {
             append("DOCUMENT: ").append(source.title).append('\n')

@@ -120,6 +120,7 @@ class ClaimExtractionService(
     private suspend fun process(source: SourceRecord, chunk: ChunkRecord, model: ClaimPassModel, expect: String?, names: MutableSet<String>, resumed: Boolean): Processed {
         val results = ArrayList<PassResult>()
         for (pass in 1..2) {
+            val started = System.currentTimeMillis()
             val result = try {
                 model.extract(source, chunk, pass)
             } catch (e: CancellationException) {
@@ -136,8 +137,15 @@ class ClaimExtractionService(
             }
             names += result.modelName
             results += result
+            // Counts and time only, never text.
+            logger.info("claims: chunk {} pass {} reported {} claim(s) in {} ms", chunk.ordinal, pass, result.claims.size, System.currentTimeMillis() - started)
         }
-        return Processed(chunk, ClaimAgreement.compare(chunk, results[0].claims, results[1].claims, resolver), null)
+        val compared = ClaimAgreement.compare(chunk, results[0].claims, results[1].claims, resolver)
+        logger.info(
+            "claims: chunk {} agreed {} claim(s), {} disagreement(s), {} quote(s) rejected",
+            chunk.ordinal, compared.outcome.agreed.size, compared.outcome.disagreements.size, compared.rejected,
+        )
+        return Processed(chunk, compared, null)
     }
 
     private fun placeFits(a: String?, b: String?) = a == null || b == null || ClaimAgreement.quoteKey(a).lowercase() == ClaimAgreement.quoteKey(b).lowercase()
