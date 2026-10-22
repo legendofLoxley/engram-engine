@@ -108,9 +108,9 @@ class LocalClaimModelTest {
     }
 
     @Test
-    fun `the built-in prompts are claims-v2 and carry the rules for tables, labelled numbers, headings and page furniture`() {
+    fun `the built-in prompts are claims-v3 and carry the rules for tables, labelled numbers, headings and page furniture`() {
         val d = PromptSet.DEFAULT
-        assertEquals("claims-v2", d.version)
+        assertEquals("claims-v3", d.version)
         assertNotEquals(d.pass1, d.pass2)
         for (p in listOf(d.pass1, d.pass2)) {
             assertTrue(p.contains("the whole row") && p.contains("never a single cell"), "tables: whole row, column header as place")
@@ -118,6 +118,7 @@ class LocalClaimModelTest {
             assertTrue(p.contains("page furniture") && p.contains("Updated <date>"), "no footers or date stamps")
             assertTrue(p.contains("Do not cut one sentence into fragments"))
             assertTrue(p.contains("outermost one that names a scenario"))
+            assertTrue(p.contains("never the name of a card, box, list or program inside it") && p.contains("always give one"), "scenario heading is the place; card names go in the subject")
         }
     }
 
@@ -138,6 +139,13 @@ class LocalClaimModelTest {
         fun system(i: Int) = Json.parseToJsonElement(bodies[i]).jsonObject["messages"]!!.jsonArray.first().jsonObject["content"]!!.jsonPrimitive.content
         assertEquals("FIRST-WORDING", system(0)); assertEquals("SECOND-WORDING", system(1))
         assertTrue(m.promptVersion.startsWith("custom-"))
-        assertEquals("claims-v2", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
+        assertEquals("claims-v3", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
+    }
+
+    @Test
+    fun `how the server says the answer ended is carried on the pass result`() = runBlocking<Unit> {
+        reply = { """{"model":"Qwen3.6-35B-A3B","usage":{"completion_tokens":321},"choices":[{"finish_reason":"tool_calls","message":{"content":"","tool_calls":[{"function":{"name":"report_claims","arguments":"{\"claims\":[]}"}}]}}]}""" }
+        val r = model().extract(source, chunk, 1)
+        assertEquals("tool_calls", r.finishReason); assertEquals(321, r.completionTokens)
     }
 }

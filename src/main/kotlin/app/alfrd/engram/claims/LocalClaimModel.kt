@@ -43,7 +43,7 @@ class LocalClaimModel(
             ),
         )
         val call = response.toolCalls.firstOrNull { it.name == TOOL_NAME } ?: throw IllegalStateException("the model made no $TOOL_NAME call")
-        return PassResult(parseClaims(call.input), response.modelName ?: "unreported")
+        return PassResult(parseClaims(call.input), response.modelName ?: "unreported", response.finishReason, response.completionTokens)
     }
 
     companion object {

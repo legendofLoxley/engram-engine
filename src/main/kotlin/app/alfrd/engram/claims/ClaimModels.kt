@@ -27,7 +27,11 @@ data class PassClaim(
 )
 
 /** What one pass returned for one chunk, and the model that actually answered. */
-data class PassResult(val claims: List<PassClaim>, val modelName: String)
+data class PassResult(
+    val claims: List<PassClaim>, val modelName: String,
+    /** How the server says the answer ended (`tool_calls`, `length`, ...) and how many tokens it produced; null when not reported. */
+    val finishReason: String? = null, val completionTokens: Int? = null,
+)
 
 /**
  * One pass of the claim model over one chunk. The two passes of a chunk are separate calls that share nothing: neither sees the

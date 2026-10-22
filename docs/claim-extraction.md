@@ -49,17 +49,19 @@ leading "the". An unlisted name stands for itself; nothing is guessed. One alias
 
 ## Prompts
 
-The two system prompts live in code (`PromptSet.DEFAULT`, version `claims-v2`), reviewed and tested; a run records the version. `claims-v2` follows the first live
+The two system prompts live in code (`PromptSet.DEFAULT`, version `claims-v3`), reviewed and tested; a run records the version. `claims-v2` follows the first live
 run on the districtwide sheet: for a table, quote the whole row and give the column header as the place (value-only cell quotes never agreed with whole-row
 quotes, so a table gave no claim); a number's quote must carry what it counts; no headings, footers or "Updated <date>" stamps; one sentence is not cut into
-fragments; the place is the outermost heading that names a scenario.
+fragments; the place is the outermost heading that names a scenario. `claims-v3` follows the second live run: the passes disagreed on the place of page-2 claims (one gave
+the card name, the other the scenario), which cost the whole page. Now a scenario/option/party heading is always the place, never a card, box or list name; those go in the
+subject, which is now required.
 
 **Trying other wording without a rebuild.** `ClaimExtractionCli --prompts prompts.json` (`{"pass1": "...", "pass2": "..."}`) or `prompts` in the route request
 replaces only the wording. The run is recorded as `custom-<first 16 hex of the SHA-256 of both prompts>`, so the record still names the exact text; the text itself
 is never stored or logged. The tool, the agreement rules, the verbatim-quote check and the model check stay in code. Wording that works is promoted into the code
 as the next version through a normal PR. Both prompts are required, non-blank, at most 20,000 characters.
 
-**Logging.** Per chunk and pass the engine logs the number of claims reported and the time taken, and per chunk the agreed, disagreement and rejected counts. Counts and
+**Logging.** Per chunk and pass the engine logs the number of claims reported, the time taken, how the server says the answer ended (finish reason) and its completion tokens, and per chunk the agreed, disagreement and rejected counts. Counts and
 times only; never a passage.
 
 ## Runs, stamps, idempotency
