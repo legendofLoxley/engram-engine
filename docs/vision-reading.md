@@ -6,7 +6,9 @@ claims are made directly. Code: `app.alfrd.engram.vision`, `claims/StructuredCla
 `/vision/page`; CLIs `VisionReadCliKt` (pages into chunks) and `VisionPageCliKt` (one page, nothing written). Plan and bake-off results: the
 Notion task "Vision-aware PDF reading: get the PPS documents accurate".
 
-Status: implemented and tested against a scripted model on generated fixtures. Not yet run on the box against the real servers.
+Status: first box run 2026-10-22 (reader v1) on the districtwide sheet and the SEGC Equity Audit; results in the Notion task. v2 fixes what
+that run showed: printed table headers and card text rejected because the text layer interleaves wrapped cells, numbers repeating table cells,
+long top headings losing their claims, and values dropped under headings the model made up.
 
 ## Servers on the box (2026-10-22)
 
@@ -25,7 +27,11 @@ Status: implemented and tested against a scripted model on generated fixtures. N
    reader. `--pages plan` prints the routing.
 2. **Read** each routed page as below, then **keep** a value only when it is found on the page, is not found only outside the heading it was
    filed under, and (for a number) the words printed with it are found too. A table cell is kept with its row label and column header, all three
-   found. Chart text is kept as text of the chunk but makes no claims. What is left out is reported per page (`rejectedValues`), never stored.
+   found. Chart text is kept as text of the chunk but makes no claims. What is left out is reported per page (`rejectedValues`, naming which
+   part failed: the cell, its row label or its column header), never stored.
+   - A heading the page does not have is left out of the path; what the model put under it is checked as under the heading above. A number
+     left with neither heading nor label is left out.
+   - A number that is a part of a cell of a table in the same section is left out: the cell states it with its row and column.
 3. **Add** one chunk per page (`kind = vision`, `extractor = vision:<model the server reported>`, location `pdf p. N, vision reading`) after the
    Source's existing chunks. The Source and its text-layer chunks are untouched. Its text is one line per kept entry under bare heading lines:
    ```
@@ -33,17 +39,22 @@ Status: implemented and tested against a scripted model on generated fixtures. N
    SCENARIO A > ATTENDANCE BOUNDARY CHANGES: 38
    Figure 6.1 Deriving Planning Floors for Well Resourced Schools > Elementary > Planning floor range estimate: Approximately 450+
    ```
-   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v1`): reading a page
+   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v2`): reading a page
    again adds nothing and calls no model, so a stopped run is resumed by running it again. The file must be the Source's own (same SHA-256).
 4. **Claims:** `ClaimExtractionCli --reader structure` makes one claim per kept entry, quoted by its line, placed under its top heading, with
-   its sub-headings as the subject. No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
+   its sub-headings as the subject (a top heading longer than a place can be, such as a survey question set as a title, goes in the subject). No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
    skip vision chunks, and a structure run skips text chunks, so neither questions the other's claims.
 
 ```
-java -cp engram-engine.jar app.alfrd.engram.scripts.VisionReadCliKt --user pps-drive-test --source <uid> --file <the source's pdf> [--pages auto|plan|2,146] [--no-ocr]
+java -cp engram-engine.jar app.alfrd.engram.scripts.VisionReadCliKt --user pps-drive-test --source <uid> --file <the source's pdf> [--pages auto|plan|2,146] [--no-ocr] [--stop-after 3] --url <engine>
 java -cp engram-engine.jar app.alfrd.engram.scripts.ClaimExtractionCliKt --user pps-drive-test --source <uid> --reader structure --run-id <id>
 ```
 Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM_BASE_URL` (default `http://127.0.0.1:8084/v1`), loopback only.
+The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
+The run stops after `--stop-after` pages fail in a row (a server that is down fails every page); run the same command again to resume.
+
+Chunks are keyed by reader version, so a v2 reading of a page already read by v1 is a second chunk beside the first, and its claims sit beside
+v1's. Read v2 into a Source that has no v1 chunks (a fresh synthetic identity) rather than over v1.
 
 ## One page, nothing written (`VisionPageCli`)
 
@@ -52,7 +63,9 @@ Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM
    charts and nested sub-headings, copied exactly as printed.
 3. With `--ocr`, asks 8084 for an OCR transcript (`OCR:`).
 4. `StructureCheck`: every heading and value is looked for in the page's text layer (in the PDF reader's reading order) and in the OCR
-   transcript. Case, spacing and typographic dashes do not matter; a number must stand on its own ("38" is not found inside "138"). For each
+   transcript. Case, spacing and typographic dashes do not matter; a number must stand on its own ("38" is not found inside "138"). A value
+   of two or more words not found as written is found when all its words occur within four words of each other in any order (wrapped table
+   headers, a card title read with its text); never for one word, a number, or a value with a one-letter word ("SCENARIO A"). For each
    value it also reports whether an occurrence lies under the heading the model put it under (between that heading and its next sibling in
    reading order), or that this cannot be judged.
 

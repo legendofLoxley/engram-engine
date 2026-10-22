@@ -26,11 +26,17 @@ data class CheckedValue(
  *
  * Text is compared without case, with spacing collapsed and typographic dashes and quotes made plain. A number must stand on its own: "38" is
  * not found inside "138" or "3.8".
+ *
+ * **Wrapped and interleaved text.** A table's cells wrap, and the text layer reads a wrapped row across its cells, so a printed column header
+ * ("Five-year buffer") can come out with its neighbour's words inside it ("Five-year Planning floor buffer"), and a card's title and its text can
+ * sit apart with other words between. A value of two or more words that is not found as written is found when all its words occur, as whole
+ * words, within a few words of each other ([SLACK]), in any order. Single words and numbers are never matched this way, nor any value with a
+ * one-letter word ("SCENARIO A" must be printed as such).
  */
 object StructureCheck {
 
     fun normalize(s: String): String = s.lowercase()
-        .replace('–', '-').replace('—', '-').replace('−', '-').replace('‘', '\'').replace('’', '\'')
+        .replace('–', '-').replace('—', '-').replace('−', '-').replace('‐', '-').replace('‑', '-').replace('‒', '-').replace('‘', '\'').replace('’', '\'')
         .replace('“', '"').replace('”', '"').replace(' ', ' ')
         .replace(Regex("\\s+"), " ").trim()
 
@@ -53,23 +59,65 @@ object StructureCheck {
         return out
     }
 
+    /** Words of text found apart from each other may have at most this many other words among them. */
+    const val SLACK = 4
+
+    /** A word of normalized text and where it starts. Punctuation around a word is not part of it; punctuation alone is not a word. */
+    data class Word(val text: String, val at: Int)
+
+    private const val EDGE = "\"'()[]{}:;,.|*•·…"
+
+    fun words(normalized: String): List<Word> = Regex("\\S+").findAll(normalized).mapNotNull { m ->
+        val raw = m.value
+        val start = raw.indexOfFirst { it !in EDGE }.takeIf { it >= 0 } ?: return@mapNotNull null
+        val end = raw.indexOfLast { it !in EDGE }
+        val w = raw.substring(start, end + 1)
+        if (w.none { it.isLetterOrDigit() }) null else Word(w, m.range.first + start)
+    }.toList()
+
+    /** Where the words of a value of two or more words occur near each other in [words] (the text's), when it is not found as written. */
+    fun scattered(words: List<Word>, value: String): List<Int> {
+        val want = words(normalize(value)).map { it.text }
+        if (want.size < 2 || want.any { it.length < 2 }) return emptyList()
+        val need = want.groupingBy { it }.eachCount()
+        val out = ArrayList<Int>()
+        for (i in words.indices) {
+            if (words[i].text !in need) continue
+            val left = HashMap(need); var missing = want.size
+            for (j in i until minOf(words.size, i + want.size + SLACK)) {
+                val c = left[words[j].text] ?: continue
+                if (c > 0) { left[words[j].text] = c - 1; missing-- }
+                if (missing == 0) break
+            }
+            if (missing == 0) out += words[i].at
+        }
+        return out
+    }
+
+    /** A normalized text and its words, so a page's text is split once. */
+    private class Text(val text: String) {
+        val words = words(text)
+        fun locate(value: String): List<Int> = occurrences(text, value).ifEmpty { scattered(words, value) }
+    }
+
     /**
      * [readingText] is the page's text in reading order (the PDF text layer as the reader orders it); [ocrText], when given, is a transcript
      * of the page image, consulted for presence only (its order is the OCR engine's).
      */
     fun check(sections: List<PageSection>, readingText: String, ocrText: String? = null): List<CheckedValue> {
-        val text = normalize(readingText)
-        val ocr = ocrText?.let { normalize(it) }
+        val reading = Text(normalize(readingText))
+        val text = reading.text
+        val ocr = ocrText?.let { Text(normalize(it)) }
         val out = ArrayList<CheckedValue>()
 
-        fun found(v: String) = occurrences(text, v).isNotEmpty() || (ocr != null && occurrences(ocr, v).isNotEmpty())
+        fun found(v: String) = reading.locate(v).isNotEmpty() || (ocr != null && ocr.locate(v).isNotEmpty())
 
         // [lo, hi) is the span of the parent heading in the reading-order text; a heading is looked for inside it, in order after its previous
         // sibling, and runs to its next sibling (or the end of the parent's span).
         fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int) {
             var cursor = lo
             val starts = level.map { s ->
-                val at = occurrences(text, s.heading).firstOrNull { it in cursor until hi }
+                val at = reading.locate(s.heading).firstOrNull { it in cursor until hi }
                 if (at != null) cursor = at + 1
                 at
             }
@@ -79,7 +127,7 @@ object StructureCheck {
                 val from = starts[i]
                 val to = starts.drop(i + 1).filterNotNull().firstOrNull { from == null || it > from } ?: hi
                 fun add(kind: String, v: String, label: String = "") {
-                    val at = occurrences(text, v)
+                    val at = reading.locate(v)
                     out += CheckedValue(
                         path, kind, v, found(v), if (from == null || at.isEmpty()) null else at.any { it in from until to },
                         label, label.isBlank() || found(label),

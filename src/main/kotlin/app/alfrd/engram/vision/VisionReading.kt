@@ -165,6 +165,10 @@ object VisionReading {
      * and (for a number) its label is found. A table cell is kept as `row label > column header: cell` when the cell, its row label and its
      * column header are all kept. Headings are written as bare lines (the top level alone, deeper levels as a path) so a claim's place can be
      * checked against them.
+     *
+     * A heading the page does not have is left out of the path, and what the model put under it is checked as under the heading above it: the
+     * values are the page's even when the model made up a title for their box. A number left with neither a heading nor a label says nothing
+     * and is left out. A number that is part of a cell of a table in the same section is left out too: the cell says it, with its row and column.
      */
     fun build(sections: List<PageSection>, checks: List<CheckedValue>): Built {
         val byKey = checks.groupBy { Triple(it.path.joinToString(SEP), it.kind, it.value) }
@@ -179,27 +183,52 @@ object VisionReading {
             !c.labelFound -> "label not on the page"
             else -> "kept"
         }
+        fun words(v: String) = StructureCheck.words(StructureCheck.normalize(v)).map { it.text }
 
-        fun walk(level: List<PageSection>, parents: List<String>) {
+        // The words of each table's cells, by the path of the section that holds the table (the model's path, invented headings included).
+        val tableWords = ArrayList<Pair<List<String>, List<Set<String>>>>()
+        fun collect(level: List<PageSection>, parents: List<String>) {
+            level.forEach { s ->
+                val path = parents + s.heading
+                s.tables.forEach { t -> tableWords += path to t.flatten().map { words(it).toSet() } }
+                collect(s.subsections, path)
+            }
+        }
+        collect(sections, emptyList())
+        fun inATable(path: List<String>, value: String): Boolean {
+            val w = words(value).takeIf { it.isNotEmpty() } ?: return false
+            return tableWords.any { (p, cells) ->
+                (path.take(p.size) == p || p.take(path.size) == path) && cells.any { it.containsAll(w) }
+            }
+        }
+
+        // [path] is the model's (how the checks are keyed); [shown] is the headings of it that are on the page (what the chunk says).
+        fun walk(level: List<PageSection>, parents: List<String>, shownParents: List<String>) {
             level.forEach { s ->
                 val path = parents + s.heading
                 val head = check(parents, "heading", s.heading)
-                if (head == null || !head.found) {
+                val shown = if (head != null && head.found) shownParents + s.heading else {
                     rejected += "${path.joinToString(SEP)} :: (heading) not on the page"
-                    return@forEach
+                    shownParents
                 }
-                lines += path.joinToString(SEP)
-                val prefix = path.joinToString(SEP)
+                if (shown.size > shownParents.size) lines += shown.joinToString(SEP)
+                val prefix = shown.joinToString(SEP)
+                fun line(rest: String) = if (prefix.isEmpty()) rest else "$prefix: $rest"
                 s.numbers.forEach { n ->
                     val c = check(path, "number", n.value)
-                    if (ok(c)) {
-                        val line = "$prefix: ${n.value}" + (if (n.label.isNotBlank()) " ${n.label}" else "")
-                        lines += line; entries += ReadingEntry("number", path, n.value, n.label, line)
-                    } else rejected += "$prefix :: ${n.value} — ${why(c)}"
+                    when {
+                        !ok(c) -> rejected += "$prefix :: ${n.value} — ${why(c)}"
+                        shown.isEmpty() && n.label.isBlank() -> rejected += "$prefix :: ${n.value} — no heading or label on the page"
+                        inATable(path, n.value) -> rejected += "$prefix :: ${n.value} — repeats a table cell"
+                        else -> {
+                            val l = line(n.value + (if (n.label.isNotBlank()) " ${n.label}" else ""))
+                            lines += l; entries += ReadingEntry("number", shown, n.value, n.label, l)
+                        }
+                    }
                 }
                 s.items.forEach { item ->
                     val c = check(path, "item", item)
-                    if (ok(c)) { val line = "$prefix: $item"; lines += line; entries += ReadingEntry("item", path, item, line = line) }
+                    if (ok(c)) { val l = line(item); lines += l; entries += ReadingEntry("item", shown, item, line = l) }
                     else rejected += "$prefix :: $item — ${why(c)}"
                 }
                 s.tables.forEach { t ->
@@ -208,22 +237,24 @@ object VisionReading {
                         val rowLabel = row.firstOrNull() ?: return@forEach
                         row.drop(1).forEachIndexed { i, cell ->
                             val column = header.getOrNull(i + 1)
-                            val cells = listOf(check(path, "cell", cell), check(path, "cell", rowLabel), column?.let { check(path, "cell", it) })
-                            if (column != null && cells.all { ok(it) }) {
-                                val line = "$prefix$SEP$rowLabel$SEP$column: $cell"
-                                lines += line; entries += ReadingEntry("cell", path + rowLabel + column, cell, line = line)
-                            } else rejected += "$prefix$SEP$rowLabel$SEP${column ?: "?"} :: $cell — ${if (column == null) "no column header" else why(cells.firstOrNull { !ok(it) })}"
+                            val parts = listOf("cell" to check(path, "cell", cell), "row label" to check(path, "cell", rowLabel), "column header" to column?.let { check(path, "cell", it) })
+                            val where = (shown + rowLabel + (column ?: "?")).joinToString(SEP)
+                            val bad = parts.firstOrNull { !ok(it.second) }
+                            if (column != null && bad == null) {
+                                val l = "$where: $cell"
+                                lines += l; entries += ReadingEntry("cell", shown + rowLabel + column, cell, line = l)
+                            } else rejected += "$where :: $cell — " + if (column == null) "no column header" else "${bad!!.first}: ${why(bad.second)}"
                         }
                     }
                 }
                 s.charts.forEach { c ->
                     val kept = (listOf(c.title).filter { it.isNotBlank() } + c.values).filter { ok(check(path, "chart", it)) }
-                    if (kept.isNotEmpty()) lines += "$prefix (chart): ${kept.joinToString("; ")}"
+                    if (kept.isNotEmpty()) lines += (if (prefix.isEmpty()) "(chart): " else "$prefix (chart): ") + kept.joinToString("; ")
                 }
-                walk(s.subsections, path)
+                walk(s.subsections, path, shown)
             }
         }
-        walk(sections, emptyList())
+        walk(sections, emptyList(), emptyList())
         return Built(lines.joinToString("\n"), entries, rejected)
     }
 
