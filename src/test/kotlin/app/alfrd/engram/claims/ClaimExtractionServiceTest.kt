@@ -32,7 +32,7 @@ class FakeClaimModel(
     private val script: (ChunkRecord, Int) -> List<PassClaim>,
 ) : ClaimPassModel {
     override val endpoint: String = "http://127.0.0.1:8081/v1"
-    override val promptVersion: String = "test-v1"
+    override var promptVersion: String = "test-v1"
     val calls = ArrayList<Pair<Int, Int>>()
     var failOn: ((ChunkRecord, Int) -> Throwable?)? = null
     override suspend fun extract(source: SourceRecord, chunk: ChunkRecord, pass: Int): PassResult {

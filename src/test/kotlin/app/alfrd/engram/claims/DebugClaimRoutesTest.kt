@@ -41,10 +41,12 @@ class DebugClaimRoutesTest {
         try { SchemaBootstrap.bootstrap(manager.getDatabase()); block(manager) } finally { manager.close(); dir.deleteRecursively() }
     }
 
+    private val promptsSeen = ArrayList<PromptSet>()
+
     private fun Application.module(manager: DatabaseManager, model: FakeClaimModel, isLoopback: (ApplicationCall) -> Boolean = ::connectedFromLoopback) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
         install(Authentication) { bearer("debug-token") { authenticate { c -> if (c.token == token) UserIdPrincipal("debug") else null } } }
-        configureDebugClaimRoutes(manager.getDatabase(), modelFactory = { model }, isLoopback = isLoopback)
+        configureDebugClaimRoutes(manager.getDatabase(), modelFactory = { p -> promptsSeen += p; model.promptVersion = p.version; model }, isLoopback = isLoopback)
     }
 
     private fun ingest(m: DatabaseManager): String {
@@ -129,6 +131,42 @@ class DebugClaimRoutesTest {
             assertEquals("PPS", d["versionA"]!!.jsonObject["claimantAsWritten"]!!.jsonPrimitive.content)
             assertEquals("The Board", d["versionB"]!!.jsonObject["claimantAsWritten"]!!.jsonPrimitive.content)
             assertTrue(json(client.get("/debug/sources/$uid/claims?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonArray.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a request can bring its own prompts, the run records only their hash name, and bad prompts are refused before any run starts`() = withEnv { m ->
+        val uid = ingest(m)
+        val model = FakeClaimModel { ch, _ -> listOf(PassClaim(if (ch.ordinal == 0) "Scenario A closes 14 schools." else "Scenario B closes 11 schools.", "PPS", "x", "number")) }
+        testApplication {
+            application { module(m, model) }
+            suspend fun post(body: String) = client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody(body) }
+            assertEquals(HttpStatusCode.BadRequest, post("""{"syntheticUserId":"$label","prompts":{"pass1":"","pass2":"x"}}""").status)
+            assertEquals(HttpStatusCode.BadRequest, post("""{"syntheticUserId":"$label","prompts":{"pass1":"${"y".repeat(PromptSet.MAX_CHARS + 1)}","pass2":"x"}}""").status)
+            assertEquals(0L, m.getDatabase().query("sql", "SELECT count(*) AS n FROM ExtractionRun").use { it.next().getProperty<Number>("n").toLong() })
+
+            val secret = "WORDING-THAT-MUST-NOT-BE-STORED"
+            assertEquals(HttpStatusCode.Accepted, post("""{"syntheticUserId":"$label","runId":"route-run-p","prompts":{"pass1":"one $secret","pass2":"two"}}""").status)
+            repeat(200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            val run = json(client.get("/debug/claim-runs/route-run-p?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
+            val version = run["promptVersion"]!!.jsonPrimitive.content
+            assertTrue(Regex("custom-[0-9a-f]{16}").matches(version), version)
+            assertEquals(PromptSet.custom("one $secret", "two").version, version)
+            assertTrue(!run.toString().contains(secret), "the record carries the version, never the text")
+        }
+        assertEquals("one WORDING-THAT-MUST-NOT-BE-STORED", promptsSeen.last().pass1)
+    }
+
+    @Test
+    fun `without prompts the built-in wording is used and named`() = withEnv { m ->
+        val uid = ingest(m)
+        val model = FakeClaimModel { _, _ -> emptyList() }
+        testApplication {
+            application { module(m, model) }
+            client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-d"}""") }
+            repeat(200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            val run = json(client.get("/debug/claim-runs/route-run-d?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
+            assertEquals("claims-v2", run["promptVersion"]!!.jsonPrimitive.content)
         }
     }
 }

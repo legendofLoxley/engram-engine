@@ -106,4 +106,38 @@ class LocalClaimModelTest {
         assertTrue(LocalClaimModel::class.java.constructors.none { app.alfrd.engram.cognitive.providers.LlmClient::class.java == it.parameterTypes.firstOrNull() })
         assertTrue(LocalClaimModel::class.java.constructors.all { it.parameterTypes.first() == LocalLlmClient::class.java })
     }
+
+    @Test
+    fun `the built-in prompts are claims-v2 and carry the rules for tables, labelled numbers, headings and page furniture`() {
+        val d = PromptSet.DEFAULT
+        assertEquals("claims-v2", d.version)
+        assertNotEquals(d.pass1, d.pass2)
+        for (p in listOf(d.pass1, d.pass2)) {
+            assertTrue(p.contains("the whole row") && p.contains("never a single cell"), "tables: whole row, column header as place")
+            assertTrue(p.contains("what it counts") && p.contains("never \"38\" alone"), "a number carries its label")
+            assertTrue(p.contains("page furniture") && p.contains("Updated <date>"), "no footers or date stamps")
+            assertTrue(p.contains("Do not cut one sentence into fragments"))
+            assertTrue(p.contains("outermost one that names a scenario"))
+        }
+    }
+
+    @Test
+    fun `custom prompts are named by a hash of both texts, and are validated`() {
+        val a = PromptSet.custom("one", "two"); val b = PromptSet.custom("one", "two"); val c = PromptSet.custom("one", "three")
+        assertEquals(a.version, b.version); assertNotEquals(a.version, c.version)
+        assertTrue(Regex("custom-[0-9a-f]{16}").matches(a.version))
+        assertThrows<IllegalArgumentException> { PromptSet.custom(" ", "two") }
+        assertThrows<IllegalArgumentException> { PromptSet.custom("one", "x".repeat(PromptSet.MAX_CHARS + 1)) }
+    }
+
+    @Test
+    fun `a model built with custom prompts sends them, one per pass, and names them in its version`() = runBlocking<Unit> {
+        reply = { toolReply("Qwen3.6-35B-A3B", """{"claims":[]}""") }
+        val m = LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:${server.address.port}/v1", model = "x"), null, PromptSet.custom("FIRST-WORDING", "SECOND-WORDING"))
+        m.extract(source, chunk, 1); m.extract(source, chunk, 2)
+        fun system(i: Int) = Json.parseToJsonElement(bodies[i]).jsonObject["messages"]!!.jsonArray.first().jsonObject["content"]!!.jsonPrimitive.content
+        assertEquals("FIRST-WORDING", system(0)); assertEquals("SECOND-WORDING", system(1))
+        assertTrue(m.promptVersion.startsWith("custom-"))
+        assertEquals("claims-v2", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
+    }
 }

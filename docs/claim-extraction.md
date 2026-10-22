@@ -11,8 +11,8 @@ its two passes agree and whether its attributions are right are open until the b
 ## What a claim is
 
 One checkable assertion the source explicitly makes: a fact, a number with units or date, a decision or vote, a commitment or deadline, a stated requirement,
-or an attributed position. Not headings, boilerplate, rhetoric or inference. Independent assertions are split. The prompt (`LocalClaimModel`, version
-`claims-v1`) says this to the model; code enforces what it can:
+or an attributed position. Not headings, boilerplate, rhetoric or inference. Independent assertions are split. The prompt (`PromptSet`, version
+`claims-v2`) says this to the model; code enforces what it can:
 
 | Kept on the claim | How it is held |
 |---|---|
@@ -46,6 +46,21 @@ again, by a later run or in another chunk, is the same claim and gains a locatio
 `ClaimantResolver` maps a canonical name to its aliases (`{"Portland Public Schools": ["PPS", "the District"]}`). Names compare without case, punctuation or a
 leading "the". An unlisted name stands for itself; nothing is guessed. One alias under two canonical names is refused. Pass the list as `aliases` in the request or
 `--aliases file.json`. The list is per run: change it and a later run may disagree with an earlier one, which is what Re-checking is for.
+
+## Prompts
+
+The two system prompts live in code (`PromptSet.DEFAULT`, version `claims-v2`), reviewed and tested; a run records the version. `claims-v2` follows the first live
+run on the districtwide sheet: for a table, quote the whole row and give the column header as the place (value-only cell quotes never agreed with whole-row
+quotes, so a table gave no claim); a number's quote must carry what it counts; no headings, footers or "Updated <date>" stamps; one sentence is not cut into
+fragments; the place is the outermost heading that names a scenario.
+
+**Trying other wording without a rebuild.** `ClaimExtractionCli --prompts prompts.json` (`{"pass1": "...", "pass2": "..."}`) or `prompts` in the route request
+replaces only the wording. The run is recorded as `custom-<first 16 hex of the SHA-256 of both prompts>`, so the record still names the exact text; the text itself
+is never stored or logged. The tool, the agreement rules, the verbatim-quote check and the model check stay in code. Wording that works is promoted into the code
+as the next version through a normal PR. Both prompts are required, non-blank, at most 20,000 characters.
+
+**Logging.** Per chunk and pass the engine logs the number of claims reported and the time taken, and per chunk the agreed, disagreement and rejected counts. Counts and
+times only; never a passage.
 
 ## Runs, stamps, idempotency
 

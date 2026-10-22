@@ -5,6 +5,7 @@ import app.alfrd.engram.claims.ClaimPassModel
 import app.alfrd.engram.claims.ClaimStore
 import app.alfrd.engram.claims.ClaimantResolver
 import app.alfrd.engram.claims.LocalClaimModel
+import app.alfrd.engram.claims.PromptSet
 import app.alfrd.engram.claims.RunReport
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
@@ -40,7 +41,12 @@ data class DebugClaimRunRequest(
     val expectModel: String? = null,
     val anyModel: Boolean = false,
     val aliases: Map<String, List<String>> = emptyMap(),
+    /** Wording to try instead of the built-in prompts (see [PromptSet.custom]). The run's record names it `custom-<hash>`; it never stores the text. */
+    val prompts: DebugClaimPrompts? = null,
 )
+
+@Serializable
+data class DebugClaimPrompts(val pass1: String, val pass2: String)
 
 @Serializable
 data class DebugClaimRunStarted(val runId: String, val sourceUid: String, val state: String, val report: RunReport? = null)
@@ -63,7 +69,7 @@ data class DebugClaimDisagreementView(val runId: String, val chunkUid: String, v
  */
 fun Application.configureDebugClaimRoutes(
     db: Database,
-    modelFactory: () -> ClaimPassModel = { LocalClaimModel(LocalLlmClient(), System.getenv("LOCAL_LLM_BASE_URL") ?: "http://127.0.0.1:8081/v1") },
+    modelFactory: (PromptSet) -> ClaimPassModel = { prompts -> LocalClaimModel(LocalLlmClient(), System.getenv("LOCAL_LLM_BASE_URL") ?: "http://127.0.0.1:8081/v1", prompts) },
     scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     isLoopback: (ApplicationCall) -> Boolean = ::connectedFromLoopback,
 ) {
@@ -92,6 +98,9 @@ fun Application.configureDebugClaimRoutes(
                     if (sources.sourceByUid(email, uid) == null) return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown source"))
                     val runId = req.runId?.takeIf { it.isNotBlank() } ?: "run-" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now()) + "-" + java.util.UUID.randomUUID().toString().take(4)
                     val resolver = try { ClaimantResolver(req.aliases) } catch (e: IllegalArgumentException) { return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "bad aliases"))) }
+                    val prompts = try { req.prompts?.let { PromptSet.custom(it.pass1, it.pass2) } ?: PromptSet.DEFAULT } catch (e: IllegalArgumentException) {
+                        return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "bad prompts")))
+                    }
                     val stored = claims.run(email, runId)
                     if (stored != null && stored.sourceUid != uid) return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "that run id belongs to another source"))
                     if (stored?.status == "complete" && stored.report != null) return@post call.respond(HttpStatusCode.OK, DebugClaimRunStarted(runId, uid, "complete", stored.report))
@@ -100,7 +109,7 @@ fun Application.configureDebugClaimRoutes(
                     val expect = if (req.anyModel) null else req.expectModel?.takeIf { it.isNotBlank() } ?: ClaimExtractionService.DEFAULT_EXPECTED_MODEL
                     scope.launch {
                         try {
-                            ClaimExtractionService(sources, claims, commit, resolver).run(email, uid, runId, modelFactory(), expect)
+                            ClaimExtractionService(sources, claims, commit, resolver).run(email, uid, runId, modelFactory(prompts), expect)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {

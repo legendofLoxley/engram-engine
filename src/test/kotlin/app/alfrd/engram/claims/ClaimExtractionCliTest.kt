@@ -93,4 +93,22 @@ class ClaimExtractionCliTest {
         assertTrue(seen.none { it.startsWith("POST") })
         assertEquals(64, run("--user", "cli-1", "--source", "u-new", "--show", "bananas", "--url", url()).first)
     }
+
+    @Test
+    fun `prompts from a file are sent as the request's prompts, and a bad file is refused before anything is sent`() {
+        val dir = java.nio.file.Files.createTempDirectory("cli-prompts-").toFile()
+        try {
+            val good = java.io.File(dir, "p.json").apply { writeText("""{"pass1":"first wording","pass2":"second wording"}""") }
+            val (code, _, _) = run("--user", "cli-1", "--source", "u-new", "--prompts", good.path, "--url", url())
+            assertEquals(0, code)
+            val post = seen.single { it.startsWith("POST") }
+            assertTrue(post.contains("\"prompts\":{\"pass1\":\"first wording\",\"pass2\":\"second wording\"}"), post)
+
+            seen.clear()
+            val bad = java.io.File(dir, "bad.json").apply { writeText("""{"pass1":"only one"}""") }
+            assertEquals(64, run("--user", "cli-1", "--source", "u-new", "--prompts", bad.path, "--url", url()).first)
+            assertEquals(64, run("--user", "cli-1", "--source", "u-new", "--prompts", java.io.File(dir, "nope.json").path, "--url", url()).first)
+            assertTrue(seen.none { it.startsWith("POST") })
+        } finally { dir.deleteRecursively() }
+    }
 }
