@@ -38,8 +38,11 @@ object PageStructure {
         "labels). Never estimate a value from a line or bar: only text that is printed. Nest a heading inside the heading it sits under. A number " +
         "belongs to the heading it sits under, never to one above or beside it. Copy all text exactly as printed; do not correct, translate or summarize."
 
-    /** Versioned with the prompt: a reading made with another prompt is another reading. */
-    const val VERSION = "structure-v1"
+    /**
+     * Versioned with the prompt and with what [StructureCheck] and [VisionReading.build] keep: a reading made with another prompt or kept by
+     * another check is another reading. v2: wrapped and interleaved text is matched, invented headings no longer drop what is under them.
+     */
+    const val VERSION = "structure-v2"
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 

@@ -1,0 +1,159 @@
+package app.alfrd.engram.vision
+
+import app.alfrd.engram.claims.ClaimAgreement
+import app.alfrd.engram.claims.StructuredClaimModel
+import app.alfrd.engram.db.ChunkRecord
+import app.alfrd.engram.db.SourceRecord
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+
+/** The check and the build on page text as the extractor actually reads it: wrapped table cells, card titles apart from their text. */
+class VisionBuildTest {
+
+    /** The text layer of a planning-floor table as the extractor orders it: the header row and the wrapped cells come out interleaved. */
+    private val table = """
+        Figure 6.1 Deriving Planning Floors
+
+        School type
+
+        Elementary
+
+        Middle
+
+        K–8
+
+        QEM
+        prototype
+
+        Five-year Planning floor
+        buffer
+
+        range estimate
+
+        360
+
+        + about 85
+
+        Approximately
+        450+
+
+        500
+
+        + about
+        100
+
+        Approximately
+        600+
+
+        no QEM
+        prototype estimate
+
+        local Approximately
+
+        650+
+
+        What the floor is built to sustain
+
+        6 grades, about 75 per grade.
+    """.trimIndent()
+
+    private val tableReading = listOf(
+        PageSection(
+            "Figure 6.1 Deriving Planning Floors",
+            numbers = listOf(PageNumber("85", "+ about"), PageNumber("450+", "Approximately"), PageNumber("6", "grades, about")),
+            tables = listOf(listOf(
+                listOf("School type", "QEM prototype", "Five-year buffer", "Planning floor range estimate", "What the floor is built to sustain"),
+                listOf("Elementary", "360", "+ about 85", "Approximately 450+", "6 grades, about 75 per grade."),
+                listOf("Middle", "500", "+ about 100", "Approximately 600+", "3 grades"),
+                listOf("K–8", "no QEM prototype", "local estimate", "Approximately 650+", "9 grades"),
+            )),
+        ),
+    )
+
+    @Test
+    fun `column headers and cells the text layer interleaves are found by their words near each other`() {
+        val checks = StructureCheck.check(tableReading, table)
+        listOf("Five-year buffer", "Planning floor range estimate", "local estimate", "Approximately 450+", "+ about 100").forEach { v ->
+            assertTrue(checks.first { it.value == v }.found, "$v: $checks")
+        }
+        val lines = VisionReading.build(tableReading, checks).text.lines()
+        assertTrue("Figure 6.1 Deriving Planning Floors > Elementary > Five-year buffer: + about 85" in lines, lines.joinToString("\n"))
+        assertTrue("Figure 6.1 Deriving Planning Floors > Elementary > Planning floor range estimate: Approximately 450+" in lines)
+        assertTrue("Figure 6.1 Deriving Planning Floors > K–8 > Five-year buffer: local estimate" in lines)
+    }
+
+    @Test
+    fun `numbers that repeat a cell of the section's table are left out, and the reason names the part that failed`() {
+        val built = VisionReading.build(tableReading, StructureCheck.check(tableReading, table))
+        assertFalse(built.entries.any { it.kind == "number" }, built.entries.toString())
+        assertEquals(3, built.rejected.count { it.endsWith("repeats a table cell") }, built.rejected.toString())
+        val noHeader = tableReading.map { it.copy(tables = listOf(listOf(listOf("School type", "Imaginary column"), listOf("Elementary", "360")))) }
+        val r = VisionReading.build(noHeader, StructureCheck.check(noHeader, table)).rejected
+        assertTrue(r.any { it.contains(":: 360") && it.endsWith("column header: not on the page") }, r.toString())
+    }
+
+    @Test
+    fun `words far apart, a one-letter word, or a single word are never matched apart`() {
+        val text = StructureCheck.normalize("SCENARIO B closes 11 schools. Plan A is the status quo. Five-year plan for the district and its many neighborhood schools buffer")
+        val words = StructureCheck.words(text)
+        assertTrue(StructureCheck.scattered(words, "SCENARIO A").isEmpty(), "one-letter word")
+        assertTrue(StructureCheck.scattered(words, "Five-year buffer").isEmpty(), "too far apart")
+        assertTrue(StructureCheck.scattered(words, "closes").isEmpty(), "a single word is matched only as written")
+        assertTrue(StructureCheck.scattered(words, "11 schools closes").isNotEmpty())
+    }
+
+    @Test
+    fun `a card title read together with its text is found, and an invented heading keeps what is under it under the heading above`() {
+        val page = """
+            WHAT GUIDES THE WORK
+
+            Well-resourced schools
+
+            Consistent access to strong academic programming across PPS.
+
+            PPS equity lens
+
+            Centering students most impacted by inequities in every decision.
+        """.trimIndent()
+        val reading = listOf(
+            PageSection("WHAT GUIDES THE WORK", subsections = listOf(
+                PageSection("Guiding principles", items = listOf(
+                    "Well-resourced schools: Consistent access to strong academic programming across PPS.",
+                    "PPS equity lens – Centering students most impacted by inequities in every decision.",
+                )),
+            )),
+            PageSection("Header", numbers = listOf(PageNumber("2031"))),
+        )
+        val built = VisionReading.build(reading, StructureCheck.check(reading, page))
+        val lines = built.text.lines()
+        assertTrue("WHAT GUIDES THE WORK: Well-resourced schools: Consistent access to strong academic programming across PPS." in lines, built.text)
+        assertTrue(lines.any { it.startsWith("WHAT GUIDES THE WORK: PPS equity lens") }, built.text)
+        assertTrue(built.entries.all { it.path == listOf("WHAT GUIDES THE WORK") }, built.entries.toString())
+        assertTrue(built.rejected.any { it.contains("Guiding principles :: (heading) not on the page") }, built.rejected.toString())
+        assertTrue(built.rejected.any { it.contains("2031") }, "a bare number with no heading or label says nothing")
+    }
+
+    @Test
+    fun `a top heading too long to be a place stays in the subject, and a short one is the place`() = runBlocking<Unit> {
+        val question = "RQ3: " + "To what extent do families report that the district's process was transparent and responsive to their concerns? ".repeat(2)
+        assertTrue(question.length > ClaimAgreement.MAX_PLACE_CHARS)
+        val entries = listOf(
+            ReadingEntry("number", listOf(question, "Agree"), "41%", line = "$question > Agree: 41%"),
+            ReadingEntry("number", listOf("SCENARIO A", "BOUNDARY CHANGES"), "38", line = "SCENARIO A > BOUNDARY CHANGES: 38"),
+        )
+        val chunk = ChunkRecord("c", "s", 9, "pdf p. 8, vision reading", entries.joinToString("\n") { it.line }, "h",
+            kind = VisionReading.CHUNK_KIND, extractor = "vision:m", reading = Json.encodeToString(entries))
+        val source = SourceRecord("s", "pdf", "file:x.pdf", "x", "pdf", null, "h", 0, 10)
+        val claims = StructuredClaimModel().extract(source, chunk, 1).claims
+        assertNull(claims[0].place)
+        assertEquals("$question > Agree", claims[0].subject)
+        assertEquals("SCENARIO A", claims[1].place)
+        assertEquals("BOUNDARY CHANGES", claims[1].subject)
+    }
+}

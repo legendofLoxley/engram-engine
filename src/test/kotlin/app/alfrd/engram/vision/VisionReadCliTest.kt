@@ -58,6 +58,15 @@ class VisionReadCliTest {
     }
 
     @Test
+    fun `pages failing in a row stop the run instead of spending minutes on each`() {
+        val (code, out, err) = run("--user", "v1", "--source", "s1", "--file", file(), "--url", url(), "--pages", "3,3,3,2", "--stop-after", "2")
+        assertEquals(3, code, out)
+        assertEquals(3, posted.size, "plan, then two failed pages; the rest are not tried")
+        assertTrue(err.contains("stopped: 2 pages in a row failed; 2 page(s) not tried"), err)
+        assertTrue(out.contains("done: 2 of 4 page(s)"), out)
+    }
+
+    @Test
     fun `plan only prints the routing, and a page list reads just those pages`() {
         assertEquals(0, run("--user", "v1", "--source", "s1", "--file", file(), "--pages", "plan", "--url", url()).first)
         assertEquals(1, posted.size)
