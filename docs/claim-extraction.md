@@ -32,7 +32,7 @@ again, by a later run or in another chunk, is the same claim and gains a locatio
    be passed: extraction inference is local only.
 2. **Establish only on agreement** on the quote, the canonical claimant, and the place (the chunk is the location; when both passes name a place in it, those
    must match; one naming none does not block). Everything else is retained whole as a disagreement: `passes differ on the claimant/place`, `only pass 1/2
-   reported it`, `quote is not in the chunk`, `quote is outside the section its place names`, `both passes name more than one claimant for this passage`.
+   reported it`, `quote is not in the chunk`, `quote is outside the section its place names`, `place is too long to be a place` (over 120 characters: text copied into the field), `both passes name more than one claimant for this passage`.
    Disagreements are `ClaimDisagreement` rows holding both versions; they are never made items.
 3. **A place that is a heading is checked.** If a claim's place is a line of its chunk (a card or scenario title), the passage must lie under that heading, up
    to the next heading some claim names. A count printed under SCENARIO A cannot be filed under SCENARIO B. A place that is not a line of the chunk (a table

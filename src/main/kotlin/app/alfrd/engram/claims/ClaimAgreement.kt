@@ -20,6 +20,9 @@ import app.alfrd.engram.db.ChunkRecord
  */
 object ClaimAgreement {
     const val REJECTED = "quote is not in the chunk"
+    const val PLACE_TOO_LONG = "place is too long to be a place"
+    /** A place is a heading, a column or a box title: a few words. Longer is the model copying text into the field. */
+    const val MAX_PLACE_CHARS = 120
     const val OUT_OF_SECTION = "quote is outside the section its place names"
     const val SPLIT_CLAIMANT = "both passes name more than one claimant for this passage"
 
@@ -106,6 +109,11 @@ object ClaimAgreement {
                     return@forEach
                 }
                 val r = resolve(c, located, resolver)
+                if ((r.version.place?.length ?: 0) > MAX_PLACE_CHARS) {
+                    rejected++
+                    disagreements += Disagreement(chunk.uid, PLACE_TOO_LONG, if (first) r.version.copy(place = r.version.place!!.take(MAX_PLACE_CHARS) + "…") else null, if (first) null else r.version.copy(place = r.version.place!!.take(MAX_PLACE_CHARS) + "…"))
+                    return@forEach
+                }
                 if (!inSection(chunk.text, heads, r.version.place, located)) {
                     rejected++
                     disagreements += Disagreement(chunk.uid, OUT_OF_SECTION, if (first) r.version else null, if (first) null else r.version)
@@ -157,7 +165,7 @@ object ClaimAgreement {
         leftoverB.forEach { y -> disagreements += Disagreement(chunk.uid, "only pass 2 reported it", null, y.version) }
 
         // Distinct claims either pass reported with a usable quote: agreed ones, and each disagreement (a differing pair counts once).
-        val reported = agreed.size + disagreements.count { it.reason != REJECTED && it.reason != OUT_OF_SECTION }
+        val reported = agreed.size + disagreements.count { it.reason != REJECTED && it.reason != OUT_OF_SECTION && it.reason != PLACE_TOO_LONG }
         return Compared(ChunkOutcome(chunk.uid, agreed, disagreements), rejected, reported)
     }
 }

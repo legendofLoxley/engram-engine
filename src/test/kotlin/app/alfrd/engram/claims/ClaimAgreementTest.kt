@@ -139,4 +139,17 @@ class ClaimAgreementTest {
         assertEquals("Portland Public Schools", r.canonical("PPS"))
         assertThrows<IllegalArgumentException> { ClaimantResolver.parse("""{"X": "PPS"}""") }
     }
+
+    @Test
+    fun `a place that is a stretch of copied text is rejected and retained, not used as a place`() {
+        val q = "Scenario A closes 14 schools."
+        val long = "x ".repeat(ClaimAgreement.MAX_PLACE_CHARS)
+        val r = ClaimAgreement.compare(chunk(text), listOf(claim(q, place = long)), listOf(claim(q, place = long)), resolver)
+        assertTrue(r.outcome.agreed.isEmpty())
+        assertEquals(2, r.rejected)
+        assertEquals(setOf(ClaimAgreement.PLACE_TOO_LONG), r.outcome.disagreements.map { it.reason }.toSet())
+        assertTrue(r.outcome.disagreements.all { (it.versionA ?: it.versionB)!!.place!!.length <= ClaimAgreement.MAX_PLACE_CHARS + 1 }, "the retained version is shortened")
+        val ok = ClaimAgreement.compare(chunk(text), listOf(claim(q, place = "SCENARIO A")), listOf(claim(q, place = "SCENARIO A")), resolver)
+        assertEquals(1, ok.outcome.agreed.size)
+    }
 }
