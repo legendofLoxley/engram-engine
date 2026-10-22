@@ -16,7 +16,7 @@ class PromptSet private constructor(val version: String, val pass1: String, val 
     val sha256: String get() = digest(pass1, pass2)
 
     companion object {
-        const val DEFAULT_VERSION = "claims-v2"
+        const val DEFAULT_VERSION = "claims-v3"
         const val MAX_CHARS = 20_000
 
         private fun digest(a: String, b: String) =
@@ -33,10 +33,11 @@ class PromptSet private constructor(val version: String, val pass1: String, val 
               * Quote the whole sentence. Do not cut one sentence into fragments. Only if one sentence asserts independent things about different subjects, give each whole clause as its own claim.
               * A number is only a claim together with what it counts. The quote must include the words that say what the number is about (for example "38 attendance boundary changes", never "38" alone). If the words and the number are not next to each other, quote from the first of them through the last, in one unbroken stretch.
             - claimant: the person or organization the passage says made the assertion, as the passage names them. If the passage names nobody, leave it empty. Do not guess.
-            - subject: a few words saying what the claim is about.
+            - subject: always give one: a few words saying what the claim is about. A card, box, list or program name (for example PROGRAM MOVES) belongs here.
             - kind: one of $KINDS.
             - place: where in the passage the claim belongs, when that matters.
-              * If the claim sits under a heading, card or box title (for example SCENARIO A, SCENARIO B, STATUS QUO), give that heading exactly as it is written. When headings are nested, give the outermost one that names a scenario, option or party. A number belongs to the heading it sits under, never to one above or beside it.
+              * If the passage has scenario, option or party headings (for example SCENARIO A, SCENARIO B, STATUS QUO), the place is always that heading, exactly as it is written, never the name of a card, box, list or program inside it. When headings are nested, use the outermost one that names a scenario, option or party. A number or a list belongs to the heading it sits under, never to one above or beside it.
+              * If the passage has no such headings but the claim sits under another heading, card or box title, give that title exactly as it is written.
               * Tables: a table is printed as lines of cells separated by " | ". For each value in a row, give one claim. The quote is the whole row, copied exactly as printed from its first cell to its last, with the " | " separators; never a single cell taken out of the middle of a row. The place is that value's column header, exactly as printed (for example SCENARIO A). The row label and the value are what the claim says.
               * Otherwise leave it empty.
             If the passage has no claims, report an empty list.

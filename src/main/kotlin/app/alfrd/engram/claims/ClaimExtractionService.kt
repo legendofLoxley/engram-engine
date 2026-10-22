@@ -138,7 +138,10 @@ class ClaimExtractionService(
             names += result.modelName
             results += result
             // Counts and time only, never text.
-            logger.info("claims: chunk {} pass {} reported {} claim(s) in {} ms", chunk.ordinal, pass, result.claims.size, System.currentTimeMillis() - started)
+            logger.info(
+                "claims: chunk {} pass {} reported {} claim(s) in {} ms (finish {}, {} completion token(s))",
+                chunk.ordinal, pass, result.claims.size, System.currentTimeMillis() - started, result.finishReason ?: "-", result.completionTokens ?: "-",
+            )
         }
         val compared = ClaimAgreement.compare(chunk, results[0].claims, results[1].claims, resolver)
         logger.info(
