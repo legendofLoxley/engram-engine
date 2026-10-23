@@ -5,8 +5,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -101,13 +103,15 @@ class GraphBackupCoordinatorTest {
 
         try {
             val job = coordinator.start()
-            // Generous real-wall-clock budget: the first BACKUP DATABASE call pays one-time
-            // reflection/class-loading cost (com.arcadedb.integration.backup.Backup is loaded via
-            // Class.forName), so early iterations can run noticeably slower than steady state.
-            runBlocking { delay(2_500L) }
-            job.cancel()
+            // Real wall clock, polled: one BACKUP DATABASE takes from ~0.3 s to over 1 s depending on the machine (the first also pays
+            // class loading), so a fixed window flakes on slow hosts. Wait for three backups, up to a generous limit.
+            runBlocking { withTimeoutOrNull(10_000L) { while (repository.uploadCount < 3) delay(50L) } }
+            assertTrue(repository.uploadCount >= 3, "Expected at least 3 backups within 10 s at a 200ms interval, got ${repository.uploadCount}")
 
-            assertTrue(repository.uploadCount >= 3, "Expected at least 3 backups in 2.5s at a 200ms interval, got ${repository.uploadCount}")
+            runBlocking { job.cancelAndJoin() }
+            val afterCancel = repository.uploadCount
+            runBlocking { delay(1_000L) }
+            assertEquals(afterCancel, repository.uploadCount, "no backups after the loop is cancelled")
         } finally {
             scope.cancel()
         }
