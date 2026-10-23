@@ -37,6 +37,8 @@ data class PageReadingResult(
     /** The rejected values (heading path :: value) with why: not on the page, or not under that heading. */
     val rejectedValues: List<String> = emptyList(),
     val failure: String? = null,
+    /** Names the model misread, kept with the page's spelling (`path :: model's → page's`). */
+    val corrected: List<String> = emptyList(),
 )
 
 /**
@@ -129,7 +131,7 @@ class VisionReadingService(
             ?: throw IllegalArgumentException("unknown source")
         return PageReadingResult(
             page, if (created) "added" else "already there", chunk.uid, chunk.ordinal, answer.model, ocrAnswer?.model, ms,
-            built.entries.size, built.rejected.size, built.rejected,
+            built.entries.size, built.rejected.size, built.rejected, corrected = built.corrected,
         )
     }
 }
@@ -148,10 +150,10 @@ object VisionReading {
     const val DESIGNED_MAX_CHARS_PER_BLOCK = 140
 
     /**
-     * A line that starts a figure or table caption ("Figure 2.5 Students Left…"): a chart drawn as vector shapes has no image and few blocks,
+     * A line that starts a figure or table caption ("Figure 2.5 Students Left…", "Figure 2.5 (DLI) Students…"): a chart drawn as vector shapes has no image and few blocks,
      * but it has its caption. A reference that wraps to the start of a line ("Figure 1). The share…") is not one.
      */
-    private val CAPTION = Regex("^\\s*(Figure|Table|Exhibit|Chart)\\s+[0-9]+(\\.[0-9]+)*[.:]?\\s+\\p{L}")
+    private val CAPTION = Regex("^\\s*(Figure|Table|Exhibit|Chart)\\s+[0-9]+(\\.[0-9]+)*[.:]?\\s+[\\p{L}(]")
 
     /** Smallest embedded image, in pixels, that counts as a chart or figure rather than a logo or icon. */
     const val MIN_IMAGE_PIXELS = 300 * 200
@@ -182,7 +184,8 @@ object VisionReading {
         }
     }
 
-    data class Built(val text: String, val entries: List<ReadingEntry>, val rejected: List<String>)
+    /** [corrected]: values kept with the page's spelling of a name the model misread (`path :: model's → page's`). */
+    data class Built(val text: String, val entries: List<ReadingEntry>, val rejected: List<String>, val corrected: List<String> = emptyList())
 
     /**
      * Turns checked structure into chunk text and entries. A value is kept when it is found on the page, is not found only outside its heading,
@@ -201,6 +204,13 @@ object VisionReading {
         val lines = ArrayList<String>()
         val entries = ArrayList<ReadingEntry>()
         val rejected = ArrayList<String>()
+        val corrected = ArrayList<String>()
+        // What is written is the page's text: its case, and its spelling of a name the model misread.
+        fun printed(c: CheckedValue?, v: String, prefix: String): String {
+            val p = c?.printedAs ?: return v
+            if (StructureCheck.normalize(p) != StructureCheck.normalize(v)) corrected += "$prefix :: $v → $p"
+            return p
+        }
         fun why(c: CheckedValue?) = when {
             c == null || !c.found -> "not on the page"
             c.inSection == false -> "not under that heading"
@@ -231,7 +241,7 @@ object VisionReading {
             level.forEach { s ->
                 val path = parents + s.heading
                 val head = check(parents, "heading", s.heading)
-                val shown = if (head != null && head.found) shownParents + s.heading else {
+                val shown = if (head != null && head.found) shownParents + printed(head, s.heading, parents.joinToString(SEP)) else {
                     rejected += "${path.joinToString(SEP)} :: (heading) not on the page"
                     shownParents
                 }
@@ -245,14 +255,15 @@ object VisionReading {
                         shown.isEmpty() && n.label.isBlank() -> rejected += "$prefix :: ${n.value} — no heading or label on the page"
                         inATable(path, n.value) -> rejected += "$prefix :: ${n.value} — repeats a table cell"
                         else -> {
-                            val l = line(n.value + (if (n.label.isNotBlank()) " ${n.label}" else ""))
-                            lines += l; entries += ReadingEntry("number", shown, n.value, n.label, l)
+                            val v = printed(c, n.value, prefix)
+                            val l = line(v + (if (n.label.isNotBlank()) " ${n.label}" else ""))
+                            lines += l; entries += ReadingEntry("number", shown, v, n.label, l)
                         }
                     }
                 }
                 s.items.forEach { item ->
                     val c = check(path, "item", item)
-                    if (ok(c)) { val l = line(item); lines += l; entries += ReadingEntry("item", shown, item, line = l) }
+                    if (ok(c)) { val v = printed(c, item, prefix); val l = line(v); lines += l; entries += ReadingEntry("item", shown, v, line = l) }
                     else rejected += "$prefix :: $item — ${why(c)}"
                 }
                 s.tables.forEach { t ->
@@ -265,21 +276,25 @@ object VisionReading {
                             val where = (shown + rowLabel + (column ?: "?")).joinToString(SEP)
                             val bad = parts.firstOrNull { !ok(it.second) }
                             if (column != null && bad == null) {
-                                val l = "$where: $cell"
-                                lines += l; entries += ReadingEntry("cell", shown + rowLabel + column, cell, line = l)
+                                val r = printed(parts[1].second, rowLabel, prefix); val col = printed(parts[2].second, column, prefix)
+                                val v = printed(parts[0].second, cell, prefix)
+                                val l = "${(shown + r + col).joinToString(SEP)}: $v"
+                                lines += l; entries += ReadingEntry("cell", shown + r + col, v, line = l)
                             } else rejected += "$where :: $cell — " + if (column == null) "no column header" else "${bad!!.first}: ${why(bad.second)}"
                         }
                     }
                 }
                 s.charts.forEach { c ->
-                    val kept = (listOf(c.title).filter { it.isNotBlank() } + c.values).filter { ok(check(path, "chart", it)) }
+                    val kept = (listOf(c.title).filter { it.isNotBlank() } + c.values).mapNotNull { v ->
+                        check(path, "chart", v).takeIf { ok(it) }?.let { printed(it, v, prefix) }
+                    }
                     if (kept.isNotEmpty()) lines += (if (prefix.isEmpty()) "(chart): " else "$prefix (chart): ") + kept.joinToString("; ")
                 }
                 walk(s.subsections, path, shown)
             }
         }
         walk(sections, emptyList(), emptyList())
-        return Built(lines.joinToString("\n"), entries, rejected)
+        return Built(lines.joinToString("\n"), entries, rejected, corrected)
     }
 
     /** The checked entries of a vision chunk. Empty for any other chunk. */

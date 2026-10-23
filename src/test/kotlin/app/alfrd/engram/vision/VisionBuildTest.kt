@@ -139,6 +139,59 @@ class VisionBuildTest {
     }
 
     @Test
+    fun `a name misread by a letter or two is kept with the page's spelling, and text is stored as the page prints it`() {
+        val page = """
+            Bridger Creative Science School SEGC Analysis
+
+            SCENARIO A
+
+            ATTENDANCE BOUNDARY CHANGES
+
+            38
+
+            Abernethy Arleta Duniway Sitton Woodstock Sitten-Park
+
+            PROGRAM MOVES
+
+            Spanish: Beach, James John, and Sitton to Cesar Chavez
+
+            Educational options
+
+            A strong network of neighborhood schools balanced with
+            educational options.
+        """.trimIndent()
+        val reading = listOf(
+            PageSection("Bridger Creative Science School SEGc Analysis"),
+            PageSection("SCENARIO A", subsections = listOf(
+                PageSection("ATTENDANCE BOUNDARY CHANGES", numbers = listOf(PageNumber("38")), items = listOf("Abernethy", "Dunaway", "Siton", "Woodstok", "Zzyzx")),
+                PageSection("PROGRAM MOVES", items = listOf("Spanish: Beach, James John, and Sitten to Cesar Chavez")),
+            )),
+            PageSection("WHAT GUIDES THE WORK", items = listOf("Educational options: A strong network of neighborhood schools balanced with educational options.")),
+        )
+        val built = VisionReading.build(reading, StructureCheck.check(reading, page))
+        val lines = built.text.lines()
+        assertTrue("Bridger Creative Science School SEGC Analysis" in lines, "the page's case: ${built.text}")
+        assertTrue("SCENARIO A > ATTENDANCE BOUNDARY CHANGES: Duniway" in lines, built.text)
+        assertTrue("SCENARIO A > PROGRAM MOVES: Spanish: Beach, James John, and Sitton to Cesar Chavez" in lines, built.text)
+        assertTrue(lines.any { it.startsWith("Educational options: A strong network") }, "a long item with an \"a\" in it: ${built.text}")
+        assertTrue(built.corrected.any { it.endsWith(":: Dunaway → Duniway") }, built.corrected.toString())
+        assertTrue(built.corrected.any { it.contains("Sitten to Cesar Chavez → Spanish: Beach, James John, and Sitton to Cesar Chavez") }, built.corrected.toString())
+        assertFalse(built.corrected.any { it.contains("SEGc") }, "a change of case is not a correction")
+        // "Siton" is one edit from Sitton and from no other name: kept. "Woodstok" is one from Woodstock: kept. "Zzyzx" is near nothing: rejected.
+        assertTrue("SCENARIO A > ATTENDANCE BOUNDARY CHANGES: Sitton" in lines && "SCENARIO A > ATTENDANCE BOUNDARY CHANGES: Woodstock" in lines, built.text)
+        assertTrue(built.rejected.any { it.contains(":: Zzyzx — not on the page") }, built.rejected.toString())
+    }
+
+    @Test
+    fun `a misread name with two names near it on the page is not guessed at`() {
+        val page = "BOUNDARY CHANGES\nHarlow Harley Marlow"
+        val reading = listOf(PageSection("BOUNDARY CHANGES", items = listOf("Harloy")))
+        val built = VisionReading.build(reading, StructureCheck.check(reading, page))
+        assertTrue(built.entries.isEmpty() && built.corrected.isEmpty(), built.toString())
+        assertTrue(built.rejected.single().contains("Harloy — not on the page"))
+    }
+
+    @Test
     fun `words far apart, a one-letter word, or a single word are never matched apart`() {
         val text = StructureCheck.normalize("SCENARIO B closes 11 schools. Plan A is the status quo. Five-year plan for the district and its many neighborhood schools buffer")
         val words = StructureCheck.words(text)

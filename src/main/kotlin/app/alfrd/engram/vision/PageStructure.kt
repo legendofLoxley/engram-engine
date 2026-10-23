@@ -45,8 +45,9 @@ object PageStructure {
      * Versioned with the prompt and with what [StructureCheck] and [VisionReading.build] keep: a reading made with another prompt or kept by
      * another check is another reading. v2: wrapped and interleaved text is matched, invented headings no longer drop what is under them.
      * v3: chart labels carry category, series and year and are checked word by word; prose after a figure is not the figure's.
+     * v4: names misread by a letter or two are kept with the page's spelling; text is stored as the page prints it (case); long items with "a".
      */
-    const val VERSION = "structure-v3"
+    const val VERSION = "structure-v4"
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 

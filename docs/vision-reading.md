@@ -11,7 +11,10 @@ that run showed: printed table headers and card text rejected because the text l
 long top headings losing their claims, and values dropped under headings the model made up. Second box run 2026-10-22 (v2, identity
 `pps-vision-2`): p.146 complete, no wrong value in 10 spot checks; v3 fixes what it showed: prose pages routed for nothing (17 of 20 empty
 Equity pages), chart values lost because their labels are assembled from text printed apart, two unreadable answers, prose under a figure
-filed under the figure, chart values without their year.
+filed under the figure, chart values without their year. Third box run 2026-10-23 (v3, `pps-vision-3`): 0 failed pages, p.44 and p.146
+complete, chart years carried, no wrong value in 10 spot checks (5 lacked context). v4 fixes what it showed: misread names ("Sitten",
+"Siton", "Dunaway") cost whole list items, long items with an "a" were not matched, text stored in the model's case ("SEGc"), and a caption
+with a parenthesis after its number ("Figure 2.5 (DLI)") was not routed.
 
 ## Servers on the box (2026-10-22)
 
@@ -33,7 +36,8 @@ filed under the figure, chart values without their year.
 2. **Read** each routed page as below, then **keep** a value only when it is found on the page, is not found only outside the heading it was
    filed under, and (for a number) its label is printed: as written, or each of its words somewhere on the page (a chart value's label is
    its category, legend entry and year, printed apart from it). An answer that cannot be read is asked for once more; a second failure says
-   why (for example cut off at the token limit). A table cell is kept with its row label and column header, all three
+   why (for example cut off at the token limit). A name the model misread by a letter or two is kept with the page's spelling when the
+   corrected value is then found whole (reported per page as `corrected`), and every kept value is written as the page prints it (its case). A table cell is kept with its row label and column header, all three
    found. Chart text is kept as text of the chunk but makes no claims. What is left out is reported per page (`rejectedValues`, naming which
    part failed: the cell, its row label or its column header), never stored.
    - A heading the page does not have is left out of the path; what the model put under it is checked as under the heading above. A number
@@ -46,7 +50,7 @@ filed under the figure, chart values without their year.
    SCENARIO A > ATTENDANCE BOUNDARY CHANGES: 38
    Figure 6.1 Deriving Planning Floors for Well Resourced Schools > Elementary > Planning floor range estimate: Approximately 450+
    ```
-   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v3`): reading a page
+   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v4`): reading a page
    again adds nothing and calls no model, so a stopped run is resumed by running it again. The file must be the Source's own (same SHA-256).
 4. **Claims:** `ClaimExtractionCli --reader structure` makes one claim per kept entry, quoted by its line, placed under its top heading, with
    its sub-headings as the subject (a top heading longer than a place can be, such as a survey question set as a title, goes in the subject). No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
@@ -61,7 +65,7 @@ Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM
 checked against the page. The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
 The run stops after `--stop-after` pages fail in a row (a server that is down fails every page); run the same command again to resume.
 
-Chunks are keyed by reader version (now `structure-v3`), so a new version's reading of a page already read is a second chunk beside the
+Chunks are keyed by reader version (now `structure-v4`), so a new version's reading of a page already read is a second chunk beside the
 first, and its claims sit beside the old ones. Read a new version into a Source that has no older vision chunks (a fresh synthetic identity).
 
 ## One page, nothing written (`VisionPageCli`)
@@ -98,8 +102,10 @@ Exit status: 0 read and checked, 2 a server failed or its answer could not be re
 - The section check passes a value that lies anywhere after its heading and before the next one, so a figure caption's span can swallow the
   paragraph after the figure (v2 spot check: 2 of 10 claims). The v3 prompt asks for that text under the section heading; the check cannot
   tell the figure from the paragraph.
-- A name the model misspells (v2: "Sittón" for the printed "Sitton") is rejected, and with it the list item that holds it. Accents are not
-  folded in the check on purpose: a stored line must be the page's spelling.
+- A misread name is corrected only to the one word the page prints within two edits with the same first letter, for capitalized words of
+  five letters or more; a shorter name, or one with two near neighbours on the page, is still rejected with its item.
+- Values often lose their context: "78% students of color" without the school or year, "150 students" without "over" (v3 spot check: 5 of
+  10). The value is right and is checked; what it is about rests on the model's label and the headings.
 - The model sometimes leaves a chart value's year out of its label (v2: "216 White students" without 2020–21). The v3 prompt asks for it; the
   check cannot add what the model leaves out.
 - 8083 is a transient unit on the box: after a reboot it must be started again (see its Deployments row).
