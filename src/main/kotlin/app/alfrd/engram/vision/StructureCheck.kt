@@ -40,9 +40,9 @@ data class CheckedValue(
  * label is found when each of its words is printed anywhere on the page.
  *
  * **Misread names.** The model sometimes misreads a name by a letter or two ("Sitten", "Siton" for "Sitton"; "Dunaway" for "Duniway"), which
- * would lose the whole list item that holds it. A capitalized word of five or more letters that the page does not print is replaced by the one
- * word the page prints within two edits of it with the same first letter, and the value is found only if the corrected value is then found as
- * a whole. The page's spelling is what is kept ([CheckedValue.printedAs]); the correction is reported.
+ * would lose the whole list item that holds it. A capitalized word of five or more letters that the page does not print is replaced by the
+ * nearest word the page prints within two edits of it with the same first letter (the text layer's words first, then the OCR transcript's;
+ * no guess when two are equally near), and the value is found only if the corrected value is then found as a whole. The page's spelling is what is kept ([CheckedValue.printedAs]); the correction is reported.
  */
 object StructureCheck {
 
@@ -163,7 +163,8 @@ object StructureCheck {
 
         // A label is what the number counts, often assembled from text printed apart from it (a chart's category, its legend, the year on its
         // axis): it is found when each of its words is printed on the page. The number itself is still checked where it sits.
-        val pageWords = reading.words.map { it.text }.toSet() + (ocr?.words?.map { it.text } ?: emptyList())
+        val readingWords = reading.words.map { it.text }.toSet()
+        val pageWords = readingWords + (ocr?.words?.map { it.text } ?: emptyList())
         // A misread name: see the class comment. Null when there is nothing to correct, the correction is not unique, or the corrected value
         // is still not found.
         fun corrected(v: String): String? {
@@ -173,10 +174,15 @@ object StructureCheck {
                 if (w.length < 5 || !w[0].isUpperCase()) continue
                 val key = normalize(w)
                 if (key in pageWords) continue
-                val near = pageWords.filter { it.length >= 4 && it[0] == key[0] && it.all { c -> c.isLetter() || c == '\'' } && distance(it, key) <= 2 }
-                if (near.size != 1) return null
+                // The text layer's words first: an OCR transcript can hold its own misreading of the same name, which would make two candidates.
+                fun near(words: Collection<String>) = words.filter { it.length >= 4 && it[0] == key[0] && it.all { c -> c.isLetter() || c == '\'' } }
+                    .map { it to distance(it, key) }.filter { it.second <= 2 }
+                val candidates = near(readingWords).ifEmpty { near(pageWords) }
+                val best = candidates.minOfOrNull { it.second } ?: return null
+                val nearest = candidates.filter { it.second == best }.map { it.first }.distinct()
+                if (nearest.size != 1) return null
                 val asPrinted = originals.firstNotNullOfOrNull { t ->
-                    Regex("(?<!\\p{L})" + Regex.escape(near.single()) + "(?!\\p{L})", RegexOption.IGNORE_CASE).find(t)?.value
+                    Regex("(?<!\\p{L})" + Regex.escape(nearest.single()) + "(?!\\p{L})", RegexOption.IGNORE_CASE).find(t)?.value
                 } ?: return null
                 out = out.replaceRange(m.range, asPrinted); changed = true
             }

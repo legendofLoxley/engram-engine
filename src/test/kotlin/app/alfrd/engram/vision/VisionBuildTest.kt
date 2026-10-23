@@ -183,6 +183,17 @@ class VisionBuildTest {
     }
 
     @Test
+    fun `a name the OCR transcript also misreads is corrected to the text layer's spelling, inside a whole list`() {
+        val page = "ATTENDANCE BOUNDARY CHANGES\n38\nAbernethy · Arleta · Dr. Martin Luther King Jr. · Duniway · Faubion · Sitton · Whitman"
+        val ocr = "ATTENDANCE BOUNDARY CHANGES 38 Abernethy · Arleta · Dr. Martin Luther King Jr. · Dunlway · Faubion · Sitton · Whitman"
+        val list = "Abernethy, Arleta, Dr. Martin Luther King Jr., Duniwary, Faubion, Sitton, Whitman"
+        val reading = listOf(PageSection("ATTENDANCE BOUNDARY CHANGES", items = listOf(list)))
+        val built = VisionReading.build(reading, StructureCheck.check(reading, page, ocr))
+        assertEquals(listOf("ATTENDANCE BOUNDARY CHANGES: Abernethy, Arleta, Dr. Martin Luther King Jr., Duniway, Faubion, Sitton, Whitman"), built.entries.map { it.line }, built.toString())
+        assertTrue(built.corrected.single().endsWith("→ Abernethy, Arleta, Dr. Martin Luther King Jr., Duniway, Faubion, Sitton, Whitman"))
+    }
+
+    @Test
     fun `a misread name with two names near it on the page is not guessed at`() {
         val page = "BOUNDARY CHANGES\nHarlow Harley Marlow"
         val reading = listOf(PageSection("BOUNDARY CHANGES", items = listOf("Harloy")))
