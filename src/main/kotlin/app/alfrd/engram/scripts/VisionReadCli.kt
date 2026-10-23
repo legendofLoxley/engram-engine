@@ -114,6 +114,7 @@ object VisionReadCli {
             out.println("p.$page: $outcome, kept $acc, rejected $rej, ${r["ms"]?.jsonPrimitive?.content} ms, model ${r["model"]?.jsonPrimitive?.contentOrNull ?: "-"}" +
                 (r["failure"]?.jsonPrimitive?.contentOrNull?.let { " — $it" } ?: ""))
             (r["rejectedValues"] as? JsonArray)?.forEach { out.println("    rejected: ${it.jsonPrimitive.content}") }
+            (r["corrected"] as? JsonArray)?.forEach { out.println("    corrected: ${it.jsonPrimitive.content}") }
         }
         out.println("done: $done of ${pages.size} page(s), $kept entr(ies) kept, $rejected rejected, $failed failed")
         return if (failed > 0) 3 else 0

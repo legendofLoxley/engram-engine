@@ -17,6 +17,11 @@ data class CheckedValue(
     /** For a number: the words the model printed with it, and whether they are found too. */
     val label: String = "",
     val labelFound: Boolean = true,
+    /**
+     * The value as the page prints it, when that differs from what the model wrote: its case ("SEGc" for the printed "SEGC"), or a name the
+     * model misread by a letter or two ("Sitten" for "Sitton"; see [StructureCheck.check]). What is stored is the page's text, never the model's.
+     */
+    val printedAs: String? = null,
 )
 
 /**
@@ -31,7 +36,13 @@ data class CheckedValue(
  * ("Five-year buffer") can come out with its neighbour's words inside it ("Five-year Planning floor buffer"), and a card's title and its text can
  * sit apart with other words between. A value of two or more words that is not found as written is found when all its words occur, as whole
  * words, within a few words of each other ([SLACK]), in any order. Single words and numbers are never matched this way, nor any value with a
- * one-letter word ("SCENARIO A" must be printed as such). A number's label is found when each of its words is printed anywhere on the page.
+ * one-letter word, unless it is four words or longer ("SCENARIO A" must be printed as such; the "a" in a sentence is passed over). A number's
+ * label is found when each of its words is printed anywhere on the page.
+ *
+ * **Misread names.** The model sometimes misreads a name by a letter or two ("Sitten", "Siton" for "Sitton"; "Dunaway" for "Duniway"), which
+ * would lose the whole list item that holds it. A capitalized word of five or more letters that the page does not print is replaced by the one
+ * word the page prints within two edits of it with the same first letter, and the value is found only if the corrected value is then found as
+ * a whole. The page's spelling is what is kept ([CheckedValue.printedAs]); the correction is reported.
  */
 object StructureCheck {
 
@@ -77,14 +88,17 @@ object StructureCheck {
 
     /** Where the words of a value of two or more words occur near each other in [words] (the text's), when it is not found as written. */
     fun scattered(words: List<Word>, value: String): List<Int> {
-        val want = words(normalize(value)).map { it.text }
-        if (want.size < 2 || want.any { it.length < 2 }) return emptyList()
+        val all = words(normalize(value)).map { it.text }
+        if (all.size < 2) return emptyList()
+        val oneLetter = { w: String -> w.length < 2 && !w[0].isDigit() }
+        if (all.size < 4 && all.any(oneLetter)) return emptyList()
+        val want = all.filterNot(oneLetter)
         val need = want.groupingBy { it }.eachCount()
         val out = ArrayList<Int>()
         for (i in words.indices) {
             if (words[i].text !in need) continue
             val left = HashMap(need); var missing = want.size
-            for (j in i until minOf(words.size, i + want.size + SLACK)) {
+            for (j in i until minOf(words.size, i + all.size + SLACK)) {
                 val c = left[words[j].text] ?: continue
                 if (c > 0) { left[words[j].text] = c - 1; missing-- }
                 if (missing == 0) break
@@ -92,6 +106,39 @@ object StructureCheck {
             if (missing == 0) out += words[i].at
         }
         return out
+    }
+
+    /** Edits (insert, delete, substitute) between two short words. */
+    fun distance(a: String, b: String): Int {
+        var prev = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val cur = IntArray(b.length + 1); cur[0] = i
+            for (j in 1..b.length) cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+            prev = cur
+        }
+        return prev[b.length]
+    }
+
+    private const val DASHES = "-–—−‐‑‒"
+
+    /**
+     * Where [value] is printed in [original] (raw, not normalized), case and spacing aside, as printed with its spacing collapsed; null when it
+     * is not printed as one run.
+     */
+    fun printed(original: String, value: String): String? {
+        val parts = value.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return null
+        val pattern = parts.joinToString("\\s+") { p ->
+            p.map { c ->
+                when {
+                    c in DASHES -> "[$DASHES]" // the plain hyphen first: literal inside the class
+                    c == '\'' || c == '‘' || c == '’' -> "['‘’]"
+                    c == '"' || c == '“' || c == '”' -> "[\"“”]"
+                    else -> Regex.escape(c.toString())
+                }
+            }.joinToString("")
+        }
+        return Regex(pattern, setOf(RegexOption.IGNORE_CASE)).find(original)?.value?.replace(Regex("\\s+"), " ")
     }
 
     /** A normalized text and its words, so a page's text is split once. */
@@ -111,10 +158,31 @@ object StructureCheck {
         val out = ArrayList<CheckedValue>()
 
         fun found(v: String) = reading.locate(v).isNotEmpty() || (ocr != null && ocr.locate(v).isNotEmpty())
+        val originals = listOfNotNull(readingText, ocrText)
+        fun printedForm(v: String): String? = originals.firstNotNullOfOrNull { printed(it, v) }
 
         // A label is what the number counts, often assembled from text printed apart from it (a chart's category, its legend, the year on its
         // axis): it is found when each of its words is printed on the page. The number itself is still checked where it sits.
         val pageWords = reading.words.map { it.text }.toSet() + (ocr?.words?.map { it.text } ?: emptyList())
+        // A misread name: see the class comment. Null when there is nothing to correct, the correction is not unique, or the corrected value
+        // is still not found.
+        fun corrected(v: String): String? {
+            var out = v; var changed = false
+            for (m in Regex("\\p{L}[\\p{L}'’]*").findAll(v).toList().asReversed()) {
+                val w = m.value
+                if (w.length < 5 || !w[0].isUpperCase()) continue
+                val key = normalize(w)
+                if (key in pageWords) continue
+                val near = pageWords.filter { it.length >= 4 && it[0] == key[0] && it.all { c -> c.isLetter() || c == '\'' } && distance(it, key) <= 2 }
+                if (near.size != 1) return null
+                val asPrinted = originals.firstNotNullOfOrNull { t ->
+                    Regex("(?<!\\p{L})" + Regex.escape(near.single()) + "(?!\\p{L})", RegexOption.IGNORE_CASE).find(t)?.value
+                } ?: return null
+                out = out.replaceRange(m.range, asPrinted); changed = true
+            }
+            return out.takeIf { changed && found(it) }
+        }
+
         fun labelFound(label: String): Boolean {
             if (label.isBlank() || found(label)) return true
             val w = words(normalize(label)).map { it.text }.filter { it.length > 1 || it[0].isDigit() }
@@ -125,21 +193,26 @@ object StructureCheck {
         // sibling, and runs to its next sibling (or the end of the parent's span).
         fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int) {
             var cursor = lo
-            val starts = level.map { s ->
-                val at = reading.locate(s.heading).firstOrNull { it in cursor until hi }
+            val headingFix = level.map { s -> if (found(s.heading)) null else corrected(s.heading) }
+            val starts = level.mapIndexed { i, s ->
+                val at = reading.locate(headingFix[i] ?: s.heading).firstOrNull { it in cursor until hi }
                 if (at != null) cursor = at + 1
                 at
             }
             level.forEachIndexed { i, s ->
                 val path = parents + s.heading
-                out += CheckedValue(parents, "heading", s.heading, found(s.heading), null)
+                val fix = headingFix[i]
+                out += CheckedValue(parents, "heading", s.heading, fix != null || found(s.heading), null,
+                    printedAs = fix ?: printedForm(s.heading)?.takeIf { it != s.heading })
                 val from = starts[i]
                 val to = starts.drop(i + 1).filterNotNull().firstOrNull { from == null || it > from } ?: hi
                 fun add(kind: String, v: String, label: String = "") {
-                    val at = reading.locate(v)
+                    val ok = found(v)
+                    val fix = if (ok) null else corrected(v)
+                    val at = reading.locate(fix ?: v)
                     out += CheckedValue(
-                        path, kind, v, found(v), if (from == null || at.isEmpty()) null else at.any { it in from until to },
-                        label, labelFound(label),
+                        path, kind, v, ok || fix != null, if (from == null || at.isEmpty()) null else at.any { it in from until to },
+                        label, labelFound(label), printedAs = fix ?: printedForm(v)?.takeIf { it != v },
                     )
                 }
                 s.numbers.forEach { add("number", it.value, it.label) }
