@@ -172,6 +172,9 @@ class VisionReadingTest {
         val captioned = PdfFixtures.build(listOf { p -> p.lines(72f, 50f, para, 10f); p.text(72f, 200f, "Figure 2.5 Students Left PPS at About Half the Rate of their Peers", 10f) })
         val capUid = commitPdf(captioned, "file:captioned.pdf")
         assertTrue(service(Scripted("{}")).plan(ana, capUid, captioned).single().reasons.any { it.startsWith("caption (Figure 2.5") })
+        val reference = PdfFixtures.build(listOf { p -> p.lines(72f, 50f, para, 10f); p.text(72f, 200f, "Figure 1). The share of multilingual learners rose.", 10f) })
+        val refUid = commitPdf(reference, "file:reference.pdf")
+        assertTrue(service(Scripted("{}")).plan(ana, refUid, reference).single().reasons.none { it.startsWith("caption") }, "a wrapped reference is not a caption")
     }
 
     @Test

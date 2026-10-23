@@ -147,8 +147,11 @@ object VisionReading {
      */
     const val DESIGNED_MAX_CHARS_PER_BLOCK = 140
 
-    /** A line that starts a figure or table caption: a chart drawn as vector shapes has no image and few blocks, but it has its caption. */
-    private val CAPTION = Regex("^\\s*(Figure|Table|Exhibit|Chart)\\s+[0-9]+(\\.[0-9]+)*\\b")
+    /**
+     * A line that starts a figure or table caption ("Figure 2.5 Students Left…"): a chart drawn as vector shapes has no image and few blocks,
+     * but it has its caption. A reference that wraps to the start of a line ("Figure 1). The share…") is not one.
+     */
+    private val CAPTION = Regex("^\\s*(Figure|Table|Exhibit|Chart)\\s+[0-9]+(\\.[0-9]+)*[.:]?\\s+\\p{L}")
 
     /** Smallest embedded image, in pixels, that counts as a chart or figure rather than a logo or icon. */
     const val MIN_IMAGE_PIXELS = 300 * 200
