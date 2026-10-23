@@ -24,7 +24,8 @@ import kotlin.system.exitProcess
  * VisionReadCli --user <label> --source <uid> --file <the source's pdf on this machine> [--pages auto|plan|2,146] [--no-ocr] [--stop-after 3]
  *               [--url http://127.0.0.1:8080]
  * ```
- * `--pages auto` (default) reads every page the engine routes to vision; `plan` only prints the routing; a list reads those pages. The file is
+ * `--pages auto` (default) reads every page the engine routes to vision; `plan` only prints the routing; a list reads those pages; `--show N`
+ * prints the stored vision chunk of page N (its text and entries) and reads nothing. The file is
  * passed by path, so it must be on the engine's machine and readable by the engine's process (not a private /tmp); the engine checks it is the source's own file (SHA-256). A page already read is
  * answered from its chunk without a model call, so a stopped run is resumed by running the same command. After `--stop-after` pages in a row
  * fail (default 3: a server that is down fails every page), the run stops rather than spend minutes per page on nothing. Needs DEBUG_CONVERSE_TOKEN; loopback
@@ -40,11 +41,11 @@ object VisionReadCli {
     ): Int {
         fun opt(name: String) = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
         val label = opt("--user"); val source = opt("--source"); val file = opt("--file")?.let(::File)
-        if (label.isNullOrBlank() || source.isNullOrBlank() || file == null) {
-            err.println("usage: VisionReadCli --user <label> --source <uid> --file <file.pdf> [--pages auto|plan|N,N] [--no-ocr] [--stop-after N] [--url URL]"); return 64
+        if (label.isNullOrBlank() || source.isNullOrBlank() || (file == null && opt("--show") == null)) {
+            err.println("usage: VisionReadCli --user <label> --source <uid> --file <file.pdf> [--pages auto|plan|N,N] [--show N] [--no-ocr] [--stop-after N] [--url URL]"); return 64
         }
         if (label.contains("owner-jacob")) { err.println("refused: that identity is real data and is never used by the debug routes"); return 64 }
-        if (!file.isFile) { err.println("--file: no such file"); return 64 }
+        if (file != null && !file.isFile) { err.println("--file: no such file"); return 64 }
         if (token.isBlank()) { err.println("DEBUG_CONVERSE_TOKEN is not set"); return 64 }
         val base = URI.create((opt("--url") ?: "http://127.0.0.1:8080").trimEnd('/'))
         if (base.host !in setOf("127.0.0.1", "localhost", "::1", "[::1]")) { err.println("refused: the debug routes are loopback only"); return 64 }
@@ -54,7 +55,7 @@ object VisionReadCli {
 
         fun post(path: String, page: Int?): Pair<Int, String>? = try {
             val body = JsonObject(buildMap {
-                put("syntheticUserId", JsonPrimitive(label)); put("path", JsonPrimitive(file.absolutePath)); put("ocr", JsonPrimitive(ocr))
+                put("syntheticUserId", JsonPrimitive(label)); put("path", JsonPrimitive(file!!.absolutePath)); put("ocr", JsonPrimitive(ocr))
                 page?.let { put("page", JsonPrimitive(it)) }
             })
             http.send(
@@ -65,6 +66,26 @@ object VisionReadCli {
             ).let { it.statusCode() to it.body() }
         } catch (e: java.io.IOException) { err.println("could not reach the engine at ${base.host}:${base.port}"); null }
 
+        opt("--show")?.let { shown ->
+            val page = shown.toIntOrNull() ?: run { err.println("--show: not a page number"); return 64 }
+            val r = try {
+                http.send(
+                    HttpRequest.newBuilder(URI.create("$base/debug/sources/$source/vision/chunks")).timeout(Duration.ofMinutes(1))
+                        .header("Authorization", "Bearer $token").header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(JsonObject(mapOf("syntheticUserId" to JsonPrimitive(label), "page" to JsonPrimitive(page))).toString())).build(),
+                    HttpResponse.BodyHandlers.ofString(),
+                )
+            } catch (e: java.io.IOException) { err.println("could not reach the engine at ${base.host}:${base.port}"); return 2 }
+            if (r.statusCode() != 200) { err.println("engine answered ${r.statusCode()}: ${r.body().take(300)}"); return 2 }
+            val chunks = json.parseToJsonElement(r.body()).jsonArray
+            if (chunks.isEmpty()) out.println("p.$page: no vision chunk")
+            chunks.forEach { c ->
+                val o = c.jsonObject
+                out.println("p.$page: chunk ${o["ordinal"]!!.jsonPrimitive.content} (${o["readingKey"]?.jsonPrimitive?.contentOrNull}), ${o["extractor"]?.jsonPrimitive?.contentOrNull}")
+                out.println(o["text"]!!.jsonPrimitive.content)
+            }
+            return 0
+        }
         val (code, body) = post("plan", null) ?: return 2
         if (code != 200) { err.println("engine answered $code: ${body.take(300)}"); return 2 }
         val plan = json.parseToJsonElement(body).jsonArray.map { it.jsonObject }

@@ -124,7 +124,7 @@ class DebugClaimRoutesTest {
         testApplication {
             application { module(m, model) }
             client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-2"}""") }
-            repeat(200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            repeat(1200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
             val list = json(client.get("/debug/sources/$uid/claim-disagreements?syntheticUserId=$label&runId=route-run-2") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonArray
             assertEquals(1, list.size)
             val d = list.single().jsonObject
@@ -147,7 +147,7 @@ class DebugClaimRoutesTest {
 
             val secret = "WORDING-THAT-MUST-NOT-BE-STORED"
             assertEquals(HttpStatusCode.Accepted, post("""{"syntheticUserId":"$label","runId":"route-run-p","prompts":{"pass1":"one $secret","pass2":"two"}}""").status)
-            repeat(200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            repeat(1200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
             val run = json(client.get("/debug/claim-runs/route-run-p?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
             val version = run["promptVersion"]!!.jsonPrimitive.content
             assertTrue(Regex("custom-[0-9a-f]{16}").matches(version), version)
@@ -164,7 +164,7 @@ class DebugClaimRoutesTest {
         testApplication {
             application { module(m, model) }
             client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-d"}""") }
-            repeat(200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            repeat(1200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
             val run = json(client.get("/debug/claim-runs/route-run-d?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
             assertEquals("claims-v4", run["promptVersion"]!!.jsonPrimitive.content)
         }

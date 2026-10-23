@@ -99,6 +99,46 @@ class VisionBuildTest {
     }
 
     @Test
+    fun `a chart's values are kept with labels made of its category and legend text printed apart from them`() {
+        val chart = """
+            Figure 2.2 Families with Middle School Students Rated Learning Environments Less Positively
+            Than Elementary-Only Families
+
+            High quality learning environment
+
+            Absence of disrespect or bias
+
+            45%
+
+            61%
+
+            48%
+
+            66%
+
+            0%
+
+            20%
+
+            Percentage of families agreeing
+
+            Families with middle school students
+
+            Families with only elementary students
+        """.trimIndent()
+        val heading = "Figure 2.2 Families with Middle School Students Rated Learning Environments Less Positively Than Elementary-Only Families"
+        val reading = listOf(PageSection(heading, numbers = listOf(
+            PageNumber("45%", "High quality learning environment, Families with middle school students"),
+            PageNumber("61%", "High quality learning environment, Families with only elementary students"),
+            PageNumber("66%", "Absence of disrespect or bias, Families with only elementary students, 2024-25"),
+        )))
+        val built = VisionReading.build(reading, StructureCheck.check(reading, chart))
+        assertTrue("$heading: 45% High quality learning environment, Families with middle school students" in built.text.lines(), built.text)
+        assertEquals(2, built.entries.size, built.rejected.toString())
+        assertTrue(built.rejected.single().contains(":: 66% — label not on the page"), "a year the page does not print is not a label: ${built.rejected}")
+    }
+
+    @Test
     fun `words far apart, a one-letter word, or a single word are never matched apart`() {
         val text = StructureCheck.normalize("SCENARIO B closes 11 schools. Plan A is the status quo. Five-year plan for the district and its many neighborhood schools buffer")
         val words = StructureCheck.words(text)
