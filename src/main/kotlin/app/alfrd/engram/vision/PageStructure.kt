@@ -36,13 +36,17 @@ object PageStructure {
         "(value) and the words printed next to it that say what it counts (label, empty if the heading itself says it); every list item; every table " +
         "as rows of cells with the header row first; and every chart with its title and all the text printed in it (axis titles, ticks, legend, data " +
         "labels). Never estimate a value from a line or bar: only text that is printed. Nest a heading inside the heading it sits under. A number " +
-        "belongs to the heading it sits under, never to one above or beside it. Copy all text exactly as printed; do not correct, translate or summarize."
+        "belongs to the heading it sits under, never to one above or beside it. For a number in a chart, its label names the category, the series " +
+        "(legend entry) and the year it belongs to, using the words printed for them. A figure's title covers only the figure: text after the figure " +
+        "belongs under the section heading, not under the figure. Copy all text exactly as printed, including accents or their absence; do not " +
+        "correct, translate or summarize."
 
     /**
      * Versioned with the prompt and with what [StructureCheck] and [VisionReading.build] keep: a reading made with another prompt or kept by
      * another check is another reading. v2: wrapped and interleaved text is matched, invented headings no longer drop what is under them.
+     * v3: chart labels carry category, series and year and are checked word by word; prose after a figure is not the figure's.
      */
-    const val VERSION = "structure-v2"
+    const val VERSION = "structure-v3"
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 

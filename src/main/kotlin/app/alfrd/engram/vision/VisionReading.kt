@@ -43,7 +43,7 @@ data class PageReadingResult(
  * Reads a page of a stored PDF Source with the local vision model and adds what can be checked as one more chunk of that Source.
  *
  * **Routing.** Prose pages stay with the text reader. A page goes to vision when it has a table the text reader found, an embedded image of
- * chart size, a dense designed layout (many text blocks: cards, posters), or no text layer at all ([route]).
+ * chart size, a figure or table caption, a dense designed layout (many short text blocks: cards, posters), or no text layer ([route]).
  *
  * **Two independent readers.** The vision model (8083) proposes the page's structure ([PageStructure]); every heading and value is then looked
  * for in the page's own text: the text layer in reading order, and an OCR transcript of the image (8084) when given ([StructureCheck]). Only
@@ -92,11 +92,19 @@ class VisionReadingService(
         val started = System.currentTimeMillis()
         val png = PageImages.render(pdf, page, dpi)
         val readingText = prep.chunks.filter { it.page == page }.joinToString("\n") { it.text }
-        val answer = try { structure.read(png, PageStructure.PROMPT) } catch (e: Exception) {
-            return PageReadingResult(page, "failed", failure = "vision server: ${e::class.java.simpleName}", ms = System.currentTimeMillis() - started)
+        var failure: Exception? = null
+        fun ask(): VisionAnswer? = try { structure.read(png, PageStructure.PROMPT) } catch (e: Exception) { failure = e; null }
+        fun serverFailed() = PageReadingResult(page, "failed", failure = "vision server: ${failure?.let { it::class.java.simpleName }}", ms = System.currentTimeMillis() - started)
+        // An answer that cannot be read is asked for once more: the model samples, so a second answer is a fresh one.
+        var answer = ask() ?: return serverFailed()
+        var parsed = runCatching { PageStructure.parse(answer.text) }
+        if (parsed.isFailure) {
+            answer = ask() ?: return serverFailed()
+            parsed = runCatching { PageStructure.parse(answer.text) }
         }
-        val sections = try { PageStructure.parse(answer.text) } catch (e: IllegalArgumentException) {
-            return PageReadingResult(page, "failed", model = answer.model, failure = "vision answer: ${e.message}", ms = System.currentTimeMillis() - started)
+        val sections = parsed.getOrElse { e ->
+            val why = if (answer.finishReason == "length") "cut off at the token limit, ${answer.completionTokens} tokens" else "finish ${answer.finishReason}, ${answer.completionTokens} tokens"
+            return PageReadingResult(page, "failed", model = answer.model, failure = "vision answer, twice: ${e.message} ($why)", ms = System.currentTimeMillis() - started)
         }
         val ocrAnswer = if (useOcr && ocr != null) {
             try { ocr.read(png, "OCR:") } catch (e: Exception) {
@@ -133,6 +141,15 @@ object VisionReading {
     /** Blocks of text on one page above which a page counts as a designed layout (cards, posters) rather than prose. */
     const val DENSE_BLOCKS = 12
 
+    /**
+     * ...and the most characters a block may average for it to count: cards and posters are many short blocks; a prose page with many
+     * paragraphs and footnotes is many long ones (the SEGC prose pages average 200 to 390, the PPS poster 82, the planning-floor table 79).
+     */
+    const val DESIGNED_MAX_CHARS_PER_BLOCK = 140
+
+    /** A line that starts a figure or table caption: a chart drawn as vector shapes has no image and few blocks, but it has its caption. */
+    private val CAPTION = Regex("^\\s*(Figure|Table|Exhibit|Chart)\\s+[0-9]+(\\.[0-9]+)*\\b")
+
     /** Smallest embedded image, in pixels, that counts as a chart or figure rather than a logo or icon. */
     const val MIN_IMAGE_PIXELS = 300 * 200
 
@@ -151,8 +168,12 @@ object VisionReading {
             val reasons = ArrayList<String>()
             if (prepared.chunks.any { it.page == page && it.kind == "table" }) reasons += "table"
             images[page]?.let { reasons += it }
-            val blocks = prepared.chunks.filter { it.page == page && it.kind == "text" }.sumOf { it.blocks.size }
-            if (blocks >= DENSE_BLOCKS) reasons += "designed layout ($blocks blocks)"
+            val texts = prepared.chunks.filter { it.page == page && it.kind == "text" }
+            val blocks = texts.sumOf { it.blocks.size }
+            val perBlock = if (blocks == 0) 0 else texts.sumOf { it.text.length } / blocks
+            if (blocks >= DENSE_BLOCKS && perBlock <= DESIGNED_MAX_CHARS_PER_BLOCK) reasons += "designed layout ($blocks blocks, $perBlock chars each)"
+            prepared.chunks.filter { it.page == page }.flatMap { it.text.lines() }.firstOrNull { CAPTION.containsMatchIn(it) }
+                ?.let { reasons += "caption (${it.trim().take(40)})" }
             if (prepared.pages.firstOrNull { it.page == page }?.path == "unread") reasons += "no text layer"
             PageRoute(page, reasons)
         }

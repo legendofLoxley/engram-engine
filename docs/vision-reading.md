@@ -8,7 +8,10 @@ Notion task "Vision-aware PDF reading: get the PPS documents accurate".
 
 Status: first box run 2026-10-22 (reader v1) on the districtwide sheet and the SEGC Equity Audit; results in the Notion task. v2 fixes what
 that run showed: printed table headers and card text rejected because the text layer interleaves wrapped cells, numbers repeating table cells,
-long top headings losing their claims, and values dropped under headings the model made up.
+long top headings losing their claims, and values dropped under headings the model made up. Second box run 2026-10-22 (v2, identity
+`pps-vision-2`): p.146 complete, no wrong value in 10 spot checks; v3 fixes what it showed: prose pages routed for nothing (17 of 20 empty
+Equity pages), chart values lost because their labels are assembled from text printed apart, two unreadable answers, prose under a figure
+filed under the figure, chart values without their year.
 
 ## Servers on the box (2026-10-22)
 
@@ -23,10 +26,14 @@ long top headings losing their claims, and values dropped under headings the mod
 ## Reading a source's pages (`VisionReadCli`)
 
 1. **Route.** A page goes to vision when the text reader found a table on it, it embeds an image of at least 300×200 pixels (charts, figures;
-   logos and icons are smaller), it has at least 12 text blocks (cards, posters), or it has no text layer. Everything else stays with the text
+   logos and icons are smaller), it has a line starting a figure or table caption ("Figure 2.5", "Table 3.1": charts drawn as shapes), it has at
+   least 12 text blocks averaging at most 140 characters (cards, posters; a prose page of many paragraphs and footnotes averages 200 or more),
+   or it has no text layer. Everything else stays with the text
    reader. `--pages plan` prints the routing.
 2. **Read** each routed page as below, then **keep** a value only when it is found on the page, is not found only outside the heading it was
-   filed under, and (for a number) the words printed with it are found too. A table cell is kept with its row label and column header, all three
+   filed under, and (for a number) its label is printed: as written, or each of its words somewhere on the page (a chart value's label is
+   its category, legend entry and year, printed apart from it). An answer that cannot be read is asked for once more; a second failure says
+   why (for example cut off at the token limit). A table cell is kept with its row label and column header, all three
    found. Chart text is kept as text of the chunk but makes no claims. What is left out is reported per page (`rejectedValues`, naming which
    part failed: the cell, its row label or its column header), never stored.
    - A heading the page does not have is left out of the path; what the model put under it is checked as under the heading above. A number
@@ -39,7 +46,7 @@ long top headings losing their claims, and values dropped under headings the mod
    SCENARIO A > ATTENDANCE BOUNDARY CHANGES: 38
    Figure 6.1 Deriving Planning Floors for Well Resourced Schools > Elementary > Planning floor range estimate: Approximately 450+
    ```
-   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v2`): reading a page
+   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v3`): reading a page
    again adds nothing and calls no model, so a stopped run is resumed by running it again. The file must be the Source's own (same SHA-256).
 4. **Claims:** `ClaimExtractionCli --reader structure` makes one claim per kept entry, quoted by its line, placed under its top heading, with
    its sub-headings as the subject (a top heading longer than a place can be, such as a survey question set as a title, goes in the subject). No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
@@ -50,11 +57,12 @@ java -cp engram-engine.jar app.alfrd.engram.scripts.VisionReadCliKt --user pps-d
 java -cp engram-engine.jar app.alfrd.engram.scripts.ClaimExtractionCliKt --user pps-drive-test --source <uid> --reader structure --run-id <id>
 ```
 Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM_BASE_URL` (default `http://127.0.0.1:8084/v1`), loopback only.
-The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
+`--show N` prints the stored vision chunk of page N (`POST /debug/sources/{uid}/vision/chunks`; text and entries), so what was kept can be
+checked against the page. The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
 The run stops after `--stop-after` pages fail in a row (a server that is down fails every page); run the same command again to resume.
 
-Chunks are keyed by reader version, so a v2 reading of a page already read by v1 is a second chunk beside the first, and its claims sit beside
-v1's. Read v2 into a Source that has no v1 chunks (a fresh synthetic identity) rather than over v1.
+Chunks are keyed by reader version (now `structure-v3`), so a new version's reading of a page already read is a second chunk beside the
+first, and its claims sit beside the old ones. Read a new version into a Source that has no older vision chunks (a fresh synthetic identity).
 
 ## One page, nothing written (`VisionPageCli`)
 
@@ -85,5 +93,13 @@ Exit status: 0 read and checked, 2 a server failed or its answer could not be re
 - 8083 takes about 100 s per page with reasoning on (`--no-thinking` is faster; its accuracy is not yet measured).
 - A claim from a vision chunk and a claim from the text reader can state the same fact in two places (a narrative sentence and a card count);
   they are separate claims with separate provenance. Nothing merges them yet.
-- Routing thresholds (12 blocks, 300×200 pixels) are first guesses from the PPS fixtures; the plan output shows why each page was routed.
+- Routing thresholds (12 blocks of at most 140 characters, 300×200 pixels) are set from the three PPS documents; the plan output shows why
+  each page was routed. On the SEGC Equity Audit they route 17 of 157 pages (v2 routed 56, mostly prose).
+- The section check passes a value that lies anywhere after its heading and before the next one, so a figure caption's span can swallow the
+  paragraph after the figure (v2 spot check: 2 of 10 claims). The v3 prompt asks for that text under the section heading; the check cannot
+  tell the figure from the paragraph.
+- A name the model misspells (v2: "Sittón" for the printed "Sitton") is rejected, and with it the list item that holds it. Accents are not
+  folded in the check on purpose: a stored line must be the page's spelling.
+- The model sometimes leaves a chart value's year out of its label (v2: "216 White students" without 2020–21). The v3 prompt asks for it; the
+  check cannot add what the model leaves out.
 - 8083 is a transient unit on the box: after a reboot it must be started again (see its Deployments row).

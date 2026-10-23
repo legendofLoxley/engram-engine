@@ -6,6 +6,8 @@ import app.alfrd.engram.pdf.PdfPreparationCache
 import app.alfrd.engram.pdf.PdfPreparer
 import app.alfrd.engram.pdf.TesseractOcr
 import app.alfrd.engram.vision.LocalVisionClient
+import app.alfrd.engram.vision.ReadingEntry
+import app.alfrd.engram.vision.VisionReading
 import app.alfrd.engram.vision.VisionModel
 import app.alfrd.engram.vision.VisionReadingService
 import com.arcadedb.database.Database
@@ -29,10 +31,22 @@ data class DebugVisionRequest(
     val ocr: Boolean = true,
 )
 
+/** Which synthetic user's vision chunks to show, optionally of one page only. */
+@Serializable
+data class DebugVisionChunksRequest(val syntheticUserId: String, val page: Int? = null)
+
+/** A vision chunk as stored: its text and its checked entries, so a run can be checked against the page. */
+@Serializable
+data class VisionChunkView(
+    val uid: String, val ordinal: Int, val page: Int?, val location: String, val extractor: String?, val readingKey: String?,
+    val text: String, val entries: List<ReadingEntry>,
+)
+
 /**
  * Vision reading of a stored PDF Source: `POST /debug/sources/{uid}/vision/plan` says which pages go to vision and why; `POST
  * /debug/sources/{uid}/vision/page` reads one page and adds its checked structure as a chunk (see [VisionReadingService]). One page per call:
- * a page takes the vision model about a hundred seconds, and a caller can follow and resume page by page. Same `debug-token` auth,
+ * a page takes the vision model about a hundred seconds, and a caller can follow and resume page by page. `POST
+ * /debug/sources/{uid}/vision/chunks` returns the vision chunks already added (text and entries), so what was stored can be checked. Same `debug-token` auth,
  * `DEBUG_CONVERSE_ENABLED` gate and loopback-only rule as the other `/debug/sources` routes; synthetic identities only, never owner-jacob; the
  * loopback check comes before the body is read. A file is named by path only if it ends `.pdf` (at most [MAX_PDF_BYTES]). The vision servers
  * are local only ([LocalVisionClient] refuses any other host): VISION_LLM_BASE_URL (default 8083) and OCR_LLM_BASE_URL (default 8084).
@@ -77,6 +91,17 @@ fun Application.configureDebugVisionRoutes(
                     val (email, uid, bytes) = call.input() ?: return@post
                     val plan = try { service.plan(email, uid, bytes) } catch (e: IllegalArgumentException) { return@post call.bad(e.message ?: "bad request") }
                     call.respond(HttpStatusCode.OK, plan)
+                }
+                post("/sources/{uid}/vision/chunks") {
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    val req = call.receive<DebugVisionChunksRequest>()
+                    val email = DebugConverseService.resolveUserId(req.syntheticUserId.takeIf { it.isNotBlank() } ?: return@post call.bad("syntheticUserId is required"))
+                    if (email.contains("owner-jacob")) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "that identity is real data and is never used by the debug routes"))
+                    val uid = call.parameters["uid"].orEmpty()
+                    if (store.sourceByUid(email, uid) == null) return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown source"))
+                    call.respond(HttpStatusCode.OK, store.chunks(email, uid).filter { it.kind == VisionReading.CHUNK_KIND && (req.page == null || it.page == req.page) }.map {
+                        VisionChunkView(it.uid, it.ordinal, it.page, it.location, it.extractor, it.readingKey, it.text, VisionReading.entries(it))
+                    })
                 }
                 post("/sources/{uid}/vision/page") {
                     val (email, uid, bytes) = call.input() ?: return@post

@@ -26,6 +26,7 @@ class VisionReadCliTest {
         server.createContext("/debug/sources") { ex ->
             val body = ex.requestBody.readBytes().decodeToString(); posted += "${ex.requestURI.path} $body"
             val (code, out) = when {
+                ex.requestURI.path.endsWith("/vision/chunks") -> 200 to """[{"ordinal":7,"readingKey":"s1|2|structure-v3","extractor":"vision:m","text":"SCENARIO A\nSCENARIO A: 14 schools close","entries":[]}]"""
                 ex.requestURI.path.endsWith("/vision/plan") -> 200 to """[{"page":1,"reasons":[]},{"page":2,"reasons":["designed layout (40 blocks)"]},{"page":3,"reasons":["table"]}]"""
                 body.contains("\"page\":3") -> 502 to """{"page":3,"outcome":"failed","failure":"vision server: IOException","ms":4}"""
                 else -> 200 to """{"page":2,"outcome":"added","accepted":18,"rejected":1,"ms":101000,"model":"Qwen3.8-27B","rejectedValues":["SCENARIO B :: 13 — not on the page"]}"""
@@ -64,6 +65,14 @@ class VisionReadCliTest {
         assertEquals(3, posted.size, "plan, then two failed pages; the rest are not tried")
         assertTrue(err.contains("stopped: 2 pages in a row failed; 2 page(s) not tried"), err)
         assertTrue(out.contains("done: 2 of 4 page(s)"), out)
+    }
+
+    @Test
+    fun `show prints a stored vision chunk and needs no file`() {
+        val (code, out, _) = run("--user", "v1", "--source", "s1", "--show", "2", "--url", url())
+        assertEquals(0, code, out)
+        assertTrue(out.contains("p.2: chunk 7 (s1|2|structure-v3)") && out.contains("SCENARIO A: 14 schools close"), out)
+        assertTrue(posted.single().startsWith("/debug/sources/s1/vision/chunks") && posted.single().contains("\"page\":2"))
     }
 
     @Test

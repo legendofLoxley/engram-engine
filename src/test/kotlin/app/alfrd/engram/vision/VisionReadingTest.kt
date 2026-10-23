@@ -140,6 +140,41 @@ class VisionReadingTest {
     }
 
     @Test
+    fun `an unreadable answer is asked for once more, and a second one fails with the reason`() {
+        val bytes = PdfFixtures.poster()
+        val uid = commitPdf(bytes, "file:cards.pdf")
+        var calls = 0
+        val flaky = VisionModel { _, _ -> calls++; if (calls == 1) VisionAnswer("{\"sections\": [", "m", 5, "length", 8000) else VisionAnswer(posterAnswer, "m", 5, "stop", 10) }
+        assertEquals("added", service(flaky).readPage(ana, uid, bytes, 1).outcome)
+        assertEquals(2, calls)
+        val other = commitPdf(PdfFixtures.scenarios(), "file:districtwide.pdf")
+        val cut = VisionModel { _, _ -> VisionAnswer("{\"sections\": [", "m", 5, "length", 8000) }
+        val r = service(cut).readPage(ana, other, PdfFixtures.scenarios(), 1)
+        assertEquals("failed", r.outcome)
+        assertTrue(r.failure!!.contains("twice") && r.failure!!.contains("cut off at the token limit, 8000 tokens"), r.failure)
+    }
+
+    @Test
+    fun `many short blocks are a designed layout, many paragraphs of prose are not`() {
+        // Prose paragraphs as long as the SEGC report's (its routed prose pages average 200 to 390 characters a block).
+        val para = listOf(
+            "The district should identify the educational benefit students are expected to receive",
+            "from any change, not only the enrollment or facilities problem it is trying to solve, and",
+            "should be able to say which students gain what, and when.",
+        )
+        val prose = PdfFixtures.build(listOf { p -> (0 until 14).forEach { i -> p.lines(72f, 50f + i * 52, para, 10f) } })
+        val cards = PdfFixtures.build(listOf { p -> (0 until 16).forEach { i -> p.text(72f + (i % 4) * 130, 80f + (i / 4) * 140, "CARD ${i + 1}: ${i * 3} schools", 10f) } })
+        val proseUid = commitPdf(prose, "file:prose14.pdf"); val cardsUid = commitPdf(cards, "file:cards16.pdf")
+        val proseRoute = service(Scripted("{}")).plan(ana, proseUid, prose).single()
+        val cardsRoute = service(Scripted("{}")).plan(ana, cardsUid, cards).single()
+        assertTrue(proseRoute.reasons.isEmpty(), proseRoute.toString())
+        assertTrue(cardsRoute.reasons.any { it.startsWith("designed layout") }, cardsRoute.toString())
+        val captioned = PdfFixtures.build(listOf { p -> p.lines(72f, 50f, para, 10f); p.text(72f, 200f, "Figure 2.5 Students Left PPS at About Half the Rate of their Peers", 10f) })
+        val capUid = commitPdf(captioned, "file:captioned.pdf")
+        assertTrue(service(Scripted("{}")).plan(ana, capUid, captioned).single().reasons.any { it.startsWith("caption (Figure 2.5") })
+    }
+
+    @Test
     fun `table cells are kept with their row label and column header`() {
         val bytes = PdfFixtures.scenarios()
         val uid = commitPdf(bytes, "file:districtwide.pdf")

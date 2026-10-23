@@ -99,6 +99,11 @@ class DebugVisionRoutesTest {
             assertEquals("added", page["outcome"]!!.jsonPrimitive.content)
             assertEquals("already there", json(post("/debug/sources/$uid/vision/page", """{"syntheticUserId":"$label","path":"$pdf","page":1}""").bodyAsText()).jsonObject["outcome"]!!.jsonPrimitive.content)
             assertEquals(1, calls)
+            val chunks = json(post("/debug/sources/$uid/vision/chunks", """{"syntheticUserId":"$label","page":1}""").bodyAsText()).jsonArray
+            assertEquals("SCENARIO A\nSCENARIO A > BOUNDARY CHANGES\nSCENARIO A > BOUNDARY CHANGES: 38", chunks.single().jsonObject["text"]!!.jsonPrimitive.content)
+            assertEquals(1, chunks.single().jsonObject["entries"]!!.jsonArray.size)
+            assertEquals(HttpStatusCode.Forbidden, post("/debug/sources/$uid/vision/chunks", """{"syntheticUserId":"owner-jacob"}""").status)
+            assertEquals(HttpStatusCode.NotFound, post("/debug/sources/nope/vision/chunks", """{"syntheticUserId":"$label"}""").status)
 
             assertEquals(HttpStatusCode.Accepted, post("/debug/sources/$uid/claims/extract", """{"syntheticUserId":"$label","runId":"s1","reader":"structure"}""").status)
             assertEquals(HttpStatusCode.BadRequest, post("/debug/sources/$uid/claims/extract", """{"syntheticUserId":"$label","runId":"s2","reader":"magic"}""").status)

@@ -31,7 +31,7 @@ data class CheckedValue(
  * ("Five-year buffer") can come out with its neighbour's words inside it ("Five-year Planning floor buffer"), and a card's title and its text can
  * sit apart with other words between. A value of two or more words that is not found as written is found when all its words occur, as whole
  * words, within a few words of each other ([SLACK]), in any order. Single words and numbers are never matched this way, nor any value with a
- * one-letter word ("SCENARIO A" must be printed as such).
+ * one-letter word ("SCENARIO A" must be printed as such). A number's label is found when each of its words is printed anywhere on the page.
  */
 object StructureCheck {
 
@@ -112,6 +112,15 @@ object StructureCheck {
 
         fun found(v: String) = reading.locate(v).isNotEmpty() || (ocr != null && ocr.locate(v).isNotEmpty())
 
+        // A label is what the number counts, often assembled from text printed apart from it (a chart's category, its legend, the year on its
+        // axis): it is found when each of its words is printed on the page. The number itself is still checked where it sits.
+        val pageWords = reading.words.map { it.text }.toSet() + (ocr?.words?.map { it.text } ?: emptyList())
+        fun labelFound(label: String): Boolean {
+            if (label.isBlank() || found(label)) return true
+            val w = words(normalize(label)).map { it.text }.filter { it.length > 1 || it[0].isDigit() }
+            return w.isNotEmpty() && pageWords.containsAll(w)
+        }
+
         // [lo, hi) is the span of the parent heading in the reading-order text; a heading is looked for inside it, in order after its previous
         // sibling, and runs to its next sibling (or the end of the parent's span).
         fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int) {
@@ -130,7 +139,7 @@ object StructureCheck {
                     val at = reading.locate(v)
                     out += CheckedValue(
                         path, kind, v, found(v), if (from == null || at.isEmpty()) null else at.any { it in from until to },
-                        label, label.isBlank() || found(label),
+                        label, labelFound(label),
                     )
                 }
                 s.numbers.forEach { add("number", it.value, it.label) }
