@@ -56,6 +56,19 @@ class DebugClaimRoutesTest {
         ).source.uid
     }
 
+    /**
+     * Polls the run through its route until it is complete (up to 20 s). Through the route, not the graph: a read on the test's own thread can
+     * keep seeing the graph as it was, and the poll then never ends.
+     */
+    private suspend fun ApplicationTestBuilder.awaitRun(runId: String) {
+        repeat(400) {
+            val status = Json.parseToJsonElement(client.get("/debug/claim-runs/$runId?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText())
+                .let { (it as? kotlinx.serialization.json.JsonObject)?.get("status")?.jsonPrimitive?.content }
+            if (status == "complete") return
+            delay(50)
+        }
+    }
+
     private fun json(s: String) = Json.parseToJsonElement(s)
 
     @Test
@@ -124,7 +137,7 @@ class DebugClaimRoutesTest {
         testApplication {
             application { module(m, model) }
             client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-2"}""") }
-            repeat(1200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            awaitRun("route-run-2")
             val list = json(client.get("/debug/sources/$uid/claim-disagreements?syntheticUserId=$label&runId=route-run-2") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonArray
             assertEquals(1, list.size)
             val d = list.single().jsonObject
@@ -147,7 +160,7 @@ class DebugClaimRoutesTest {
 
             val secret = "WORDING-THAT-MUST-NOT-BE-STORED"
             assertEquals(HttpStatusCode.Accepted, post("""{"syntheticUserId":"$label","runId":"route-run-p","prompts":{"pass1":"one $secret","pass2":"two"}}""").status)
-            repeat(1200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            awaitRun("route-run-p")
             val run = json(client.get("/debug/claim-runs/route-run-p?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
             val version = run["promptVersion"]!!.jsonPrimitive.content
             assertTrue(Regex("custom-[0-9a-f]{16}").matches(version), version)
@@ -164,7 +177,7 @@ class DebugClaimRoutesTest {
         testApplication {
             application { module(m, model) }
             client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-d"}""") }
-            repeat(1200) { if (m.getDatabase().query("sql", "SELECT status FROM ExtractionRun").use { it.hasNext() && it.next().getProperty<String>("status") == "complete" }.not()) delay(50) }
+            awaitRun("route-run-d")
             val run = json(client.get("/debug/claim-runs/route-run-d?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
             assertEquals("claims-v4", run["promptVersion"]!!.jsonPrimitive.content)
         }
