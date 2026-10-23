@@ -102,8 +102,10 @@ Exit status: 0 read and checked, 2 a server failed or its answer could not be re
 - The section check passes a value that lies anywhere after its heading and before the next one, so a figure caption's span can swallow the
   paragraph after the figure (v2 spot check: 2 of 10 claims). The v3 prompt asks for that text under the section heading; the check cannot
   tell the figure from the paragraph.
-- A misread name is corrected only to the one word the page prints within two edits with the same first letter, for capitalized words of
-  five letters or more; a shorter name, or one with two near neighbours on the page, is still rejected with its item.
+- A misread name is corrected only to the nearest word the page prints within two edits with the same first letter, for capitalized words of
+  five letters or more, taking the text layer's words before the OCR transcript's (v4 run: OCR's own misreading of "Duniway" made two
+  candidates, and Scenario A's whole boundary list was rejected for "Duniwary"); a shorter name, or one with two equally near neighbours, is
+  still rejected with its item.
 - Values often lose their context: "78% students of color" without the school or year, "150 students" without "over" (v3 spot check: 5 of
   10). The value is right and is checked; what it is about rests on the model's label and the headings.
 - The model sometimes leaves a chart value's year out of its label (v2: "216 White students" without 2020–21). The v3 prompt asks for it; the
