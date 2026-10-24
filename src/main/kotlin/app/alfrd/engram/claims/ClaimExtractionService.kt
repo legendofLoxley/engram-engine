@@ -85,6 +85,7 @@ class ClaimExtractionService(
             }
             // What the Source's own text defines as short forms, before any claim is attached: the same Source read twice gives the same things.
             claims.recordDefinedAliases(userEmail, sourceUid, chunks)
+            claims.seedAliases(userEmail, resolver)
             val names = (stored?.modelName.orEmpty()).split(" | ").filter { it.isNotBlank() }.toMutableSet()
             val tally = Tally(stored?.report ?: blank(runId, sourceUid, model, chunks.size, expectModel))
             var next = stored?.chunksDone ?: 0
@@ -273,7 +274,7 @@ class ClaimExtractionService(
                     r = r.copy(failures = r.failures + "a claim in chunk ${draftClaims[i].chunkUid.take(8)} could not be committed")
                 } else {
                     claims.markEstablished(userEmail, uid, source.uid, draftClaims[i], runId)
-                    claims.attachContext(userEmail, uid, source.uid, draftClaims[i].chunkUid, draftClaims[i], runId, resolver, source.issuer)
+                    claims.attachContext(userEmail, uid, source.uid, draftClaims[i].chunkUid, draftClaims[i], runId, source.issuer)
                     r = if (item.created) r.copy(claimsEstablished = r.claimsEstablished + 1) else r.copy(claimsAlreadyThere = r.claimsAlreadyThere + 1)
                 }
             }
@@ -291,7 +292,7 @@ class ClaimExtractionService(
                 userEmail, uid, place.chunk.uid, WRITER, place.claim.claimant, opKey = "src:${source.uid}:at:${sha(place.key)}:${place.chunk.ordinal}",
                 draftQuote = place.claim.quote, runId = runId,
             )
-            if (outcome != LinkOutcome.REFUSED) claims.attachContext(userEmail, uid, source.uid, place.chunk.uid, place.claim, runId, resolver, source.issuer)
+            if (outcome != LinkOutcome.REFUSED) claims.attachContext(userEmail, uid, source.uid, place.chunk.uid, place.claim, runId, source.issuer)
             r = when (outcome) {
                 LinkOutcome.CREATED -> r.copy(locationsAdded = r.locationsAdded + 1)
                 LinkOutcome.ALREADY_LINKED -> r.copy(claimsAlreadyThere = r.claimsAlreadyThere + 1)

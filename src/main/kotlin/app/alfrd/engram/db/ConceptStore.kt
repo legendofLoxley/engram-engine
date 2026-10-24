@@ -33,15 +33,17 @@ data class ConceptCandidate(
  * Things (Concepts) that document claims are ABOUT, identified by name + kind + parent and never merged on a guess.
  *
  * **Identity.** "Clark (school, part of PPS)" and "Clark (person)" are two Concepts: one is reused only when name, kind and parent all
- * match (names compared without case, punctuation or a leading "the"; known aliases resolved first). A document usually states the kind
- * and the parent (a school in a PPS report), so that is what it is filed under.
+ * match (names compared without case, punctuation or a leading "the"). A document usually states the kind and the parent (a school in a
+ * PPS report), so that is what it is filed under. Names are filed as printed: the alias list never changes what a claim is linked to.
  *
  * **Possibly the same.** A new Concept whose name another Concept already has is linked to it by `POSSIBLY_SAME` with the reason they
  * were kept apart. That link is evidence, not a decision: a person or alfrd settles it later, and it can be undone. Concepts made in
  * conversation (kind `topic`, by the Horizon) are never reused for a document claim, and the Horizon never reuses a document Concept.
  *
- * **Read time.** [candidates] answers a name with every Concept that has it, each with its kind, parent, possible twins and how much of
- * the owner's evidence is about it; the caller picks. Concepts are shared, so every edge here carries its owner and only the owner's
+ * **Read time.** Aliases (the owner's [AliasRegistry], given as this store's resolver) apply only when reading: [candidates] answers a name
+ * with every Concept that has it or one of its aliases, each with its kind, parent, possible twins and how much of the owner's evidence is
+ * about it, and [entities] groups Concepts the alias list says are one. Turning an alias off splits the group at once, with nothing to
+ * rewrite. The caller picks. Concepts are shared, so every edge here carries its owner and only the owner's
  * edges are counted.
  */
 class ConceptStore(private val db: Database, private val aliases: ClaimantResolver = ClaimantResolver()) {
@@ -70,8 +72,11 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
 
     private fun canonical(name: String) = aliases.canonical(name) ?: name.trim()
 
+    private fun tidy(name: String) = name.trim().replace(Regex("\\s+"), " ")
+
+    /** The identity of a thing as printed: no alias is applied, so a merge is never written into the graph. */
     fun key(name: String, kind: String, parent: String?): String =
-        "${ClaimantResolver.key(canonical(name))}|${kindOf(kind)}|${ClaimantResolver.key(parent?.let { canonical(it) })}"
+        "${ClaimantResolver.key(name)}|${kindOf(kind)}|${ClaimantResolver.key(parent)}"
 
     /**
      * The Concept for this name, kind and parent, made if there is none. The kind is the name's own shape when it has one ([EntityRules]),
@@ -79,12 +84,12 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
      * the Concept says so. A new Concept is linked to every other that has its name, or its name without designators.
      */
     fun resolve(userEmail: String, name: String, kind: String, parent: String?, issuer: String? = null): ConceptRef {
-        val display = canonical(name).replace(Regex("\\s+"), " ")
+        val display = tidy(name)
         require(display.isNotBlank()) { "a thing needs a name" }
         val k = EntityRules.kindFor(display, kind)
-        val stated = parent?.let { canonical(it).replace(Regex("\\s+"), " ") }?.takeIf { it.isNotBlank() }
+        val stated = parent?.let { tidy(it) }?.takeIf { it.isNotBlank() }
         val fromIssuer = if (stated == null && k in EntityRules.KINDS_WITH_ISSUER_PARENT) {
-            issuer?.let { canonical(it).replace(Regex("\\s+"), " ") }?.takeIf { it.isNotBlank() && ClaimantResolver.key(it) != ClaimantResolver.key(display) }
+            issuer?.let { tidy(it) }?.takeIf { it.isNotBlank() && ClaimantResolver.key(it) != ClaimantResolver.key(display) }
         } else null
         val p = stated ?: fromIssuer
         val key = key(display, k, p)
@@ -98,7 +103,7 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
                 p?.let { set("parentName", it); set("parentOrigin", if (stated != null) "stated" else "issuer") }
                 save()
             }
-            sameName(display).filter { it.identity != v.identity }.forEach { other ->
+            sameName(display, viaAliases = false).filter { it.identity != v.identity }.forEach { other ->
                 v.newEdge("POSSIBLY_SAME", other, true).apply {
                     set("reason", reason(display, k, p, other)); set("ownerEmail", userEmail); set("createdAt", System.currentTimeMillis()); save()
                 }
@@ -120,14 +125,24 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
         }
     }
 
-    /** Every Concept whose name is [name] or, through the alias list, one of its aliases; also those that differ only by a designator. */
-    private fun sameName(name: String): List<Vertex> {
-        val names = setOf(normalizedName(name), normalizedName(canonical(name)), EntityRules.looseName(name), EntityRules.looseName(canonical(name)))
+    /**
+     * Every Concept whose name is [name], or one that differs only by a designator; with [viaAliases], also those named by one of its aliases
+     * (read time only: a new Concept is linked as possibly the same only on its own name).
+     */
+    private fun sameName(name: String, viaAliases: Boolean = true): List<Vertex> {
+        val forms = if (viaAliases) aliasForms(name) else setOf(name)
+        val names = forms.flatMap { listOf(normalizedName(it), EntityRules.looseName(it)) }.toSet()
         return names.flatMap { n -> listOf("normalizedName", "looseName").flatMap { field ->
             db.query("sql", "SELECT FROM Concept WHERE $field = :n", mapOf("n" to n)).use { rs ->
                 val out = ArrayList<Vertex>(); while (rs.hasNext()) out += rs.next().toElement().asVertex(); out
             }
         } }.distinctBy { it.identity }
+    }
+
+    /** [name], its canonical name, and every other name the alias list gives that canonical name. */
+    private fun aliasForms(name: String): Set<String> {
+        val c = canonical(name)
+        return setOf(name, c) + (aliases.groups.entries.firstOrNull { ClaimantResolver.key(it.key) == ClaimantResolver.key(c) }?.value.orEmpty())
     }
 
     /** Links a claim (or its passage) to a thing it is about. Idempotent per phrase, Concept and owner. */

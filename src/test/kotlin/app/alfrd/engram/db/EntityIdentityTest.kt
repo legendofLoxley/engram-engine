@@ -100,15 +100,25 @@ class EntityIdentityTest {
     }
 
     @Test
-    fun `a short form a page defines merges new claims into the long name, and turning the entry off splits them again`() {
+    fun `a short form a page defines groups the two names when read, and turning the entry off splits them with nothing rewritten`() {
         val entry = registry.add(ana, "Portland Public Schools", "PPS", "document", "src-1", "pdf p. 1")!!
         val long = concepts().resolve(ana, "Portland Public Schools", "public body", null)
         val short = concepts().resolve(ana, "PPS", "public body", null)
-        assertEquals(long.uid, short.uid, "the alias resolves to the one Concept")
+        assertNotEquals(long.uid, short.uid, "each name is filed as printed: the alias list never merges in the graph")
+        val a = claimAbout(long.uid); val b = claimAbout(short.uid)
+        val one = concepts().entities(ana, registry).single()
+        assertEquals("Portland Public Schools", one.name); assertEquals(listOf("PPS"), one.aliases); assertEquals(2, one.claims)
+        assertEquals(setOf(long.uid, short.uid), concepts().candidates(ana, "PPS", registry).map { it.uid }.toSet(), "a lookup by either name finds both")
+        val linksBefore = db.query("sql", "SELECT count(*) AS n FROM ABOUT").use { it.next().getProperty<Number>("n").toLong() }
+
         assertTrue(registry.setActive(ana, entry.uid, false))
-        val split = concepts().resolve(ana, "PPS", "public body", null)
-        assertNotEquals(long.uid, split.uid, "with the entry off, the next run files PPS apart")
-        assertTrue(concepts().candidates(ana, "PPS", registry).isNotEmpty())
+        val split = concepts().entities(ana, registry)
+        assertEquals(setOf("Portland Public Schools", "PPS"), split.map { it.name }.toSet(), "split at once, without a new run")
+        assertTrue(split.all { it.claims == 1 }, "no claim lost or moved")
+        assertEquals(listOf(short.uid), concepts().candidates(ana, "PPS", registry).map { it.uid }, "the lookup no longer reaches the long name")
+        assertEquals(linksBefore, db.query("sql", "SELECT count(*) AS n FROM ABOUT").use { it.next().getProperty<Number>("n").toLong() }, "no link was written or removed")
+        assertEquals(listOf(long.uid), concepts().about(ana, a).map { it.uid }); assertEquals(listOf(short.uid), concepts().about(ana, b).map { it.uid })
+        assertEquals(short.uid, concepts().resolve(ana, "PPS", "public body", null).uid, "a later run files PPS where it always was")
     }
 
     @Test
@@ -145,8 +155,8 @@ class EntityIdentityTest {
         assertEquals("Clark", entry.canonical, "the name with more claims is the canonical one"); assertEquals("Clark Elementary", entry.alias); assertEquals("confirmed", entry.origin)
         assertFalse(concepts().decide(ana, clark.uid, UUID.randomUUID().toString(), same = true, registry = registry), "not a pair waiting for an answer")
 
-        // New claims about either name now go to one Concept, and the entities view shows one thing with both names.
-        assertEquals(clark.uid, concepts().resolve(ana, "Clark Elementary", "school", null, issuer = "PPS").uid)
+        // Each name keeps its own Concept; the entities view shows one thing with both names.
+        assertEquals(elem.uid, concepts().resolve(ana, "Clark Elementary", "school", null, issuer = "PPS").uid)
         val entities = concepts().entities(ana, registry)
         val one = entities.single { it.name == "Clark" }
         assertEquals(listOf("Clark Elementary"), one.aliases); assertEquals(3, one.claims); assertEquals(2, one.conceptUids.size)

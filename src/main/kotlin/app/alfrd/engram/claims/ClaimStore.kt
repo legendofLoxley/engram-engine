@@ -145,12 +145,13 @@ class ClaimStore(private val db: Database) {
      * it is ABOUT, each resolved to a Concept by name, kind and parent ([ConceptStore]). Additive and idempotent: a claim's period, once set, is
      * kept; a passage already stored for this source is reused; links are not repeated.
      */
-    fun attachContext(userEmail: String, itemUid: String, sourceUid: String, chunkUid: String, claim: AgreedClaim, runId: String, aliases: ClaimantResolver, issuer: String? = null) {
+    fun attachContext(userEmail: String, itemUid: String, sourceUid: String, chunkUid: String, claim: AgreedClaim, runId: String, issuer: String? = null) {
         val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return
         claim.passage?.let { passage -> linkPassage(userEmail, item, sourceUid, chunkUid, passage, runId) }
         if (claim.about.isNotEmpty()) {
-            // The names this owner has recorded as one (a page's definition, or a person's answer) merge on top of the run's own list.
-            val concepts = ConceptStore(db, AliasRegistry(db).resolverFor(userEmail, aliases))
+            // Each thing is filed under the name the page prints. Names recorded as one (AliasRegistry) are grouped when read, never here, so
+            // turning an alias off splits them without rewriting a link.
+            val concepts = ConceptStore(db)
             claim.about.forEach { t -> concepts.linkAbout(userEmail, itemUid, concepts.resolve(userEmail, t.name, t.kind, t.parent, issuer).uid, runId) }
         }
         // Last, on the record as it now is: linking edges above rewrites the claim's record.
@@ -158,6 +159,12 @@ class ClaimStore(private val db: Database) {
             val fresh = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return
             if (fresh.get("claimAsOf") == null) db.transaction { fresh.modify().set("claimAsOf", asOf).save() }
         }
+    }
+
+    /** Seeds the owner's alias list from a run's own alias groups (`--aliases`), recorded with origin `run list`. Idempotent. */
+    fun seedAliases(userEmail: String, aliases: ClaimantResolver) {
+        val registry = AliasRegistry(db)
+        aliases.groups.forEach { (canonical, others) -> others.forEach { registry.add(userEmail, canonical, it, "run list") } }
     }
 
     /**

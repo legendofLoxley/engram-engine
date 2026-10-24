@@ -81,7 +81,7 @@ class ClaimContextTest {
             assertEquals(sentence, c.passage, "the passage is the sentence as printed")
             assertEquals("2023–24", c.asOf)
             val thing = c.about.single()
-            assertEquals("Clark Elementary", thing.name); assertEquals("school", thing.kind); assertEquals("Portland Public Schools", thing.parent, "the parent is resolved by the alias list")
+            assertEquals("Clark Elementary", thing.name); assertEquals("school", thing.kind); assertEquals("PPS", thing.parent, "the parent as printed: aliases apply when read")
         }
         assertEquals(1L, n("SELECT count(*) AS n FROM Phrase WHERE role = 'passage'"), "one passage for both values")
         assertEquals(2L, n("SELECT count(*) AS n FROM FOLLOWS WHERE relation = 'decomposition'"))
@@ -122,7 +122,7 @@ class ClaimContextTest {
     fun `a thing is identified by name, kind and parent, and a namesake is linked as possibly the same, never merged`() {
         val concepts = ConceptStore(db, resolver)
         val school = concepts.resolve(ana, "Clark", "school", "PPS")
-        assertEquals(school.uid, concepts.resolve(ana, "clark  ", "School", "Portland Public Schools").uid, "same name, kind and parent (case, spacing, alias aside)")
+        assertEquals(school.uid, concepts.resolve(ana, "clark  ", "School", "pps").uid, "same name, kind and parent (case and spacing aside)")
         val person = concepts.resolve(ana, "Clark", "person", null)
         assertNotEquals(school.uid, person.uid)
         val other = concepts.resolve(ana, "Clark", "school", "Vancouver Public Schools")

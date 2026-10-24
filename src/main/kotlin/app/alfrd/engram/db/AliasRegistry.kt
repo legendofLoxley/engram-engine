@@ -9,7 +9,7 @@ import java.util.UUID
 /** One recorded fact that two names are one thing, and where that came from. */
 data class AliasEntry(
     val uid: String, val canonical: String, val alias: String,
-    /** `document` (a page defined the short form) or `confirmed` (a person decided). */
+    /** `document` (a page defined the short form), `confirmed` (a person decided) or `run list` (seeded from a run's `--aliases`). */
     val origin: String,
     val sourceUid: String?, val location: String?, val active: Boolean, val createdAt: Long,
 )
