@@ -88,6 +88,26 @@ class LocalClaimModelTest {
     }
 
     @Test
+    fun `a cut-off answer is asked for once more, and a second one fails with its reason and counts, never text`() {
+        val cut = """{"model":"Qwen3.6-35B-A3B","usage":{"completion_tokens":24000},"choices":[{"finish_reason":"length","message":{"content":"reasoning about SECRET-PASSAGE-TEXT","tool_calls":[]}}]}"""
+        reply = { cut }
+        val e = assertThrows<ClaimPassFailure> { runBlocking { model().extract(source, chunk, 1) } }
+        assertEquals(2, bodies.size, "asked twice")
+        assertTrue(e.message!!.contains("cut off at the token limit") && e.message!!.contains("24000 tokens"), e.message)
+        assertTrue(!e.message!!.contains("SECRET-PASSAGE-TEXT"))
+        assertEquals(24_000, Json.parseToJsonElement(bodies[0]).jsonObject["max_tokens"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun `a cut-off answer followed by a good one is used`() = runBlocking<Unit> {
+        var n = 0
+        val cut = """{"model":"Qwen3.6-35B-A3B","choices":[{"finish_reason":"length","message":{"content":"x","tool_calls":[]}}]}"""
+        reply = { if (n++ == 0) cut else toolReply("Qwen3.6-35B-A3B", """{"claims":[]}""") }
+        assertTrue(model().extract(source, chunk, 1).claims.isEmpty())
+        assertEquals(2, bodies.size)
+    }
+
+    @Test
     fun `a claim with no quote makes the answer unreadable rather than being skipped`() {
         reply = { toolReply("Qwen3.6-35B-A3B", """{"claims":[{"quote":"","kind":"fact"}]}""") }
         assertThrows<IllegalStateException> { runBlocking { model().extract(source, chunk, 1) } }

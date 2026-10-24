@@ -32,26 +32,39 @@ class LocalClaimModel(
 
     override suspend fun extract(source: SourceRecord, chunk: ChunkRecord, pass: Int): PassResult {
         require(pass == 1 || pass == 2) { "pass must be 1 or 2" }
-        val response = client.complete(
-            LlmRequest(
-                prompt = userPrompt(source, chunk),
-                systemPrompt = if (pass == 1) prompts.pass1 else prompts.pass2,
-                model = LlmModel.CLAUDE_SONNET_4_5, // a label only: the local client ignores it
-                maxTokens = MAX_TOKENS,
-                timeoutMs = TIMEOUT_MS,
-                tools = listOf(REPORT_TOOL),
-                forcedToolName = TOOL_NAME,
-                temperature = 0.2,
-                reasoning = true,
-            ),
+        val request = LlmRequest(
+            prompt = userPrompt(source, chunk),
+            systemPrompt = if (pass == 1) prompts.pass1 else prompts.pass2,
+            model = LlmModel.CLAUDE_SONNET_4_5, // a label only: the local client ignores it
+            maxTokens = MAX_TOKENS,
+            timeoutMs = TIMEOUT_MS,
+            tools = listOf(REPORT_TOOL),
+            forcedToolName = TOOL_NAME,
+            temperature = 0.2,
+            reasoning = true,
         )
-        val call = response.toolCalls.firstOrNull { it.name == TOOL_NAME } ?: throw IllegalStateException("the model made no $TOOL_NAME call")
-        return PassResult(parseClaims(call.input), response.modelName ?: "unreported", response.finishReason, response.completionTokens)
+        // An answer that cannot be read (most often a tool call cut off at the token limit) is asked for once more: the model samples, so a
+        // second answer is a fresh one. A server error or timeout is not retried here.
+        var last = ""
+        repeat(2) {
+            val response = client.complete(request)
+            val why = "finish ${response.finishReason ?: "unreported"}, ${response.completionTokens ?: "?"} tokens" +
+                if (response.finishReason == "length") " (cut off at the token limit of $MAX_TOKENS)" else ""
+            val call = response.toolCalls.firstOrNull { it.name == TOOL_NAME }
+            if (call == null) last = "no $TOOL_NAME call ($why)"
+            else try {
+                return PassResult(parseClaims(call.input), response.modelName ?: "unreported", response.finishReason, response.completionTokens)
+            } catch (e: IllegalStateException) {
+                last = "${e.message} ($why)"
+            }
+        }
+        // Fixed wording and counts only, never text: the run report may show it.
+        throw ClaimPassFailure("unreadable answer twice: $last")
     }
 
     companion object {
         const val TOOL_NAME = "report_claims"
-        private const val MAX_TOKENS = 12_000
+        private const val MAX_TOKENS = 24_000
         private const val TIMEOUT_MS = 20L * 60 * 1000
 
         fun userPrompt(source: SourceRecord, chunk: ChunkRecord): String = buildString {
@@ -121,3 +134,6 @@ class LocalClaimModel(
         }
     }
 }
+
+/** A pass whose answer could not be read, twice. The message is fixed wording and counts, safe to show in a run report. */
+class ClaimPassFailure(message: String) : IllegalStateException(message)
