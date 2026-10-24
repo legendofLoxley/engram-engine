@@ -42,7 +42,7 @@ object ClaimExtractionCli {
         val label = opt("--user")
         val uidArg = opt("--source"); val locator = opt("--locator")
         if (label.isNullOrBlank() || (uidArg == null && locator == null)) {
-            err.println("usage: ClaimExtractionCli --user <label> (--source <uid> | --locator <locator>) [--run-id R] [--expect-model S | --any-model] [--aliases file.json] [--url URL] [--poll-seconds N] [--no-wait]\n       ClaimExtractionCli --user <label> --source <uid> --show claims|disagreements [--run-id R]")
+            err.println("usage: ClaimExtractionCli --user <label> (--source <uid> | --locator <locator>) [--run-id R] [--expect-model S | --any-model] [--aliases file.json] [--issuer NAME] [--url URL] [--poll-seconds N] [--no-wait]\n       ClaimExtractionCli --user <label> --source <uid> --show claims|disagreements [--run-id R]")
             return 64
         }
         if (label.contains("owner-jacob")) { err.println("refused: that identity is real data and is never used by the debug routes"); return 64 }
@@ -89,6 +89,10 @@ object ClaimExtractionCli {
                 val o = json.parseToJsonElement(file.readText()).jsonObject
                 JsonObject(mapOf("pass1" to JsonPrimitive(o["pass1"]!!.jsonPrimitive.content), "pass2" to JsonPrimitive(o["pass2"]!!.jsonPrimitive.content)))
             } catch (e: Exception) { err.println("--prompts: expected a JSON object with string fields pass1 and pass2"); return 64 }
+        }
+        opt("--issuer")?.let { issuer ->
+            val (c, b) = call("POST", "/debug/sources/$sourceUid/issuer", JsonObject(mapOf("syntheticUserId" to JsonPrimitive(label), "issuer" to JsonPrimitive(issuer))).toString()) ?: return 2
+            if (c != 200) { err.println("engine answered $c: ${b.take(300)}"); return 2 }
         }
         val request = JsonObject(buildMap {
             put("syntheticUserId", JsonPrimitive(label))

@@ -58,6 +58,8 @@ data class SourceRecord(
     val threadId: String?, val contentHash: String, val readAt: Long, val chunkCount: Int,
     val fileSha256: String? = null, val pageCount: Int? = null, val ocrPages: Int? = null, val unreadPages: Int? = null,
     val drive: DriveFacts? = null,
+    /** Who issued the document ("Portland Public Schools"): the parent a school it names takes unless the page names another. Set by a person, never read off the page. */
+    val issuer: String? = null,
 )
 
 data class ChunkRecord(
@@ -203,6 +205,18 @@ class SourceStore(private val db: Database) {
         db.query("sql", "SELECT FROM Source WHERE ownerEmail = :o AND contentHash IS NOT NULL ORDER BY readAt", mapOf("o" to userEmail))
             .use { rs -> val out = ArrayList<SourceRecord>(); while (rs.hasNext()) out += rs.next().toElement().asVertex().toRecord(); out }
 
+    /** Records who issued a Source. False when the owner has no such Source. A blank issuer clears it. */
+    fun setIssuer(userEmail: String, uid: String, issuer: String?): Boolean {
+        var done = false
+        db.transaction {
+            val v = db.query("sql", "SELECT FROM Source WHERE uid = :u AND ownerEmail = :o", mapOf("u" to uid, "o" to userEmail))
+                .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null } ?: return@transaction
+            val clean = issuer?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotEmpty() }
+            v.modify().set("issuer", clean).save(); done = true
+        }
+        return done
+    }
+
     fun sourceByUid(userEmail: String, uid: String): SourceRecord? =
         db.query("sql", "SELECT FROM Source WHERE uid = :u AND ownerEmail = :o", mapOf("u" to uid, "o" to userEmail))
             .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex().toRecord() else null }
@@ -308,6 +322,7 @@ class SourceStore(private val db: Database) {
         chunkCount = countEdges(Vertex.DIRECTION.OUT, "CONTAINS").toInt(),
         fileSha256 = get("fileSha256") as? String, pageCount = (get("pageCount") as? Number)?.toInt(),
         ocrPages = (get("ocrPages") as? Number)?.toInt(), unreadPages = (get("unreadPages") as? Number)?.toInt(),
+        issuer = get("issuer") as? String,
         drive = (get("driveFileId") as? String)?.let { id ->
             DriveFacts(
                 fileId = id, fileName = get("driveFileName") as? String, webViewLink = get("driveWebViewLink") as? String,

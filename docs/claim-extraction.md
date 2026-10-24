@@ -96,6 +96,30 @@ Passage (Phrase, role = passage) --QUOTES--> Chunk            "In 2023–24, 78%
 - **Next:** linking the claims of the two readers that state the same value about the same thing and period (corroboration) and putting disagreeing ones into
   Re-checking. Not built yet.
 
+## Entity identity (what merges, and why)
+
+Design: the Notion pages "Evidence library and per-person horizon (Notion side)" and "PPS evidence split". The library publishes one Entities row per real thing,
+so which Concepts are one thing has to come from code and recorded decisions, never from a model's guess. **The model only reads names off the page; every
+merge traces to a page or to a person.**
+
+| Part | Rule | Code |
+|---|---|---|
+| Identity | a Concept is reused only when name, kind and parent all match (case, punctuation and a leading "the" aside). Names are filed **as printed**: no alias is applied when a claim is linked | `ConceptStore.resolve` |
+| Kind | by the name's own shape first: a trailing MS, HS, Middle School, Elementary, K–8 is a school; a bare grade band (K–5, 6–8) is a `grade band`; SCENARIO A / STATUS QUO are scenarios. The model's label is used only when no rule applies | `EntityRules.kindFor` |
+| Parent | as printed; a school, program or policy with none takes the **issuer** of its Source (`Source.issuer`, set by a person: `POST /debug/sources/{uid}/issuer` or `ClaimExtractionCli --issuer NAME`). The Concept records `parentOrigin` (`stated` or `issuer`); a body is never its own parent | `ConceptStore.resolve` |
+| Aliases | merges come only from the **alias list** (`EntityAlias`, per owner, each entry with its origin and Source/location): a short form a page defines, "Portland Public Schools (PPS)" (accepted only when the letters are the initials of the long name), a person's answer, or a run's `--aliases` file (origin `run list`). Aliases apply only when reading (`/debug/concepts`, `/debug/entities`), so turning an entry off splits the group at once; no link is rewritten and nothing is lost. A conflicting entry is passed over (the older wins) | `AliasRegistry`, `ClaimStore.recordDefinedAliases`, `seedAliases` |
+| Near names | a Concept whose name differs from another's only by a designator (Clark / Clark Elementary, Beverly Cleary / Beverly Cleary 6–8) is linked `POSSIBLY_SAME` with the reason and **kept apart**: designators are never stripped for identity | `EntityRules.looseName` |
+| Name checks | `GET /debug/name-checks` lists every undecided pair; `POST /debug/name-checks/decide` records `same` (adds an alias entry, origin `confirmed`) or `different` (the pair is not asked again). Asked once, reused on every later run | `ConceptStore.nameChecks`, `decide` |
+| Entities | `GET /debug/entities` groups the owner's Concepts through the alias list **at read time** (nothing is merged in the graph): one thing with every name it goes by, its claims and Sources, and what may still be the same | `ConceptStore.entities` |
+| Alias list | `GET /debug/entity-aliases`, `POST /debug/entity-aliases/{uid}/active {"active": false}` | `AliasRegistry` |
+
+`GET /debug/concepts` also shows each candidate's `parentOrigin`, its alias entries, and each possibly-same link's `decision`. A claim under a heading that names a
+scenario or a school is also about it (`StructuredClaimModel`). `POSSIBLY_SAME` edges are now stored in both directions: before, the older Concept of a pair did
+not list its twin.
+
+**Stopping a run.** `POST /debug/claim-runs/{runId}/stop` finishes the batch in hand, keeps it and records the run as `stopped`; start it again with the same id
+to continue. The two passes of a chunk now run together (the server serves two requests at once); the first to fail ends its chunk and cancels the other.
+
 ## Runs, stamps, idempotency
 
 A run has an id the caller chooses (the CLI/route make one if omitted). The `ExtractionRun` record holds: the source, the **model name the server reported on its

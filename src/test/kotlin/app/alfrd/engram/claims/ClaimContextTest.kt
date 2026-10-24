@@ -81,7 +81,7 @@ class ClaimContextTest {
             assertEquals(sentence, c.passage, "the passage is the sentence as printed")
             assertEquals("2023–24", c.asOf)
             val thing = c.about.single()
-            assertEquals("Clark Elementary", thing.name); assertEquals("school", thing.kind); assertEquals("Portland Public Schools", thing.parent, "the parent is resolved by the alias list")
+            assertEquals("Clark Elementary", thing.name); assertEquals("school", thing.kind); assertEquals("PPS", thing.parent, "the parent as printed: aliases apply when read")
         }
         assertEquals(1L, n("SELECT count(*) AS n FROM Phrase WHERE role = 'passage'"), "one passage for both values")
         assertEquals(2L, n("SELECT count(*) AS n FROM FOLLOWS WHERE relation = 'decomposition'"))
@@ -121,16 +121,16 @@ class ClaimContextTest {
     @Test
     fun `a thing is identified by name, kind and parent, and a namesake is linked as possibly the same, never merged`() {
         val concepts = ConceptStore(db, resolver)
-        val school = concepts.resolve(ana, "Clark Elementary", "school", "PPS")
-        assertEquals(school.uid, concepts.resolve(ana, "clark  elementary", "School", "Portland Public Schools").uid, "same name, kind and parent (case, spacing, alias aside)")
-        val person = concepts.resolve(ana, "Clark Elementary", "person", null)
+        val school = concepts.resolve(ana, "Clark", "school", "PPS")
+        assertEquals(school.uid, concepts.resolve(ana, "clark  ", "School", "pps").uid, "same name, kind and parent (case and spacing aside)")
+        val person = concepts.resolve(ana, "Clark", "person", null)
         assertNotEquals(school.uid, person.uid)
-        val other = concepts.resolve(ana, "Clark Elementary", "school", "Vancouver Public Schools")
+        val other = concepts.resolve(ana, "Clark", "school", "Vancouver Public Schools")
         assertNotEquals(school.uid, other.uid)
 
         // A Concept made in conversation is its own thing too, and the Horizon never reuses a document Concept.
-        db.transaction { db.newVertex("Concept").set("uid", UUID.randomUUID().toString()).set("name", "Clark Elementary").set("type", "topic").set("normalizedName", "clark elementary").save() }
-        val cands = concepts.candidates(ana, "Clark Elementary")
+        db.transaction { db.newVertex("Concept").set("uid", UUID.randomUUID().toString()).set("name", "Clark").set("type", "topic").set("normalizedName", "clark").save() }
+        val cands = concepts.candidates(ana, "Clark")
         assertEquals(4, cands.size)
         assertEquals(1, cands.count { it.fromChat })
         val twins = cands.single { it.uid == other.uid }.possiblySame

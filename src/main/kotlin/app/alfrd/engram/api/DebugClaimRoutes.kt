@@ -48,6 +48,18 @@ data class DebugClaimRunRequest(
 )
 
 @Serializable
+data class DebugSyntheticRequest(val syntheticUserId: String)
+
+@Serializable
+data class DebugIssuerRequest(val syntheticUserId: String, val issuer: String? = null)
+
+@Serializable
+data class DebugNameDecision(val syntheticUserId: String, val a: String, val b: String, val decision: String, val canonical: String? = null)
+
+@Serializable
+data class DebugAliasActive(val syntheticUserId: String, val active: Boolean)
+
+@Serializable
 data class DebugClaimPrompts(val pass1: String, val pass2: String)
 
 @Serializable
@@ -83,6 +95,9 @@ fun Application.configureDebugClaimRoutes(
     val structure = ArcadeHorizonStructureStore(db)
     val commit = SourceCommitService(sources, structure, HorizonOperationApplier(structure, ArcadeHorizonGraphStore(db), sources), ArcadeCycleSequencer(db))
     val active = ConcurrentHashMap<String, Boolean>()
+    // Runs asked to stop: each finishes the batch it is in, then marks itself stopped (resumable with the same run id).
+    val stopRequested = ConcurrentHashMap.newKeySet<String>()
+    val registry = app.alfrd.engram.db.AliasRegistry(db)
 
     suspend fun ApplicationCall.userOrRefuse(label: String?): String? {
         if (!isLoopback(this)) { respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only")); return null }
@@ -116,14 +131,17 @@ fun Application.configureDebugClaimRoutes(
                     val expect = if (structured || req.anyModel) null else req.expectModel?.takeIf { it.isNotBlank() } ?: ClaimExtractionService.DEFAULT_EXPECTED_MODEL
                     scope.launch {
                         try {
-                            ClaimExtractionService(sources, claims, commit, resolver).run(email, uid, runId, if (structured) app.alfrd.engram.claims.StructuredClaimModel() else modelFactory(prompts), expect)
+                            ClaimExtractionService(sources, claims, commit, resolver).run(
+                                email, uid, runId, if (structured) app.alfrd.engram.claims.StructuredClaimModel() else modelFactory(prompts), expect,
+                                shouldStop = { stopRequested.contains("$email|$runId") },
+                            )
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
                             // The class name only: a message could carry a passage.
                             logger.warn("claims: run failed: {}", e::class.java.simpleName)
                         } finally {
-                            active.remove("$email|$runId")
+                            active.remove("$email|$runId"); stopRequested.remove("$email|$runId")
                         }
                     }
                     call.respond(HttpStatusCode.Accepted, DebugClaimRunStarted(runId, uid, if (stored == null) "started" else "resumed"))
@@ -151,7 +169,59 @@ fun Application.configureDebugClaimRoutes(
                 get("/concepts") {
                     val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
                     val name = call.request.queryParameters["name"]?.takeIf { it.isNotBlank() } ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "name is required"))
-                    call.respond(HttpStatusCode.OK, app.alfrd.engram.db.ConceptStore(db).candidates(email, name))
+                    call.respond(HttpStatusCode.OK, app.alfrd.engram.db.ConceptStore(db, registry.resolverFor(email)).candidates(email, name, registry))
+                }
+                // Asks a running claim run to stop: it finishes the batch it is in, keeps it, and is recorded as stopped. Start it again with the same id to continue.
+                post("/claim-runs/{runId}/stop") {
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    val req = call.receive<DebugSyntheticRequest>()
+                    val email = call.userOrRefuse(req.syntheticUserId) ?: return@post
+                    val runId = call.parameters["runId"].orEmpty()
+                    if (!active.containsKey("$email|$runId")) {
+                        val run = claims.run(email, runId) ?: return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown run"))
+                        return@post call.respond(HttpStatusCode.Conflict, mapOf("error" to "that run is not in progress", "status" to run.status))
+                    }
+                    stopRequested.add("$email|$runId")
+                    call.respond(HttpStatusCode.Accepted, mapOf("runId" to runId, "state" to "stopping"))
+                }
+                // Who issued a Source: the parent a school it names takes unless the page names another. Set by a person; never read off the page.
+                post("/sources/{uid}/issuer") {
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    val req = call.receive<DebugIssuerRequest>()
+                    val email = call.userOrRefuse(req.syntheticUserId) ?: return@post
+                    if (!sources.setIssuer(email, call.parameters["uid"].orEmpty(), req.issuer)) return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown source"))
+                    call.respond(HttpStatusCode.OK, mapOf("issuer" to (req.issuer?.trim().orEmpty())))
+                }
+                // Pairs of things that may be one thing, waiting for a person: the box merges nothing it cannot prove.
+                get("/name-checks") {
+                    val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
+                    call.respond(HttpStatusCode.OK, app.alfrd.engram.db.ConceptStore(db, registry.resolverFor(email)).nameChecks(email))
+                }
+                post("/name-checks/decide") {
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    val req = call.receive<DebugNameDecision>()
+                    val email = call.userOrRefuse(req.syntheticUserId) ?: return@post
+                    val same = when (req.decision) { "same" -> true; "different" -> false; else -> return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "decision must be same or different")) }
+                    if (!app.alfrd.engram.db.ConceptStore(db, registry.resolverFor(email)).decide(email, req.a, req.b, same, registry, req.canonical))
+                        return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "that pair is not waiting for an answer"))
+                    call.respond(HttpStatusCode.OK, mapOf("decision" to req.decision))
+                }
+                // The alias list: every recorded "these are one name", with where it came from. Turning one off splits the merge from the next run.
+                get("/entity-aliases") {
+                    val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
+                    call.respond(HttpStatusCode.OK, registry.list(email))
+                }
+                post("/entity-aliases/{uid}/active") {
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    val req = call.receive<DebugAliasActive>()
+                    val email = call.userOrRefuse(req.syntheticUserId) ?: return@post
+                    if (!registry.setActive(email, call.parameters["uid"].orEmpty(), req.active)) return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown alias"))
+                    call.respond(HttpStatusCode.OK, mapOf("active" to req.active.toString()))
+                }
+                // The owner's things, merged through the alias list at read time, each with every name it goes by and what may still be the same.
+                get("/entities") {
+                    val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
+                    call.respond(HttpStatusCode.OK, app.alfrd.engram.db.ConceptStore(db, registry.resolverFor(email)).entities(email, registry))
                 }
                 get("/sources/{uid}/claim-disagreements") {
                     val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get

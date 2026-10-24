@@ -341,7 +341,9 @@ class ClaimExtractionServiceTest {
         val report = service(batch = 7).run(ana, s.uid, "run-long", model) { progress += it.chunksDone }
         assertEquals(60, report.chunksDone); assertEquals(60, report.chunksTotal); assertEquals(60, report.claimsEstablished)
         assertEquals(120, model.calls.size)
-        assertEquals((0 until 60).flatMap { listOf(it to 1, it to 2) }, model.calls)
+        // The two passes of a chunk run together, so only the chunks' order is fixed, not the order within a chunk.
+        assertEquals((0 until 60).flatMap { listOf(it to 1, it to 2) }, model.calls.sortedWith(compareBy({ it.first }, { it.second })))
+        assertEquals((0 until 60).toList(), model.calls.map { it.first }.distinct())
         assertEquals(listOf(7, 14, 21, 28, 35, 42, 49, 56, 60), progress)
         assertEquals(60, claims.claims(ana, s.uid).size)
         assertEquals(1.0, report.agreementRate)
