@@ -46,7 +46,7 @@ data class CheckedValue(
  * **Misread names.** The model sometimes misreads a name by a letter or two ("Sitten", "Siton" for "Sitton"; "Dunaway" for "Duniway"), which
  * would lose the whole list item that holds it. A capitalized word of five or more letters that the page does not print is replaced by the
  * nearest word the page prints within two edits of it with the same first letter (the text layer's words first, then the OCR transcript's;
- * no guess when two are equally near), and the value is found only if the corrected value is then found as a whole. The page's spelling is what is kept ([CheckedValue.printedAs]); the correction is reported.
+ * no guess when two are equally near, and none when the page prints that word in lower case: an ordinary word is not a name), and the value is found only if the corrected value is then found as a whole. The page's spelling is what is kept ([CheckedValue.printedAs]); the correction is reported.
  *
  * **Context.** A value's passage is kept only when the page prints it as one run (as printed, case and spacing aside); each thing it is
  * about, that thing's parent, and its period are kept only when the page prints them. What is dropped is reported; a value is never rejected
@@ -192,6 +192,9 @@ object StructureCheck {
                 val asPrinted = originals.firstNotNullOfOrNull { t ->
                     Regex("(?<!\\p{L})" + Regex.escape(nearest.single()) + "(?!\\p{L})", RegexOption.IGNORE_CASE).find(t)?.value
                 } ?: return null
+                // A name is printed with a capital. A word the page also prints in lower case ("while") is an ordinary word, not a name the model
+                // misread: "White", a legend label an image holds, must not become "while" from the running text beside it.
+                if (!asPrinted[0].isUpperCase() || originals.any { t -> Regex("(?<!\\p{L})" + Regex.escape(nearest.single()) + "(?!\\p{L})").containsMatchIn(t) }) return null
                 out = out.replaceRange(m.range, asPrinted); changed = true
             }
             return out.takeIf { changed && found(it) }
@@ -222,7 +225,7 @@ object StructureCheck {
 
         // [lo, hi) is the span of the parent heading in the reading-order text; a heading is looked for inside it, in order after its previous
         // sibling, and runs to its next sibling (or the end of the parent's span).
-        fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int) {
+        fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int, inheritedAsOf: String? = null) {
             var cursor = lo
             val headingFix = level.map { s -> if (found(s.heading)) null else corrected(s.heading) }
             val starts = level.mapIndexed { i, s ->
@@ -232,6 +235,8 @@ object StructureCheck {
             }
             level.forEachIndexed { i, s ->
                 val path = parents + s.heading
+                // The one period a heading (or the page) states covers what is under it, unless a value gives its own.
+                val sectionAsOf = s.asOf ?: inheritedAsOf
                 val fix = headingFix[i]
                 out += CheckedValue(parents, "heading", s.heading, fix != null || found(s.heading), null,
                     printedAs = fix ?: printedForm(s.heading)?.takeIf { it != s.heading })
@@ -241,7 +246,14 @@ object StructureCheck {
                     val ok = found(v)
                     val fix = if (ok) null else corrected(v)
                     val at = reading.locate(fix ?: v)
-                    val (context, dropped) = checkContext(ctx)
+                    // An earlier figure ("from 618 students to 355 students in 2023–24") is not given the period of the sentence it is printed in.
+                    val earlier = ctx?.passage?.let { p -> Regex("\\bfrom\\s+" + Regex.escape(v.trim()) + "(?![\\p{L}\\p{N}])", RegexOption.IGNORE_CASE).containsMatchIn(p) } == true
+                    val withPeriod = when {
+                        earlier -> (ctx ?: PageContext()).copy(asOf = null)
+                        ctx?.asOf == null && sectionAsOf != null && kind in setOf("number", "item") -> (ctx ?: PageContext()).copy(asOf = sectionAsOf)
+                        else -> ctx
+                    }
+                    val (context, dropped) = checkContext(withPeriod)
                     out += CheckedValue(
                         path, kind, v, ok || fix != null, if (from == null || at.isEmpty()) null else at.any { it in from until to },
                         label, labelFound(label), printedAs = fix ?: printedForm(v)?.takeIf { it != v }, context = context, contextDropped = dropped,
@@ -251,7 +263,7 @@ object StructureCheck {
                 s.items.forEach { add("item", it, ctx = s.itemContext[it]) }
                 s.tables.forEach { t -> t.flatten().forEach { add("cell", it) } }
                 s.charts.forEach { c -> (listOf(c.title).filter { it.isNotBlank() } + c.values).forEach { add("chart", it) } }
-                if (from != null) walk(s.subsections, path, from, to) else walk(s.subsections, path, lo, hi)
+                if (from != null) walk(s.subsections, path, from, to, sectionAsOf) else walk(s.subsections, path, lo, hi, sectionAsOf)
             }
         }
         walk(sections, emptyList(), 0, text.length)

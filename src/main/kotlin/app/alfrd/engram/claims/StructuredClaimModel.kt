@@ -1,6 +1,7 @@
 package app.alfrd.engram.claims
 
 import app.alfrd.engram.db.ChunkRecord
+import app.alfrd.engram.db.EntityRules
 import app.alfrd.engram.db.SourceRecord
 import app.alfrd.engram.vision.PageStructure
 import app.alfrd.engram.vision.VisionReading
@@ -27,9 +28,23 @@ class StructuredClaimModel : ClaimPassModel {
                 subject = (under + listOf(e.label).filter { it.isNotBlank() }).joinToString(" > ").ifEmpty { place ?: e.value },
                 kind = if (e.kind == "number") ClaimKind.NUMBER.name else ClaimKind.FACT.name,
                 place = place,
-                passage = e.passage, about = e.about.map { ThingRef(it.name, it.kind, it.parent) }, asOf = e.asOf,
+                passage = e.passage, about = withHeadingThings(e.path, e.about.map { ThingRef(it.name, it.kind, it.parent) }), asOf = e.asOf,
             )
         }
         return PassResult(claims, "structure:" + (chunk.extractor ?: "vision"))
+    }
+
+    /**
+     * A claim under a heading that names a thing (SCENARIO A, a school's section) is about that thing, whatever the reader said: the
+     * headings are the page's own, checked when the chunk was made. A heading is a thing only when its own shape says so ([EntityRules]), and only when the reader named no thing of that kind for the value.
+     */
+    private fun withHeadingThings(path: List<String>, given: List<ThingRef>): List<ThingRef> {
+        val named = path.filter { h -> EntityRules.kindByName(h).let { it == "scenario" || it == "school" } }
+            .map { ThingRef(it, EntityRules.kindByName(it).orEmpty()) }
+        // What the reader already named stands: a heading adds a thing only of a kind the reader gave none of for this value, so one school
+        // called "Clark" by the reader and "Clark Elementary School" by the heading is not two.
+        val have = given.map { ClaimantResolver.key(it.name) }.toSet()
+        val haveKinds = given.map { EntityRules.kindFor(it.name, it.kind) }.toSet()
+        return given + named.filter { ClaimantResolver.key(it.name) !in have && it.kind !in haveKinds }
     }
 }

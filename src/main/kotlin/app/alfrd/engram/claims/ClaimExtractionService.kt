@@ -8,6 +8,9 @@ import app.alfrd.engram.db.LinkOutcome
 import app.alfrd.engram.db.SourceRecord
 import app.alfrd.engram.db.SourceStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
@@ -64,7 +67,7 @@ class ClaimExtractionService(
 
     suspend fun run(
         userEmail: String, sourceUid: String, runId: String, model: ClaimPassModel,
-        expectModel: String? = DEFAULT_EXPECTED_MODEL, onProgress: (RunReport) -> Unit = {},
+        expectModel: String? = DEFAULT_EXPECTED_MODEL, shouldStop: () -> Boolean = { false }, onProgress: (RunReport) -> Unit = {},
     ): RunReport {
         require(RUN_ID.matches(runId)) { "runId must be 1-64 characters of letters, digits and . _ : -" }
         val source = sources.sourceByUid(userEmail, sourceUid) ?: throw IllegalArgumentException("unknown source")
@@ -80,6 +83,8 @@ class ClaimExtractionService(
             } else {
                 claims.startRun(userEmail, runId, sourceUid, model.endpoint, model.promptVersion, 2, chunks.size)
             }
+            // What the Source's own text defines as short forms, before any claim is attached: the same Source read twice gives the same things.
+            claims.recordDefinedAliases(userEmail, sourceUid, chunks)
             val names = (stored?.modelName.orEmpty()).split(" | ").filter { it.isNotBlank() }.toMutableSet()
             val tally = Tally(stored?.report ?: blank(runId, sourceUid, model, chunks.size, expectModel))
             var next = stored?.chunksDone ?: 0
@@ -93,6 +98,13 @@ class ClaimExtractionService(
                     next += batch.size
                     claims.updateRun(userEmail, runId, modelName = names.sorted().joinToString(" | "), chunksDone = next, report = snapshot("running"))
                     onProgress(tally.r)
+                    // A stop is asked for between batches: the batch in hand is finished and kept, and the run can be started again with its id.
+                    if (next < chunks.size && shouldStop()) {
+                        val report = snapshot("stopped")
+                        claims.updateRun(userEmail, runId, status = "stopped", modelName = report.modelName, chunksDone = next, report = report)
+                        logger.info("claims: run stopped on request at chunk {} of {}", next, chunks.size)
+                        return report
+                    }
                 }
             } catch (e: ModelRefused) {
                 tally.r = tally.r.copy(failures = tally.r.failures + (e.message ?: "model refused"))
@@ -123,17 +135,43 @@ class ClaimExtractionService(
 
     private suspend fun process(source: SourceRecord, chunk: ChunkRecord, model: ClaimPassModel, expect: String?, names: MutableSet<String>, resumed: Boolean): Processed {
         if (!model.reads(chunk)) return Processed(chunk, null, null, skipped = true)
-        val results = ArrayList<PassResult>()
-        for (pass in 1..2) {
-            val started = System.currentTimeMillis()
-            val result = try {
-                model.extract(source, chunk, pass)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // The class name only: a provider's message could echo the passage.
-                return Processed(chunk, null, "chunk ${chunk.ordinal}: pass $pass failed (${e::class.java.simpleName})")
+        // The two passes are separate requests that share nothing, so they run together (the server serves two at once). The first one
+        // that fails ends the chunk and the other is cancelled; a server answering with the wrong model stops the whole run.
+        val outcome = coroutineScope {
+            val answers = Channel<Pair<Int, Result<PassResult>>>(2)
+            val jobs = (1..2).map { pass ->
+                launch {
+                    val started = System.currentTimeMillis()
+                    // A cancellation raised inside the model is reported like any other end of the pass, so the chunk's wait cannot hang on it.
+                    val r = try { Result.success(model.extract(source, chunk, pass)) } catch (e: Exception) { Result.failure(e) }
+                    r.getOrNull()?.let { result ->
+                        // Counts and time only, never text.
+                        logger.info(
+                            "claims: chunk {} pass {} reported {} claim(s) in {} ms (finish {}, {} completion token(s))",
+                            chunk.ordinal, pass, result.claims.size, System.currentTimeMillis() - started, result.finishReason ?: "-", result.completionTokens ?: "-",
+                        )
+                    }
+                    answers.send(pass to r)
+                }
             }
+            val got = HashMap<Int, PassResult>()
+            var failure: String? = null
+            repeat(2) {
+                if (failure != null) return@repeat
+                val (pass, r) = answers.receive()
+                r.onSuccess { got[pass] = it }.onFailure { e ->
+                    if (e is CancellationException) { jobs.forEach { it.cancel() }; throw e }
+                    // The class name only: a provider's message could echo the passage.
+                    failure = "chunk ${chunk.ordinal}: pass $pass failed (${e::class.java.simpleName})"
+                    jobs.forEach { it.cancel() }
+                }
+            }
+            failure?.let { return@coroutineScope it to emptyList<PassResult>() }
+            null to listOf(got.getValue(1), got.getValue(2))
+        }
+        outcome.first?.let { return Processed(chunk, null, it) }
+        val results = outcome.second
+        results.forEach { result ->
             if (expect != null && !squash(result.modelName).contains(squash(expect))) {
                 throw ModelRefused("the server reported model '${result.modelName}', not one containing '$expect'; the run was stopped")
             }
@@ -141,12 +179,6 @@ class ClaimExtractionService(
                 throw ModelRefused("the server now reports model '${result.modelName}', which is not the model this run started with; the run was stopped")
             }
             names += result.modelName
-            results += result
-            // Counts and time only, never text.
-            logger.info(
-                "claims: chunk {} pass {} reported {} claim(s) in {} ms (finish {}, {} completion token(s))",
-                chunk.ordinal, pass, result.claims.size, System.currentTimeMillis() - started, result.finishReason ?: "-", result.completionTokens ?: "-",
-            )
         }
         val compared = ClaimAgreement.compare(chunk, results[0].claims, results[1].claims, resolver)
         logger.info(
@@ -241,7 +273,7 @@ class ClaimExtractionService(
                     r = r.copy(failures = r.failures + "a claim in chunk ${draftClaims[i].chunkUid.take(8)} could not be committed")
                 } else {
                     claims.markEstablished(userEmail, uid, source.uid, draftClaims[i], runId)
-                    claims.attachContext(userEmail, uid, source.uid, draftClaims[i].chunkUid, draftClaims[i], runId, resolver)
+                    claims.attachContext(userEmail, uid, source.uid, draftClaims[i].chunkUid, draftClaims[i], runId, resolver, source.issuer)
                     r = if (item.created) r.copy(claimsEstablished = r.claimsEstablished + 1) else r.copy(claimsAlreadyThere = r.claimsAlreadyThere + 1)
                 }
             }
@@ -259,7 +291,7 @@ class ClaimExtractionService(
                 userEmail, uid, place.chunk.uid, WRITER, place.claim.claimant, opKey = "src:${source.uid}:at:${sha(place.key)}:${place.chunk.ordinal}",
                 draftQuote = place.claim.quote, runId = runId,
             )
-            if (outcome != LinkOutcome.REFUSED) claims.attachContext(userEmail, uid, source.uid, place.chunk.uid, place.claim, runId, resolver)
+            if (outcome != LinkOutcome.REFUSED) claims.attachContext(userEmail, uid, source.uid, place.chunk.uid, place.claim, runId, resolver, source.issuer)
             r = when (outcome) {
                 LinkOutcome.CREATED -> r.copy(locationsAdded = r.locationsAdded + 1)
                 LinkOutcome.ALREADY_LINKED -> r.copy(claimsAlreadyThere = r.claimsAlreadyThere + 1)

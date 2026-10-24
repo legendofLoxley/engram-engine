@@ -15,6 +15,9 @@ import kotlinx.serialization.json.jsonObject
 class ClaimantResolver(aliases: Map<String, List<String>> = emptyMap()) {
     private val byKey: Map<String, String>
 
+    /** The alias groups this resolver was made from (canonical name to its other names). */
+    val groups: Map<String, List<String>> = aliases
+
     init {
         val map = HashMap<String, String>()
         aliases.forEach { (canonical, others) ->
@@ -36,6 +39,20 @@ class ClaimantResolver(aliases: Map<String, List<String>> = emptyMap()) {
         val t = tidy(raw ?: return null)
         if (t.isEmpty()) return null
         return byKey[key(t)] ?: t
+    }
+
+    /**
+     * This resolver with [extra] groups added. A name already listed here for another canonical name keeps this resolver's answer: the extra
+     * entry is passed over rather than refused, so a stored list can never make a run fail.
+     */
+    fun plus(extra: Map<String, List<String>>): ClaimantResolver {
+        val merged = LinkedHashMap<String, List<String>>(groups)
+        extra.forEach { (canonical, others) ->
+            val target = canonical(canonical) ?: return@forEach
+            val usable = others.filter { a -> byKey[key(a)].let { it == null || it == target } }
+            merged[target] = ((merged[target] ?: emptyList()) + usable).distinct()
+        }
+        return ClaimantResolver(merged)
     }
 
     companion object {

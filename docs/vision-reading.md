@@ -54,7 +54,7 @@ with a parenthesis after its number ("Figure 2.5 (DLI)") was not routed.
    SCENARIO A > ATTENDANCE BOUNDARY CHANGES: 38
    Figure 6.1 Deriving Planning Floors for Well Resourced Schools > Elementary > Planning floor range estimate: Approximately 450+
    ```
-   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v5`): reading a page
+   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v6`): reading a page
    again adds nothing and calls no model, so a stopped run is resumed by running it again. The file must be the Source's own (same SHA-256).
 4. **Claims:** `ClaimExtractionCli --reader structure` makes one claim per kept entry, quoted by its line, placed under its top heading, with
    its sub-headings as the subject (a top heading longer than a place can be, such as a survey question set as a title, goes in the subject). No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
@@ -69,8 +69,13 @@ Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM
 checked against the page. The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
 The run stops after `--stop-after` pages fail in a row (a server that is down fails every page); run the same command again to resume.
 
-Chunks are keyed by reader version (now `structure-v5`), so a new version's reading of a page already read is a second chunk beside the
+Chunks are keyed by reader version (now `structure-v6`), so a new version's reading of a page already read is a second chunk beside the
 first, and its claims sit beside the old ones. Read a new version into a Source that has no older vision chunks (a fresh synthetic identity).
+
+**v6 (entity identity).** Items given as objects are read under any usual key (v5 lost the four "What guides the work" items, the intro paragraph and the
+"2031–32" note on the districtwide sheet when the model used another key), and the prompt names the key. A section may carry the one period the page states for
+it, and its values inherit that period unless they give their own; a period the page does not print is dropped. The earlier figure of a "from X to Y" sentence
+gets no period. A misread name is never corrected to a word the page also prints in lower case ("White", a legend label an image holds, is not "while").
 
 ## One page, nothing written (`VisionPageCli`)
 

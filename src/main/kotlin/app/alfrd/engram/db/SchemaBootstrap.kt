@@ -404,6 +404,23 @@ object SchemaBootstrap {
             // Horizon makes in conversation has no conceptKey. Two Concepts that may be one thing are linked by POSSIBLY_SAME with the reason.
             ensureProperty(schema, "Concept", "conceptKey",          Type.STRING)
             ensureProperty(schema, "Concept", "parentName",          Type.STRING)
+            // Identity by rule (db/EntityRules.kt, db/AliasRegistry.kt): the name without its designators (for linking only), where a parent
+            // came from, the issuer of a Source (the parent a school takes by default), and the person's decision on a possibly-same pair.
+            ensureProperty(schema, "Concept", "looseName",           Type.STRING)
+            ensureProperty(schema, "Concept", "parentOrigin",        Type.STRING)
+            ensureProperty(schema, "Source",  "issuer",              Type.STRING)
+            ensureVertex(schema, "EntityAlias") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("canonical", Type.STRING)
+                vt.createProperty("alias", Type.STRING)
+                vt.createProperty("aliasKey", Type.STRING)
+                vt.createProperty("origin", Type.STRING)
+                vt.createProperty("sourceUid", Type.STRING)
+                vt.createProperty("location", Type.STRING)
+                vt.createProperty("active", Type.BOOLEAN)
+                vt.createProperty("createdAt", Type.LONG)
+            }
             ensureProperty(schema, "ABOUT",   "writer",              Type.STRING)
             ensureProperty(schema, "ABOUT",   "runId",               Type.STRING)
             ensureEdge(schema, "POSSIBLY_SAME") { et ->
@@ -411,6 +428,8 @@ object SchemaBootstrap {
                 et.createProperty("ownerEmail", Type.STRING)
                 et.createProperty("createdAt", Type.LONG)
             }
+            ensureProperty(schema, "POSSIBLY_SAME", "decision",      Type.STRING)
+            ensureProperty(schema, "POSSIBLY_SAME", "decidedAt",     Type.LONG)
             ensureProperty(schema, "ExtractionRun", "modelName",     Type.STRING)
             ensureProperty(schema, "ExtractionRun", "modelEndpoint", Type.STRING)
             ensureProperty(schema, "ExtractionRun", "promptVersion", Type.STRING)
@@ -534,6 +553,8 @@ object SchemaBootstrap {
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Concept",     "conceptKey")
+            ensureIndex(schema, "Concept",     "looseName")
+            ensureIndex(schema, "EntityAlias", "ownerEmail")
             ensureIndex(schema, "Phrase",      "passageKey")
             ensureIndex(schema, "Source",      "uid")
             ensureIndex(schema, "Source",      "name")

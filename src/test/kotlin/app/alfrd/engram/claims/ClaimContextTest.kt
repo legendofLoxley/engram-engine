@@ -121,16 +121,16 @@ class ClaimContextTest {
     @Test
     fun `a thing is identified by name, kind and parent, and a namesake is linked as possibly the same, never merged`() {
         val concepts = ConceptStore(db, resolver)
-        val school = concepts.resolve(ana, "Clark Elementary", "school", "PPS")
-        assertEquals(school.uid, concepts.resolve(ana, "clark  elementary", "School", "Portland Public Schools").uid, "same name, kind and parent (case, spacing, alias aside)")
-        val person = concepts.resolve(ana, "Clark Elementary", "person", null)
+        val school = concepts.resolve(ana, "Clark", "school", "PPS")
+        assertEquals(school.uid, concepts.resolve(ana, "clark  ", "School", "Portland Public Schools").uid, "same name, kind and parent (case, spacing, alias aside)")
+        val person = concepts.resolve(ana, "Clark", "person", null)
         assertNotEquals(school.uid, person.uid)
-        val other = concepts.resolve(ana, "Clark Elementary", "school", "Vancouver Public Schools")
+        val other = concepts.resolve(ana, "Clark", "school", "Vancouver Public Schools")
         assertNotEquals(school.uid, other.uid)
 
         // A Concept made in conversation is its own thing too, and the Horizon never reuses a document Concept.
-        db.transaction { db.newVertex("Concept").set("uid", UUID.randomUUID().toString()).set("name", "Clark Elementary").set("type", "topic").set("normalizedName", "clark elementary").save() }
-        val cands = concepts.candidates(ana, "Clark Elementary")
+        db.transaction { db.newVertex("Concept").set("uid", UUID.randomUUID().toString()).set("name", "Clark").set("type", "topic").set("normalizedName", "clark").save() }
+        val cands = concepts.candidates(ana, "Clark")
         assertEquals(4, cands.size)
         assertEquals(1, cands.count { it.fromChat })
         val twins = cands.single { it.uid == other.uid }.possiblySame
