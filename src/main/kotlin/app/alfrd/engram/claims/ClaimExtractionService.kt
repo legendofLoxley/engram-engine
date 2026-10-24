@@ -32,6 +32,10 @@ import java.util.concurrent.ConcurrentHashMap
  * an established claim that its two passes do not both reproduce is moved to Re-checking (kept, not changed) with the disagreement
  * retained. A claim stays Re-checking until a person decides: nothing here settles it again.
  *
+ * **Context.** An established claim also keeps what both passes agreed of its context ([ClaimAgreement.context]): the passage it was
+ * decomposed from, the things it is about and the period it refers to ([ClaimStore.attachContext]). Context never decides whether a
+ * claim is established.
+ *
  * Chunks are committed in batches of [batchSize] so that work survives a stop; the cycle number each commit uses is one per batch.
  */
 class ClaimExtractionService(
@@ -237,6 +241,7 @@ class ClaimExtractionService(
                     r = r.copy(failures = r.failures + "a claim in chunk ${draftClaims[i].chunkUid.take(8)} could not be committed")
                 } else {
                     claims.markEstablished(userEmail, uid, source.uid, draftClaims[i], runId)
+                    claims.attachContext(userEmail, uid, source.uid, draftClaims[i].chunkUid, draftClaims[i], runId, resolver)
                     r = if (item.created) r.copy(claimsEstablished = r.claimsEstablished + 1) else r.copy(claimsAlreadyThere = r.claimsAlreadyThere + 1)
                 }
             }
@@ -254,6 +259,7 @@ class ClaimExtractionService(
                 userEmail, uid, place.chunk.uid, WRITER, place.claim.claimant, opKey = "src:${source.uid}:at:${sha(place.key)}:${place.chunk.ordinal}",
                 draftQuote = place.claim.quote, runId = runId,
             )
+            if (outcome != LinkOutcome.REFUSED) claims.attachContext(userEmail, uid, source.uid, place.chunk.uid, place.claim, runId, resolver)
             r = when (outcome) {
                 LinkOutcome.CREATED -> r.copy(locationsAdded = r.locationsAdded + 1)
                 LinkOutcome.ALREADY_LINKED -> r.copy(claimsAlreadyThere = r.claimsAlreadyThere + 1)

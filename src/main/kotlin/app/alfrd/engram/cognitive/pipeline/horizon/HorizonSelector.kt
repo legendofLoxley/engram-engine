@@ -464,7 +464,10 @@ internal class HorizonSelector(
         db.query("sql", "SELECT FROM Phrase WHERE uid = :u", mapOf("u" to uid)).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
 
     private fun Vertex.isContainer() = typeName == "Domain" || typeName == "Project"
-    private fun Vertex.isItem() = !isContainer() && typeName != "Concept" && typeName != "User" && typeName != "Source"
+    // An established document claim, or the passage it was taken from, is evidence from a source, not something the user said: it stays
+    // out of the Horizon until the Horizon can present it as the source's (docs/claim-extraction.md, "Claims in context").
+    private fun Vertex.isItem() = !isContainer() && typeName != "Concept" && typeName != "User" && typeName != "Source" &&
+        get("claimSourceUid") == null && get("role") != "passage"
 
     /** A container is the user's if it says so; an item's ownership is proved by the assembler through its own Sources before it is surfaced. */
     private fun Vertex.ownedBy(userEmail: String): Boolean = if (isContainer()) get("ownerEmail") == userEmail else true

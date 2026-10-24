@@ -389,6 +389,28 @@ object SchemaBootstrap {
             ensureProperty(schema, "Phrase",  "claimRunId",          Type.STRING)
             ensureProperty(schema, "Phrase",  "checkState",          Type.STRING)
             ensureProperty(schema, "Phrase",  "recheckRunId",        Type.STRING)
+            // Claims in context (docs/claim-extraction.md): the period a claim's value refers to, as printed ("2023–24"), and the passage
+            // Phrases a claim is decomposed from. A passage is never ASSERTed, so the Horizon cannot surface it; it is keyed per source and
+            // text, QUOTES-linked to the chunk that prints it and FOLLOWS-linked (relation = decomposition) to each claim taken from it.
+            ensureProperty(schema, "Phrase",  "claimAsOf",           Type.STRING)
+            ensureProperty(schema, "Phrase",  "role",                Type.STRING)
+            ensureProperty(schema, "Phrase",  "passageKey",          Type.STRING)
+            ensureProperty(schema, "Phrase",  "passageSourceUid",    Type.STRING)
+            ensureProperty(schema, "Phrase",  "ownerEmail",          Type.STRING)
+            ensureProperty(schema, "FOLLOWS", "relation",            Type.STRING)
+            ensureProperty(schema, "FOLLOWS", "ownerEmail",          Type.STRING)
+            ensureProperty(schema, "FOLLOWS", "runId",               Type.STRING)
+            // Things documents talk about (db/ConceptStore.kt): identified by name + kind + parent, never merged on a guess. A Concept the
+            // Horizon makes in conversation has no conceptKey. Two Concepts that may be one thing are linked by POSSIBLY_SAME with the reason.
+            ensureProperty(schema, "Concept", "conceptKey",          Type.STRING)
+            ensureProperty(schema, "Concept", "parentName",          Type.STRING)
+            ensureProperty(schema, "ABOUT",   "writer",              Type.STRING)
+            ensureProperty(schema, "ABOUT",   "runId",               Type.STRING)
+            ensureEdge(schema, "POSSIBLY_SAME") { et ->
+                et.createProperty("reason", Type.STRING)
+                et.createProperty("ownerEmail", Type.STRING)
+                et.createProperty("createdAt", Type.LONG)
+            }
             ensureProperty(schema, "ExtractionRun", "modelName",     Type.STRING)
             ensureProperty(schema, "ExtractionRun", "modelEndpoint", Type.STRING)
             ensureProperty(schema, "ExtractionRun", "promptVersion", Type.STRING)
@@ -511,6 +533,8 @@ object SchemaBootstrap {
             ensureIndex(schema, "ABOUT",       "ownerEmail")
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
+            ensureIndex(schema, "Concept",     "conceptKey")
+            ensureIndex(schema, "Phrase",      "passageKey")
             ensureIndex(schema, "Source",      "uid")
             ensureIndex(schema, "Source",      "name")
             ensureIndex(schema, "Source",      "contentHash")

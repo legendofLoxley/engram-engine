@@ -13,6 +13,10 @@ enum class ClaimKind {
     }
 }
 
+/** A thing a claim is about, as a reader named it: its name as printed, its kind (school, public body, ...) and the body it belongs to. */
+@Serializable
+data class ThingRef(val name: String, val kind: String = "", val parent: String? = null)
+
 /**
  * One claim a pass reported for a chunk: the passage it rests on, who asserted it ([claimant] as the pass wrote it; null when the
  * passage names nobody), what it is about, its kind, and, optionally, where in the chunk it sits (a table row, a box).
@@ -24,6 +28,12 @@ data class PassClaim(
     val subject: String = "",
     val kind: String = ClaimKind.FACT.name,
     val place: String? = null,
+    /** The printed sentence, card or table row the quote sits in, verbatim; null when the quote is the whole passage. */
+    val passage: String? = null,
+    /** The things the claim's value describes (a school, a body, a scenario), named as printed. */
+    val about: List<ThingRef> = emptyList(),
+    /** The period the value refers to, as printed ("2023–24"); not when the document said it. */
+    val asOf: String? = null,
 )
 
 /** What one pass returned for one chunk, and the model that actually answered. */
@@ -71,8 +81,14 @@ data class ClaimVersion(
 /** Two passes' versions of a claim that did not agree, kept as recorded. A version is null when that pass reported nothing like it. */
 data class Disagreement(val chunkUid: String, val reason: String, val versionA: ClaimVersion?, val versionB: ClaimVersion?)
 
-/** A claim both passes reported with the same quote, claimant and place: the only thing that can become an established claim. */
-data class AgreedClaim(val chunkUid: String, val quote: String, val claimant: String?, val claimantAsWritten: String?, val subject: String, val kind: ClaimKind, val place: String?)
+/**
+ * A claim both passes reported with the same quote, claimant and place: the only thing that can become an established claim. Its context
+ * (passage, about, asOf) is what both passes also agreed on and the chunk prints; anything else is left off, never guessed.
+ */
+data class AgreedClaim(
+    val chunkUid: String, val quote: String, val claimant: String?, val claimantAsWritten: String?, val subject: String, val kind: ClaimKind, val place: String?,
+    val passage: String? = null, val about: List<ThingRef> = emptyList(), val asOf: String? = null,
+)
 
 /** The outcome for one chunk. [failed] says why the chunk produced nothing when a pass could not be completed. */
 data class ChunkOutcome(val chunkUid: String, val agreed: List<AgreedClaim>, val disagreements: List<Disagreement>, val failed: String? = null)

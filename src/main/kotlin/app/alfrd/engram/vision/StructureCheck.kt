@@ -22,6 +22,10 @@ data class CheckedValue(
      * model misread by a letter or two ("Sitten" for "Sitton"; see [StructureCheck.check]). What is stored is the page's text, never the model's.
      */
     val printedAs: String? = null,
+    /** The value's context as the page bears it out (passage as printed, things and period printed on the page); null when none. */
+    val context: PageContext? = null,
+    /** Context the model gave that the page does not print, dropped (the value itself is judged on its own). */
+    val contextDropped: List<String> = emptyList(),
 )
 
 /**
@@ -43,6 +47,10 @@ data class CheckedValue(
  * would lose the whole list item that holds it. A capitalized word of five or more letters that the page does not print is replaced by the
  * nearest word the page prints within two edits of it with the same first letter (the text layer's words first, then the OCR transcript's;
  * no guess when two are equally near), and the value is found only if the corrected value is then found as a whole. The page's spelling is what is kept ([CheckedValue.printedAs]); the correction is reported.
+ *
+ * **Context.** A value's passage is kept only when the page prints it as one run (as printed, case and spacing aside); each thing it is
+ * about, that thing's parent, and its period are kept only when the page prints them. What is dropped is reported; a value is never rejected
+ * for its context.
  */
 object StructureCheck {
 
@@ -189,6 +197,23 @@ object StructureCheck {
             return out.takeIf { changed && found(it) }
         }
 
+        fun checkContext(ctx: PageContext?): Pair<PageContext?, List<String>> {
+            if (ctx == null || ctx.isEmpty()) return null to emptyList()
+            val dropped = ArrayList<String>()
+            fun asPrinted(s: String): String? = when {
+                found(s) -> printedForm(s) ?: s.trim()
+                else -> corrected(s)
+            }
+            val passage = ctx.passage?.let { p -> printedForm(p) ?: run { dropped += "passage not printed as given"; null } }
+            val about = ctx.about.mapNotNull { t ->
+                val name = asPrinted(t.name) ?: run { dropped += "about '${t.name}' not on the page"; return@mapNotNull null }
+                val parent = t.parent?.let { p -> asPrinted(p) ?: run { dropped += "parent '$p' not on the page"; null } }
+                PageThing(name, t.kind, parent)
+            }
+            val asOf = ctx.asOf?.let { a -> (if (found(a)) printedForm(a) ?: a.trim() else null) ?: run { dropped += "period '$a' not on the page"; null } }
+            return PageContext(passage, about, asOf).takeIf { !it.isEmpty() } to dropped
+        }
+
         fun labelFound(label: String): Boolean {
             if (label.isBlank() || found(label)) return true
             val w = words(normalize(label)).map { it.text }.filter { it.length > 1 || it[0].isDigit() }
@@ -212,17 +237,18 @@ object StructureCheck {
                     printedAs = fix ?: printedForm(s.heading)?.takeIf { it != s.heading })
                 val from = starts[i]
                 val to = starts.drop(i + 1).filterNotNull().firstOrNull { from == null || it > from } ?: hi
-                fun add(kind: String, v: String, label: String = "") {
+                fun add(kind: String, v: String, label: String = "", ctx: PageContext? = null) {
                     val ok = found(v)
                     val fix = if (ok) null else corrected(v)
                     val at = reading.locate(fix ?: v)
+                    val (context, dropped) = checkContext(ctx)
                     out += CheckedValue(
                         path, kind, v, ok || fix != null, if (from == null || at.isEmpty()) null else at.any { it in from until to },
-                        label, labelFound(label), printedAs = fix ?: printedForm(v)?.takeIf { it != v },
+                        label, labelFound(label), printedAs = fix ?: printedForm(v)?.takeIf { it != v }, context = context, contextDropped = dropped,
                     )
                 }
-                s.numbers.forEach { add("number", it.value, it.label) }
-                s.items.forEach { add("item", it) }
+                s.numbers.forEach { add("number", it.value, it.label, it.context) }
+                s.items.forEach { add("item", it, ctx = s.itemContext[it]) }
                 s.tables.forEach { t -> t.flatten().forEach { add("cell", it) } }
                 s.charts.forEach { c -> (listOf(c.title).filter { it.isNotBlank() } + c.values).forEach { add("chart", it) } }
                 if (from != null) walk(s.subsections, path, from, to) else walk(s.subsections, path, lo, hi)

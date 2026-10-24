@@ -49,13 +49,15 @@ leading "the". An unlisted name stands for itself; nothing is guessed. One alias
 
 ## Prompts
 
-The two system prompts live in code (`PromptSet.DEFAULT`, version `claims-v4`), reviewed and tested; a run records the version. `claims-v2` follows the first live
+The two system prompts live in code (`PromptSet.DEFAULT`, version `claims-v5`), reviewed and tested; a run records the version. `claims-v2` follows the first live
 run on the districtwide sheet: for a table, quote the whole row and give the column header as the place (value-only cell quotes never agreed with whole-row
 quotes, so a table gave no claim); a number's quote must carry what it counts; no headings, footers or "Updated <date>" stamps; one sentence is not cut into
 fragments; the place is the outermost heading that names a scenario. `claims-v3` follows the second live run: the passes disagreed on the place of page-2 claims (one gave
 the card name, the other the scenario), which cost the whole page. Now a scenario/option/party heading is always the place, never a card, box or list name; those go in the
 subject, which is now required. `claims-v4` follows the third live run: the passes agreed on place but not on the shape of the quote (pass 1 one item per claim, pass 2 a whole list; label and number
 reordered or invented), so most of page 2 stayed unestablished. Now a list is one claim per item, words are copied in printed order, and an assertion that cannot be copied exactly is left out.
+`claims-v5` adds context (below): a sentence that states several values is one claim per value with the sentence as its passage, and each claim may name the
+things it is about and its period, as printed.
 
 **Trying other wording without a rebuild.** `ClaimExtractionCli --prompts prompts.json` (`{"pass1": "...", "pass2": "..."}`) or `prompts` in the route request
 replaces only the wording. The run is recorded as `custom-<first 16 hex of the SHA-256 of both prompts>`, so the record still names the exact text; the text itself
@@ -64,6 +66,35 @@ as the next version through a normal PR. Both prompts are required, non-blank, a
 
 **Logging.** Per chunk and pass the engine logs the number of claims reported, the time taken, how the server says the answer ended (finish reason) and its completion tokens, and per chunk the agreed, disagreement and rejected counts. Counts and
 times only; never a passage.
+
+## Claims in context
+
+Design: the Notion page "Claims in context: passages, values, and things resolved at read time". A value without its context ("78% students of color", no
+school, no year) is right but not usable, so an established claim also keeps:
+
+```
+Passage (Phrase, role = passage) --QUOTES--> Chunk            "In 2023–24, 78% of Clark's students were students of color and 39% were ..."
+   └─FOLLOWS (relation = decomposition)--> Claim (FACT item)   quote "78% of Clark's students were students of color", claimAsOf "2023–24"
+                                              └─ABOUT--> Concept "Clark Elementary" (kind school, parent Portland Public Schools)
+```
+
+- **Passage:** the printed sentence, list item, card text or table row the claim's quote sits in, kept verbatim and found in the chunk. It is a Phrase that is never
+  ASSERTed, keyed per Source and text, so the values of one sentence share one passage and a rerun adds nothing. The claim's own quote stays its identity, so
+  agreement, replay and Re-checking are unchanged.
+- **About:** the things the value describes, each a Concept identified by name + kind + parent (`db/ConceptStore.kt`). Known aliases are resolved first (PPS =
+  Portland Public Schools). A namesake with another kind or parent is a separate Concept linked by `POSSIBLY_SAME` with the reason, never merged. Concepts the
+  Horizon makes in conversation (kind `topic`, no `conceptKey`) are never reused for a document claim, and the Horizon never reuses a document Concept.
+- **Period** (`claimAsOf`): when the value was true, as printed ("2023–24"); not when the document said it.
+- **Agreement:** context is kept only where both passes give it and the chunk prints it ([ClaimAgreement.context]); a thing or period one pass leaves out, or the
+  chunk does not print, is left off. Context never decides whether a claim is established. The vision reader checks the same against the page before the chunk
+  is made (`docs/vision-reading.md`).
+- **Read time:** `GET /debug/concepts?syntheticUserId=…&name=…` answers a name with every Concept that has it: kind, parent, `POSSIBLY_SAME` links with reasons,
+  whether it was named in conversation, and how many of the user's claims (from which Sources) are about it. Nothing is chosen or merged there; the caller picks.
+  `GET /debug/sources/{uid}/claims` shows each claim's `passage`, `about` and `asOf`.
+- **Chat:** established document claims and passages stay out of the Context Horizon (selection and `itemsAbout`) until the Horizon can present them as the
+  source's, not the user's.
+- **Next:** linking the claims of the two readers that state the same value about the same thing and period (corroboration) and putting disagreeing ones into
+  Re-checking. Not built yet.
 
 ## Runs, stamps, idempotency
 

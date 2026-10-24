@@ -108,15 +108,16 @@ class LocalClaimModelTest {
     }
 
     @Test
-    fun `the built-in prompts are claims-v4 and carry the rules for tables, labelled numbers, headings and page furniture`() {
+    fun `the built-in prompts are claims-v5 and carry the rules for tables, labelled numbers, headings and page furniture`() {
         val d = PromptSet.DEFAULT
-        assertEquals("claims-v4", d.version)
+        assertEquals("claims-v5", d.version)
         assertNotEquals(d.pass1, d.pass2)
         for (p in listOf(d.pass1, d.pass2)) {
             assertTrue(p.contains("the whole row") && p.contains("never a single cell"), "tables: whole row, column header as place")
             assertTrue(p.contains("what it counts") && p.contains("never \"38\" alone"), "a number carries its label")
             assertTrue(p.contains("page furniture") && p.contains("Updated <date>"), "no footers or date stamps")
-            assertTrue(p.contains("Do not cut one sentence into fragments"))
+            assertTrue(p.contains("Quote the whole sentence when it makes one assertion") && p.contains("give one claim per value"), "a sentence of several values is split by value")
+            assertTrue(p.contains("passage: the whole sentence") && p.contains("as_of:") && p.contains("leave it empty rather than guess"), "context: passage, about, period, never guessed")
             assertTrue(p.contains("outermost one that names a scenario"))
             assertTrue(p.contains("one claim per list item") && p.contains("Never give a whole list as one quote"), "lists are split into items")
             assertTrue(p.contains("Never reorder them and never add a word that is not there"), "quotes keep the passage's order")
@@ -141,7 +142,7 @@ class LocalClaimModelTest {
         fun system(i: Int) = Json.parseToJsonElement(bodies[i]).jsonObject["messages"]!!.jsonArray.first().jsonObject["content"]!!.jsonPrimitive.content
         assertEquals("FIRST-WORDING", system(0)); assertEquals("SECOND-WORDING", system(1))
         assertTrue(m.promptVersion.startsWith("custom-"))
-        assertEquals("claims-v4", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
+        assertEquals("claims-v5", LocalClaimModel(LocalLlmClient(baseUrl = "http://127.0.0.1:1/v1"), null).promptVersion)
     }
 
     @Test
@@ -149,5 +150,21 @@ class LocalClaimModelTest {
         reply = { """{"model":"Qwen3.6-35B-A3B","usage":{"completion_tokens":321},"choices":[{"finish_reason":"tool_calls","message":{"content":"","tool_calls":[{"function":{"name":"report_claims","arguments":"{\"claims\":[]}"}}]}}]}""" }
         val r = model().extract(source, chunk, 1)
         assertEquals("tool_calls", r.finishReason); assertEquals(321, r.completionTokens)
+    }
+
+    @Test
+    fun `the context a pass gives is read, and context in another shape is left out without refusing the answer`() {
+        val input = kotlinx.serialization.json.Json.parseToJsonElement("""{"claims": [
+            {"quote": "78% of Clark's students were students of color", "kind": "number", "passage": "In 2023–24, 78% of Clark's students were students of color.",
+             "about": [{"name": "Clark Elementary", "kind": "school", "parent": "PPS"}, "not an object", {"kind": "no name"}], "as_of": "2023–24"},
+            {"quote": "The Board voted 5 to 2.", "kind": "vote", "about": "PPS"}
+        ]}""") as kotlinx.serialization.json.JsonObject
+        val claims = LocalClaimModel.parseClaims(input)
+        assertEquals(listOf(ThingRef("Clark Elementary", "school", "PPS")), claims[0].about)
+        assertEquals("2023–24", claims[0].asOf)
+        assertEquals("In 2023–24, 78% of Clark's students were students of color.", claims[0].passage)
+        assertTrue(claims[1].about.isEmpty() && claims[1].passage == null && claims[1].asOf == null)
+        val schema = LocalClaimModel.REPORT_TOOL.inputSchema.toString()
+        assertTrue(schema.contains("\"passage\"") && schema.contains("\"as_of\"") && schema.contains("\"about\""))
     }
 }

@@ -1,6 +1,8 @@
 package app.alfrd.engram.claims
 
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOwnership
+import app.alfrd.engram.db.ConceptRef
+import app.alfrd.engram.db.ConceptStore
 import com.arcadedb.database.Database
 import com.arcadedb.graph.Vertex
 import kotlinx.serialization.encodeToString
@@ -12,6 +14,8 @@ import java.util.UUID
 data class ClaimItem(
     val uid: String, val quote: String, val place: String?, val claimant: String?, val claimantAsWritten: String?, val subject: String, val kind: String,
     val runId: String?, val checkState: String, val recheckRunId: String?, val chunkUids: List<String>,
+    /** The passage the claim was decomposed from, the things it is about and the period it refers to; empty where none was agreed. */
+    val passage: String? = null, val about: List<ConceptRef> = emptyList(), val asOf: String? = null,
 )
 
 /** A stored run: where it stands and, once it has run, its counts. */
@@ -133,6 +137,49 @@ class ClaimStore(private val db: Database) {
         }
     }
 
+    /**
+     * Stores an established claim's context (docs/claim-extraction.md, "Claims in context"): its period; the passage it was decomposed from,
+     * as a Phrase that is never ASSERTed, QUOTES-linked to [chunkUid] and FOLLOWS-linked (relation decomposition) to the claim; and the things
+     * it is ABOUT, each resolved to a Concept by name, kind and parent ([ConceptStore]). Additive and idempotent: a claim's period, once set, is
+     * kept; a passage already stored for this source is reused; links are not repeated.
+     */
+    fun attachContext(userEmail: String, itemUid: String, sourceUid: String, chunkUid: String, claim: AgreedClaim, runId: String, aliases: ClaimantResolver) {
+        val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return
+        claim.passage?.let { passage -> linkPassage(userEmail, item, sourceUid, chunkUid, passage, runId) }
+        if (claim.about.isNotEmpty()) {
+            val concepts = ConceptStore(db, aliases)
+            claim.about.forEach { t -> concepts.linkAbout(userEmail, itemUid, concepts.resolve(userEmail, t.name, t.kind, t.parent).uid, runId) }
+        }
+        // Last, on the record as it now is: linking edges above rewrites the claim's record.
+        claim.asOf?.let { asOf ->
+            val fresh = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return
+            if (fresh.get("claimAsOf") == null) db.transaction { fresh.modify().set("claimAsOf", asOf).save() }
+        }
+    }
+
+    private fun linkPassage(userEmail: String, item: Vertex, sourceUid: String, chunkUid: String, passage: String, runId: String) {
+        val key = digest("$userEmail|$sourceUid|${ClaimAgreement.quoteKey(passage)}")
+        db.transaction {
+            val chunk = db.query("sql", "SELECT FROM Chunk WHERE uid = :u AND ownerEmail = :o", mapOf("u" to chunkUid, "o" to userEmail))
+                .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null } ?: return@transaction
+            val p = db.query("sql", "SELECT FROM Phrase WHERE passageKey = :k", mapOf("k" to key)).use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+                ?: db.newVertex("Phrase").apply {
+                    set("uid", UUID.randomUUID().toString()); set("text", passage); set("role", "passage"); set("passageKey", key)
+                    set("passageSourceUid", sourceUid); set("ownerEmail", userEmail); set("visibility", "private"); set("createdAt", System.currentTimeMillis())
+                    save()
+                }
+            if (p.getEdges(Vertex.DIRECTION.OUT, "QUOTES").none { it.inVertex.identity == chunk.identity }) {
+                p.modify().newEdge("QUOTES", chunk, false).apply { set("writer", ClaimExtractionService.WRITER); set("runId", runId); set("createdAt", System.currentTimeMillis()); save() }
+            }
+            if (p.getEdges(Vertex.DIRECTION.OUT, "FOLLOWS").none { it.inVertex.identity == item.identity && it.get("relation") == "decomposition" }) {
+                // Two-way, so a claim finds the passage it was decomposed from.
+                p.modify().newEdge("FOLLOWS", item, true).apply {
+                    set("relation", "decomposition"); set("ownerEmail", userEmail); set("runId", runId); save()
+                }
+            }
+        }
+    }
+
     /** Moves an established claim to Re-checking. The claim itself, its quote, its claimant and its chunks are untouched. */
     fun markRechecking(userEmail: String, itemUid: String, runId: String): Boolean {
         val item = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, itemUid) ?: return false
@@ -158,6 +205,12 @@ class ClaimStore(private val db: Database) {
 
     private fun toClaim(v: Vertex): ClaimItem {
         val edges = v.getEdges(Vertex.DIRECTION.OUT, "QUOTES").toList()
+        val owner = v.get("ownerEmail") as? String
+        val passage = v.getEdges(Vertex.DIRECTION.IN, "FOLLOWS").firstOrNull { it.get("relation") == "decomposition" }?.outVertex?.asVertex()?.get("text") as? String
+        val about = v.getEdges(Vertex.DIRECTION.OUT, "ABOUT").filter { owner == null || it.get("ownerEmail") == owner }.map { e ->
+            val c = e.inVertex.asVertex()
+            ConceptRef(c.get("uid") as String, c.get("name") as? String ?: "", c.get("type") as? String ?: "", c.get("parentName") as? String)
+        }
         return ClaimItem(
             uid = v.get("uid") as String, quote = v.get("claimQuote") as? String ?: v.get("text") as? String ?: "", place = v.get("claimPlace") as? String,
             claimant = v.get("claimClaimant") as? String,
@@ -165,6 +218,7 @@ class ClaimStore(private val db: Database) {
             kind = v.get("claimKind") as? String ?: ClaimKind.FACT.name, runId = v.get("claimRunId") as? String,
             checkState = v.get("checkState") as? String ?: CheckState.SETTLED.label, recheckRunId = v.get("recheckRunId") as? String,
             chunkUids = edges.map { it.inVertex.asVertex().get("uid") as String }.distinct(),
+            passage = passage, about = about, asOf = v.get("claimAsOf") as? String,
         )
     }
 

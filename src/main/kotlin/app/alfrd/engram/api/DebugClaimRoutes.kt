@@ -57,6 +57,8 @@ data class DebugClaimRunStarted(val runId: String, val sourceUid: String, val st
 data class DebugClaimView(
     val uid: String, val quote: String, val place: String?, val claimant: String?, val claimantAsWritten: String?, val subject: String, val kind: String,
     val checkState: String, val runId: String?, val recheckRunId: String?, val locations: List<String>,
+    /** The passage the claim was decomposed from, the things it is about and the period it refers to (claims in context). */
+    val passage: String? = null, val about: List<app.alfrd.engram.db.ConceptRef> = emptyList(), val asOf: String? = null,
 )
 
 @Serializable
@@ -141,8 +143,15 @@ fun Application.configureDebugClaimRoutes(
                     if (sources.sourceByUid(email, uid) == null) return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown source"))
                     call.respond(HttpStatusCode.OK, claims.claims(email, uid).map { c ->
                         DebugClaimView(c.uid, c.quote, c.place, c.claimant, c.claimantAsWritten, c.subject, c.kind, c.checkState, c.runId, c.recheckRunId,
-                            sources.provenanceOf(email, c.uid).map { it.location })
+                            sources.provenanceOf(email, c.uid).map { it.location }, c.passage, c.about, c.asOf)
                     })
+                }
+                // Things by name, as read time sees them: every Concept with that name, its kind and parent, how many of this user's claims
+                // are about it, and the Concepts it may be the same as. Nothing is merged or chosen here.
+                get("/concepts") {
+                    val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
+                    val name = call.request.queryParameters["name"]?.takeIf { it.isNotBlank() } ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "name is required"))
+                    call.respond(HttpStatusCode.OK, app.alfrd.engram.db.ConceptStore(db).candidates(email, name))
                 }
                 get("/sources/{uid}/claim-disagreements") {
                     val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get

@@ -14,9 +14,15 @@ import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.slf4j.LoggerFactory
 import java.security.MessageDigest
 
-/** One checked entry of a vision reading: what it is, the headings it sits under, its value, and the line of the chunk text that states it. */
+/**
+ * One checked entry of a vision reading: what it is, the headings it sits under, its value, and the line of the chunk text that states it;
+ * with the context the page bears out: the passage it is printed in (also a line of the chunk), the things it is about and its period.
+ */
 @Serializable
-data class ReadingEntry(val kind: String, val path: List<String>, val value: String, val label: String = "", val line: String)
+data class ReadingEntry(
+    val kind: String, val path: List<String>, val value: String, val label: String = "", val line: String,
+    val passage: String? = null, val about: List<PageThing> = emptyList(), val asOf: String? = null,
+)
 
 /** Why a page goes to the vision reader. Empty reasons: it stays with the text reader. */
 @Serializable
@@ -218,6 +224,12 @@ object VisionReading {
             else -> "kept"
         }
         fun words(v: String) = StructureCheck.words(StructureCheck.normalize(v)).map { it.text }
+        // The context the page bears out goes on the entry; what it does not print is reported, and the value is kept.
+        fun entry(kind: String, path: List<String>, value: String, label: String, line: String, c: CheckedValue?, prefix: String): ReadingEntry {
+            c?.contextDropped?.forEach { rejected += "$prefix :: $value — $it (value kept)" }
+            val ctx = c?.context
+            return ReadingEntry(kind, path, value, label, line, ctx?.passage, ctx?.about.orEmpty(), ctx?.asOf)
+        }
 
         // The words of each table's cells, by the path of the section that holds the table (the model's path, invented headings included).
         val tableWords = ArrayList<Pair<List<String>, List<Set<String>>>>()
@@ -257,13 +269,13 @@ object VisionReading {
                         else -> {
                             val v = printed(c, n.value, prefix)
                             val l = line(v + (if (n.label.isNotBlank()) " ${n.label}" else ""))
-                            lines += l; entries += ReadingEntry("number", shown, v, n.label, l)
+                            lines += l; entries += entry("number", shown, v, n.label, l, c, prefix)
                         }
                     }
                 }
                 s.items.forEach { item ->
                     val c = check(path, "item", item)
-                    if (ok(c)) { val v = printed(c, item, prefix); val l = line(v); lines += l; entries += ReadingEntry("item", shown, v, line = l) }
+                    if (ok(c)) { val v = printed(c, item, prefix); val l = line(v); lines += l; entries += entry("item", shown, v, "", l, c, prefix) }
                     else rejected += "$prefix :: $item — ${why(c)}"
                 }
                 s.tables.forEach { t ->
@@ -294,7 +306,9 @@ object VisionReading {
             }
         }
         walk(sections, emptyList(), emptyList())
-        return Built(lines.joinToString("\n"), entries, rejected, corrected)
+        // Each kept passage is also a line of the chunk, so a claim's passage is a passage of its chunk like any quote.
+        val passages = entries.mapNotNull { it.passage }.distinct().filter { it !in lines }
+        return Built((lines + passages).joinToString("\n"), entries, rejected, corrected)
     }
 
     /** The checked entries of a vision chunk. Empty for any other chunk. */
