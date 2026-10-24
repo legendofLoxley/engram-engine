@@ -62,7 +62,7 @@ class VisionIdentityFixesTest {
         assertTrue("\"text\"" in PageStructure.PROMPT)
         assertTrue("asOf" in PageStructure.PROMPT && "2031–32" in PageStructure.PROMPT)
         assertTrue("618" in PageStructure.PROMPT)
-        assertEquals("structure-v6", PageStructure.VERSION)
+        assertEquals("structure-v7", PageStructure.VERSION)
     }
 
     @Test
@@ -83,6 +83,35 @@ class VisionIdentityFixesTest {
         val built = VisionReading.build(sections, StructureCheck.check(sections, page))
         assertEquals("2031–32 school year", built.entries.single { it.value == "14" }.asOf)
         assertEquals("2029–30", built.entries.single { it.value == "80%" }.asOf)
+    }
+
+    @Test
+    fun `a period the page states for its figures reaches them whichever section the model hung it on, and a value that names a year keeps to it`() {
+        val page = """
+            Comparing three scenarios
+
+            All figures are projections for the
+            2031–32 school year unless noted.
+            a plain item
+
+            SCENARIO A
+            14 schools close
+            Enrollment was 40,100 in 2023–24.
+            SUSTAINABILITY THRESHOLDS
+            48%
+        """.trimIndent()
+        assertEquals("2031–32 school year", StructureCheck.pageStatedPeriod(page))
+        assertNull(StructureCheck.pageStatedPeriod("Enrollment fell in the 2023–24 school year."), "no statement about the page's figures")
+        // The model put no period on any section here (a different answer on another run).
+        val sections = PageStructure.parse("""{"sections": [{"heading": "Comparing three scenarios", "items": ["a plain item"], "subsections": [
+            {"heading": "SCENARIO A", "numbers": [{"value": "14", "label": "schools close"},
+              {"value": "40,100", "label": "enrollment", "passage": "Enrollment was 40,100 in 2023–24."}]},
+            {"heading": "SUSTAINABILITY THRESHOLDS", "numbers": [{"value": "48%"}]}]}]}""")
+        val built = VisionReading.build(sections, StructureCheck.check(sections, page))
+        assertEquals("2031–32 school year", built.entries.single { it.value == "14" }.asOf)
+        assertEquals("2031–32 school year", built.entries.single { it.value == "48%" }.asOf)
+        assertNull(built.entries.single { it.value == "40,100" }.asOf, "unless noted: its own passage names 2023–24, and the model gave no period")
+        assertNull(built.entries.single { it.kind == "item" }.asOf, "a list item is not a figure")
     }
 
     @Test
