@@ -204,6 +204,14 @@ class EntityIdentityTest {
         assertTrue(cands.single().possiblySame.isEmpty(), "bea's Clark is not offered as a twin")
         assertEquals(emptyList<ConceptStore.NameCheck>(), concepts().nameChecks(ana))
         assertEquals(listOf(theirs.uid), concepts(bea).candidates(bea, "Clark").map { it.uid })
+        // A shared Concept carries the other owner's links too: they stay out of this owner's view of it.
+        val shared0 = thing("Clark", "school", null, "PPS", owner = bea)
+        assertEquals(theirs.uid, shared0.uid)
+        val third = thing("Clark Elementary", "school", null, "PPS", owner = bea)
+        assertEquals(listOf(theirs.uid, third.uid).toSet(), concepts(bea).candidates(bea, "Clark").map { it.uid }.toSet())
+        val meAgain = thing("Clark", "school", null, "PPS")
+        assertEquals(theirs.uid, meAgain.uid, "the same name, kind and parent is the one shared Concept")
+        assertTrue(concepts().candidates(ana, "Clark").flatMap { c -> c.possiblySame }.none { it.uid == third.uid }, "bea's twin link is not shown to ana")
         // The same name, kind and parent is one shared Concept, seen by each owner through their own links.
         val shared = thing("Lincoln", "school", null, "PPS", owner = bea)
         assertEquals(shared.uid, thing("Lincoln", "school", null, "PPS").uid)

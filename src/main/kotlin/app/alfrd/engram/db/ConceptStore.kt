@@ -179,8 +179,10 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
     fun candidates(userEmail: String, name: String, registry: AliasRegistry? = null): List<ConceptCandidate> = sameName(userEmail, name).map { v ->
         val claims = v.getEdges(Vertex.DIRECTION.IN, "ABOUT").filter { it.get("ownerEmail") == userEmail }
             .map { it.outVertex.asVertex() }.filter { it.get("claimSourceUid") != null }
+        // A Concept is shared, so its links may be another owner's: only this owner's links, to Concepts this owner has evidence about.
         val twins = (v.getEdges(Vertex.DIRECTION.OUT, "POSSIBLY_SAME").map { it to it.inVertex.asVertex() } +
             v.getEdges(Vertex.DIRECTION.IN, "POSSIBLY_SAME").map { it to it.outVertex.asVertex() })
+            .filter { (e, o) -> e.get("ownerEmail") == userEmail && ownerHasEvidenceAbout(userEmail, o) }
             .map { (e, o) -> val r = o.toRef(); PossiblySame(r.uid, r.name, r.kind, r.parent, e.get("reason") as? String ?: "", e.get("decision") as? String) }
             .distinctBy { it.uid }
         val r = v.toRef()
