@@ -152,7 +152,13 @@ class ClaimStore(private val db: Database) {
             // Each thing is filed under the name the page prints. Names recorded as one (AliasRegistry) are grouped when read, never here, so
             // turning an alias off splits them without rewriting a link.
             val concepts = ConceptStore(db)
-            claim.about.forEach { t -> concepts.linkAbout(userEmail, itemUid, concepts.resolve(userEmail, t.name, t.kind, t.parent, issuer).uid, runId) }
+            // A school is not part of another school: when a claim names both and the parent of one is the other, the page's heading was taken
+            // for a parent. The issuer is the parent then (ConceptStore.resolve).
+            val schools = claim.about.filter { EntityRules.kindFor(it.name, it.kind) == "school" }.map { ClaimantResolver.key(it.name) }.toSet()
+            claim.about.forEach { t ->
+                val parent = t.parent?.takeIf { p -> !(EntityRules.kindFor(t.name, t.kind) == "school" && ClaimantResolver.key(p) in schools) }
+                concepts.linkAbout(userEmail, itemUid, concepts.resolve(userEmail, t.name, t.kind, parent, issuer).uid, runId)
+            }
         }
         // Last, on the record as it now is: linking edges above rewrites the claim's record.
         claim.asOf?.let { asOf ->

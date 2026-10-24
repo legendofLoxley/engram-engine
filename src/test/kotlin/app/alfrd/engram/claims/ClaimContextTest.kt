@@ -121,15 +121,23 @@ class ClaimContextTest {
     @Test
     fun `a thing is identified by name, kind and parent, and a namesake is linked as possibly the same, never merged`() {
         val concepts = ConceptStore(db, resolver)
-        val school = concepts.resolve(ana, "Clark", "school", "PPS")
+        // A Concept is seen by its owner through a claim about it.
+        fun seen(c: app.alfrd.engram.db.ConceptRef): app.alfrd.engram.db.ConceptRef {
+            val phrase = UUID.randomUUID().toString()
+            db.transaction { db.newVertex("Phrase").apply { set("uid", phrase); set("text", "c"); set("ownerEmail", ana); set("claimSourceUid", "s"); save() } }
+            concepts.linkAbout(ana, phrase, c.uid, "r"); return c
+        }
+        val school = seen(concepts.resolve(ana, "Clark", "school", "PPS"))
         assertEquals(school.uid, concepts.resolve(ana, "clark  ", "School", "pps").uid, "same name, kind and parent (case and spacing aside)")
-        val person = concepts.resolve(ana, "Clark", "person", null)
+        val person = seen(concepts.resolve(ana, "Clark", "person", null))
         assertNotEquals(school.uid, person.uid)
-        val other = concepts.resolve(ana, "Clark", "school", "Vancouver Public Schools")
+        val other = seen(concepts.resolve(ana, "Clark", "school", "Vancouver Public Schools"))
         assertNotEquals(school.uid, other.uid)
 
         // A Concept made in conversation is its own thing too, and the Horizon never reuses a document Concept.
-        db.transaction { db.newVertex("Concept").set("uid", UUID.randomUUID().toString()).set("name", "Clark").set("type", "topic").set("normalizedName", "clark").save() }
+        val chatUid = UUID.randomUUID().toString()
+        db.transaction { db.newVertex("Concept").set("uid", chatUid).set("name", "Clark").set("type", "topic").set("normalizedName", "clark").save() }
+        seen(app.alfrd.engram.db.ConceptRef(chatUid, "Clark", "topic"))
         val cands = concepts.candidates(ana, "Clark")
         assertEquals(4, cands.size)
         assertEquals(1, cands.count { it.fromChat })
@@ -137,6 +145,23 @@ class ClaimContextTest {
         assertTrue(twins.any { it.uid == school.uid && it.reason.contains("parents differ") }, twins.toString())
         assertTrue(cands.single { it.uid == person.uid }.possiblySame.any { it.uid == school.uid && it.reason.contains("kinds differ") })
         assertEquals("other", ConceptStore.kindOf("spaceship")); assertEquals("public body", ConceptStore.kindOf("District"))
+    }
+
+    @Test
+    fun `a school named as the parent of another school in the same claim is not its parent`() = runBlocking<Unit> {
+        val text = "In 2023–24, 78% of Harrison Park K–5's students were students of color, and Clark's were 12%."
+        val s = ingest(text)
+        val model = FakeClaimModel { _, _ ->
+            listOf(
+                PassClaim("78% of Harrison Park K–5's students were students of color", null, "x", "number", passage = text,
+                    about = listOf(ThingRef("Harrison Park K–5", "school", "Clark"), ThingRef("Clark", "school")), asOf = "2023–24"),
+            )
+        }
+        service().run(ana, s.uid, "ctx-parent", model)
+        val c = claims.claims(ana, s.uid).single()
+        val harrison = c.about.single { it.name == "Harrison Park K–5" }
+        assertNull(harrison.parent, "Clark is a school, so it was the page's heading, not a parent; no issuer was set")
+        assertEquals("school", harrison.kind)
     }
 
     @Test
