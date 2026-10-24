@@ -48,6 +48,8 @@ class EntityRulesTest {
         assertEquals(listOf("Portland Public Schools" to "PPS"), EntityRules.definedAliases("Portland Public Schools (PPS) has more buildings than enrollment supports."))
         assertEquals(listOf("Portland Public Schools" to "PPS"), EntityRules.definedAliases("This report is for Portland Public Schools (PPS)."), "the words before the name are not part of it")
         assertEquals(listOf("Save Portland Schools" to "SPS"), EntityRules.definedAliases("Members of Save Portland Schools (SPS) spoke."))
+        assertEquals(listOf("Portland Public Schools" to "PPS"), EntityRules.definedAliases("Portland Public Schools’ (PPS) Scenario A closes 11 schools."), "a possessive is not part of the name")
+        assertEquals(listOf("Portland Public Schools" to "PPS"), EntityRules.definedAliases("Portland Public Schools' (PPS) plan."))
         assertEquals(listOf("Board of Education" to "BOE"), EntityRules.definedAliases("The Board of Education (BOE) voted."), "small words do not count as initials")
         assertEquals(emptyList<Pair<String, String>>(), EntityRules.definedAliases("The report (DRAFT) is long and Clark Elementary (see page 4) is closed."), "letters that are not initials define nothing")
         assertEquals(emptyList<Pair<String, String>>(), EntityRules.definedAliases("Lunch (FREE) is served."))

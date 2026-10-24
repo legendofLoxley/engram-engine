@@ -98,12 +98,15 @@ class DebugIdentityRoutesTest {
     fun `name checks are listed, answered once, and the answer shows in the alias list and the entities`() = withEnv { m ->
         val db = m.getDatabase(); val registry = AliasRegistry(db)
         val concepts = ConceptStore(db, registry.resolverFor(email))
-        val clark = concepts.resolve(email, "Clark", "school", null, "PPS"); val elem = concepts.resolve(email, "Clark Elementary", "school", null, "PPS")
-        listOf(clark, elem).forEach { c ->
+        // Each is linked from a claim as soon as it is resolved, as extraction does.
+        fun thing(name: String): app.alfrd.engram.db.ConceptRef {
+            val c = concepts.resolve(email, name, "school", null, "PPS")
             val phrase = UUID.randomUUID().toString()
             db.transaction { db.newVertex("Phrase").apply { set("uid", phrase); set("text", "c"); set("ownerEmail", email); set("claimSourceUid", "s"); save() } }
             concepts.linkAbout(email, phrase, c.uid, "r")
+            return c
         }
+        val clark = thing("Clark"); val elem = thing("Clark Elementary")
         testApplication {
             application { module(m) }
             val checks = json(get("/debug/name-checks?syntheticUserId=$label").bodyAsText()).jsonArray

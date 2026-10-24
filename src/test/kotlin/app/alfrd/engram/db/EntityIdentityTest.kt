@@ -48,12 +48,19 @@ class EntityIdentityTest {
         return uid
     }
 
+    /** A Concept as extraction leaves one: resolved, then linked from a claim of [owner], which is what makes it visible to them. */
+    private fun thing(name: String, kind: String, parent: String?, issuer: String? = null, owner: String = ana): ConceptRef {
+        val c = concepts(owner).resolve(owner, name, kind, parent, issuer)
+        claimAbout(c.uid, owner)
+        return c
+    }
+
     @Test
     fun `a school with no parent printed takes the Source's issuer, and says where the parent came from`() {
-        val clark = concepts().resolve(ana, "Clark", "school", null, issuer = "Portland Public Schools")
+        val clark = thing("Clark", "school", null, "Portland Public Schools")
         assertEquals("Portland Public Schools", clark.parent)
         assertEquals("issuer", concepts().candidates(ana, "Clark").single().parentOrigin)
-        val stated = concepts().resolve(ana, "Lincoln", "school", "Salem-Keizer", issuer = "Portland Public Schools")
+        val stated = thing("Lincoln", "school", "Salem-Keizer", "Portland Public Schools")
         assertEquals("Salem-Keizer", stated.parent, "a parent the page names is never replaced by the issuer")
         assertEquals("stated", concepts().candidates(ana, "Lincoln").single().parentOrigin)
         assertNull(concepts().resolve(ana, "Portland Public Schools", "public body", null, issuer = "Portland Public Schools").parent, "a body is not its own parent")
@@ -77,24 +84,24 @@ class EntityIdentityTest {
 
     @Test
     fun `names that differ only by a designator are linked as possibly the same and never merged`() {
-        val clark = concepts().resolve(ana, "Clark", "school", null, issuer = "PPS")
-        val elem = concepts().resolve(ana, "Clark Elementary", "school", null, issuer = "PPS")
+        val clark = thing("Clark", "school", null, "PPS")
+        val elem = thing("Clark Elementary", "school", null, "PPS")
         assertNotEquals(clark.uid, elem.uid)
         val twins = concepts().candidates(ana, "Clark").flatMap { it.possiblySame }
         assertTrue(twins.any { it.uid == elem.uid && it.reason.startsWith("same name apart from a designator") }, twins.toString())
         // A lookup by either name finds both.
         assertEquals(setOf("Clark", "Clark Elementary"), concepts().candidates(ana, "Clark Elementary").map { it.name }.toSet())
 
-        val bev = concepts().resolve(ana, "Beverly Cleary", "school", null, issuer = "PPS")
-        val bev68 = concepts().resolve(ana, "Beverly Cleary 6–8", "school", null, issuer = "PPS")
+        val bev = thing("Beverly Cleary", "school", null, "PPS")
+        val bev68 = thing("Beverly Cleary 6–8", "school", null, "PPS")
         assertNotEquals(bev.uid, bev68.uid, "a grade band marks a different program")
         assertTrue(concepts().candidates(ana, "Beverly Cleary").flatMap { it.possiblySame }.any { it.uid == bev68.uid })
     }
 
     @Test
     fun `one name as a school and as a person stays two things`() {
-        val school = concepts().resolve(ana, "Clark", "school", null, issuer = "PPS")
-        val person = concepts().resolve(ana, "Clark", "person", null, issuer = "PPS")
+        val school = thing("Clark", "school", null, "PPS")
+        val person = thing("Clark", "person", null, "PPS")
         assertNotEquals(school.uid, person.uid)
         assertTrue(concepts().candidates(ana, "Clark").flatMap { it.possiblySame }.any { it.reason.contains("kinds differ") })
     }
@@ -140,9 +147,9 @@ class EntityIdentityTest {
 
     @Test
     fun `an undecided pair is listed once, a decision is reused, and same records an alias with its origin`() {
-        val clark = concepts().resolve(ana, "Clark", "school", null, issuer = "PPS")
-        val elem = concepts().resolve(ana, "Clark Elementary", "school", null, issuer = "PPS")
-        claimAbout(clark.uid); claimAbout(clark.uid); claimAbout(elem.uid)
+        val clark = thing("Clark", "school", null, "PPS")
+        val elem = thing("Clark Elementary", "school", null, "PPS")
+        claimAbout(clark.uid)
         val checks = concepts().nameChecks(ana)
         assertEquals(1, checks.size)
         assertEquals(setOf("Clark", "Clark Elementary"), setOf(checks[0].a.name, checks[0].b.name))
@@ -164,9 +171,8 @@ class EntityIdentityTest {
 
     @Test
     fun `different keeps the pair apart and out of the list, and the entities view still shows them as two things`() {
-        val clark = concepts().resolve(ana, "Clark", "school", null, issuer = "PPS")
-        val elem = concepts().resolve(ana, "Clark Elementary", "school", null, issuer = "PPS")
-        claimAbout(clark.uid); claimAbout(elem.uid)
+        val clark = thing("Clark", "school", null, "PPS")
+        val elem = thing("Clark Elementary", "school", null, "PPS")
         assertTrue(concepts().decide(ana, clark.uid, elem.uid, same = false, registry = registry))
         assertEquals(emptyList<ConceptStore.NameCheck>(), concepts().nameChecks(ana))
         assertEquals(emptyList<AliasEntry>(), registry.list(ana))
@@ -177,9 +183,8 @@ class EntityIdentityTest {
 
     @Test
     fun `an unresolved pair shows in the entities view as may-be-the-same, and turning the alias off splits the entity`() {
-        val clark = concepts().resolve(ana, "Clark", "school", null, issuer = "PPS")
-        val elem = concepts().resolve(ana, "Clark Elementary", "school", null, issuer = "PPS")
-        claimAbout(clark.uid); claimAbout(elem.uid)
+        val clark = thing("Clark", "school", null, "PPS")
+        val elem = thing("Clark Elementary", "school", null, "PPS")
         val before = concepts().entities(ana, registry)
         assertEquals(2, before.size)
         assertTrue(before.single { it.name == "Clark" }.mayBeSameAs.any { it.name == "Clark Elementary" })
@@ -187,6 +192,22 @@ class EntityIdentityTest {
         assertEquals(1, concepts().entities(ana, registry).size)
         registry.setActive(ana, entry.uid, false)
         assertEquals(2, concepts().entities(ana, registry).size, "nothing was lost: the two Concepts were never merged in the graph")
+    }
+
+    @Test
+    fun `another owner's Concepts are never seen, offered as a twin, or counted`() {
+        val theirs = thing("Clark", "school", null, "PPS", owner = bea)
+        val mine = thing("Clark", "school", "Salem-Keizer", "PPS")
+        assertNotEquals(theirs.uid, mine.uid)
+        val cands = concepts().candidates(ana, "Clark")
+        assertEquals(listOf(mine.uid), cands.map { it.uid }, "only this owner's evidence is listed")
+        assertTrue(cands.single().possiblySame.isEmpty(), "bea's Clark is not offered as a twin")
+        assertEquals(emptyList<ConceptStore.NameCheck>(), concepts().nameChecks(ana))
+        assertEquals(listOf(theirs.uid), concepts(bea).candidates(bea, "Clark").map { it.uid })
+        // The same name, kind and parent is one shared Concept, seen by each owner through their own links.
+        val shared = thing("Lincoln", "school", null, "PPS", owner = bea)
+        assertEquals(shared.uid, thing("Lincoln", "school", null, "PPS").uid)
+        assertEquals(1, concepts().candidates(ana, "Lincoln").single().claims)
     }
 
     @Test

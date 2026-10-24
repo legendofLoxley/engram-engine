@@ -103,7 +103,7 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
                 p?.let { set("parentName", it); set("parentOrigin", if (stated != null) "stated" else "issuer") }
                 save()
             }
-            sameName(display, viaAliases = false).filter { it.identity != v.identity }.forEach { other ->
+            sameName(userEmail, display, viaAliases = false).filter { it.identity != v.identity }.forEach { other ->
                 v.newEdge("POSSIBLY_SAME", other, true).apply {
                     set("reason", reason(display, k, p, other)); set("ownerEmail", userEmail); set("createdAt", System.currentTimeMillis()); save()
                 }
@@ -127,17 +127,24 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
 
     /**
      * Every Concept whose name is [name], or one that differs only by a designator; with [viaAliases], also those named by one of its aliases
-     * (read time only: a new Concept is linked as possibly the same only on its own name).
+     * (read time only: a new Concept is linked as possibly the same only on its own name). Only Concepts [userEmail] has evidence about.
      */
-    private fun sameName(name: String, viaAliases: Boolean = true): List<Vertex> {
+    private fun sameName(userEmail: String, name: String, viaAliases: Boolean = true): List<Vertex> {
         val forms = if (viaAliases) aliasForms(name) else setOf(name)
         val names = forms.flatMap { listOf(normalizedName(it), EntityRules.looseName(it)) }.toSet()
         return names.flatMap { n -> listOf("normalizedName", "looseName").flatMap { field ->
             db.query("sql", "SELECT FROM Concept WHERE $field = :n", mapOf("n" to n)).use { rs ->
                 val out = ArrayList<Vertex>(); while (rs.hasNext()) out += rs.next().toElement().asVertex(); out
             }
-        } }.distinctBy { it.identity }
+        } }.distinctBy { it.identity }.filter { ownerHasEvidenceAbout(userEmail, it) }
     }
+
+    /**
+     * Concepts are shared between owners, but only the owner's own ABOUT links make one visible to them: another owner's Concepts are never
+     * listed, offered as a possible twin, or counted, and a name only they have used is not revealed.
+     */
+    private fun ownerHasEvidenceAbout(userEmail: String, concept: Vertex): Boolean =
+        concept.getEdges(Vertex.DIRECTION.IN, "ABOUT").any { it.get("ownerEmail") == userEmail }
 
     /** [name], its canonical name, and every other name the alias list gives that canonical name. */
     private fun aliasForms(name: String): Set<String> {
@@ -169,7 +176,7 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
             ?.getEdges(Vertex.DIRECTION.OUT, "ABOUT")?.filter { it.get("ownerEmail") == userEmail }?.map { it.inVertex.asVertex().toRef() }.orEmpty()
 
     /** Every Concept called [name], with what the owner's evidence says about each and its possible twins. The caller picks. */
-    fun candidates(userEmail: String, name: String, registry: AliasRegistry? = null): List<ConceptCandidate> = sameName(name).map { v ->
+    fun candidates(userEmail: String, name: String, registry: AliasRegistry? = null): List<ConceptCandidate> = sameName(userEmail, name).map { v ->
         val claims = v.getEdges(Vertex.DIRECTION.IN, "ABOUT").filter { it.get("ownerEmail") == userEmail }
             .map { it.outVertex.asVertex() }.filter { it.get("claimSourceUid") != null }
         val twins = (v.getEdges(Vertex.DIRECTION.OUT, "POSSIBLY_SAME").map { it to it.inVertex.asVertex() } +

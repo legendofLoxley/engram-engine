@@ -68,7 +68,8 @@ object EntityRules {
             if (run.first().lowercase() in SMALL_WORDS || !run.first()[0].isUpperCase()) continue
             val withSmall = run.map { it[0].uppercaseChar() }.joinToString("")
             val withoutSmall = run.filter { it.lowercase() !in SMALL_WORDS }.map { it[0].uppercaseChar() }.joinToString("")
-            if (letters == withoutSmall || letters == withSmall) return@mapNotNull run.joinToString(" ") to short
+            // A possessive before the parenthesis ("Portland Public Schools' (PPS)") is not part of the name.
+            if (letters == withoutSmall || letters == withSmall) return@mapNotNull run.joinToString(" ").trimEnd('\'', '’') to short
         }
         null
     }.distinct().toList()
