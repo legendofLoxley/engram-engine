@@ -163,7 +163,7 @@ class ClaimExtractionService(
                 r.onSuccess { got[pass] = it }.onFailure { e ->
                     if (e is CancellationException) { jobs.forEach { it.cancel() }; throw e }
                     // The class name only: a provider's message could echo the passage.
-                    failure = "chunk ${chunk.ordinal}: pass $pass failed (${e::class.java.simpleName})"
+                    failure = "chunk ${chunk.ordinal}: pass $pass failed (${(e as? ClaimPassFailure)?.message ?: e::class.java.simpleName})"
                     jobs.forEach { it.cancel() }
                 }
             }

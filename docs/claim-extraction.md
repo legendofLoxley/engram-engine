@@ -185,3 +185,5 @@ not installed, so scanned pages are unread and those Sources partial; Arx image 
 * A very short quote (a bare "38") is located at its first occurrence for the section check, which passes if any occurrence lies in the section.
 * One claim per (quote, place): a passage with a place in one run and none in another is the same claim; two places for one quote in a chunk are two claims.
 * A finished run with failed chunks stays finished; to retry them start a new run id (what is already there is not repeated).
+
+**Unreadable answers (text reader).** A pass whose answer cannot be read (most often the tool call cut off at the token limit, which the 2026-10-24 box run saw on 4 of 8 districtwide chunks at 12,000 tokens) is asked for once more. A second failure is reported as `unreadable answer twice: <reason> (finish <reason>, <n> tokens)`: fixed wording and counts only, never text. The output cap is 24,000 tokens (it was 12,000).
