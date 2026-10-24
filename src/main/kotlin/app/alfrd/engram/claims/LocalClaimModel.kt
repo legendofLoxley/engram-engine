@@ -77,6 +77,20 @@ class LocalClaimModel(
                                 put("subject", buildJsonObject { put("type", "string") })
                                 put("kind", buildJsonObject { put("type", "string"); put("enum", buildJsonArray { ClaimKind.entries.forEach { add(JsonPrimitive(it.name.lowercase())) } }) })
                                 put("place", buildJsonObject { put("type", "string") })
+                                put("passage", buildJsonObject { put("type", "string") })
+                                put("as_of", buildJsonObject { put("type", "string") })
+                                put("about", buildJsonObject {
+                                    put("type", "array")
+                                    put("items", buildJsonObject {
+                                        put("type", "object")
+                                        put("properties", buildJsonObject {
+                                            put("name", buildJsonObject { put("type", "string") })
+                                            put("kind", buildJsonObject { put("type", "string") })
+                                            put("parent", buildJsonObject { put("type", "string") })
+                                        })
+                                        put("required", buildJsonArray { add(JsonPrimitive("name")) })
+                                    })
+                                })
                             })
                             put("required", buildJsonArray { add(JsonPrimitive("quote")); add(JsonPrimitive("kind")) })
                         })
@@ -94,9 +108,14 @@ class LocalClaimModel(
                 val o = el as? JsonObject ?: throw IllegalStateException("a claim is not an object")
                 val quote = str(o, "quote")
                 if (quote.isEmpty()) throw IllegalStateException("a claim has no quote")
+                // Context is optional: an item of it the model wrote in another shape is left out, never a reason to refuse the answer.
+                val about = (o["about"] as? JsonArray)?.mapNotNull { t ->
+                    (t as? JsonObject)?.let { ThingRef(str(it, "name"), str(it, "kind"), str(it, "parent").takeIf { p -> p.isNotEmpty() }) }?.takeIf { it.name.isNotEmpty() }
+                }.orEmpty()
                 PassClaim(
                     quote = quote, claimant = str(o, "claimant").takeIf { it.isNotEmpty() }, subject = str(o, "subject"),
                     kind = str(o, "kind").ifEmpty { ClaimKind.FACT.name }, place = str(o, "place").takeIf { it.isNotEmpty() },
+                    passage = str(o, "passage").takeIf { it.isNotEmpty() }, about = about, asOf = str(o, "as_of").takeIf { it.isNotEmpty() },
                 )
             }
         }

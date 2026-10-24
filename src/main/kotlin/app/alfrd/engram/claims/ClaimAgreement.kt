@@ -17,6 +17,10 @@ import app.alfrd.engram.db.ChunkRecord
  * also name a place in it, those must match too). The subject, the kind and the wording of the claim are not compared: the
  * established claim keeps pass 1's. Only claims both passes reported are established; everything else is retained, whole, as a
  * disagreement. Nothing here is a score.
+ *
+ * **Context is kept on agreement too** ([context]): the passage a claim sits in, the things it is about and the period it refers to stay
+ * on an established claim only where both passes give them and the chunk prints them. Context never decides whether a claim is
+ * established: a claim the passes agree on but whose context they do not is established without that context.
  */
 object ClaimAgreement {
     const val REJECTED = "quote is not in the chunk"
@@ -41,7 +45,31 @@ object ClaimAgreement {
         return pattern.find(chunkText)?.value
     }
 
-    private data class Resolved(val version: ClaimVersion, val kind: ClaimKind)
+    private data class Resolved(val version: ClaimVersion, val kind: ClaimKind, val raw: PassClaim)
+
+    /** A claim's context both passes give and the chunk prints: the passage as the chunk has it, the agreed things, the agreed period. */
+    data class Context(val passage: String?, val about: List<ThingRef>, val asOf: String?)
+
+    fun context(chunk: ChunkRecord, a: PassClaim, b: PassClaim): Context {
+        val printed = quoteKey(chunk.text + "\n" + chunk.section.orEmpty()).lowercase()
+        fun isPrinted(s: String) = quoteKey(s).lowercase().let { it.isNotEmpty() && printed.contains(it) }
+        val passage = run {
+            val pa = a.passage?.let { locate(chunk.text, it) } ?: return@run null
+            val pb = b.passage?.let { locate(chunk.text, it) } ?: return@run null
+            pa.takeIf { quoteKey(pa) == quoteKey(pb) }
+        }
+        val about = a.about.mapNotNull { t ->
+            val other = b.about.firstOrNull { ClaimantResolver.key(it.name) == ClaimantResolver.key(t.name) } ?: return@mapNotNull null
+            if (t.name.isBlank() || !isPrinted(t.name)) return@mapNotNull null
+            ThingRef(
+                t.name.trim().replace(Regex("\\s+"), " "),
+                if (t.kind.trim().equals(other.kind.trim(), ignoreCase = true)) t.kind.trim() else "",
+                t.parent?.takeIf { p -> ClaimantResolver.key(p) == ClaimantResolver.key(other.parent) }?.trim(),
+            )
+        }.distinctBy { ClaimantResolver.key(it.name) + "|" + it.kind.lowercase() }
+        val asOf = a.asOf?.trim()?.takeIf { it.isNotEmpty() && b.asOf != null && quoteKey(it).lowercase() == quoteKey(b.asOf).lowercase() && isPrinted(it) }
+        return Context(passage, about, asOf)
+    }
 
     private fun resolve(c: PassClaim, located: String, resolver: ClaimantResolver): Resolved {
         val kind = ClaimKind.parse(c.kind) ?: ClaimKind.FACT
@@ -50,7 +78,7 @@ object ClaimAgreement {
                 quote = located, claimant = resolver.canonical(c.claimant), claimantAsWritten = c.claimant?.trim()?.takeIf { it.isNotEmpty() },
                 subject = c.subject.trim(), kind = kind.name, place = c.place?.trim()?.takeIf { it.isNotEmpty() },
             ),
-            kind,
+            kind, c,
         )
     }
 
@@ -135,7 +163,8 @@ object ClaimAgreement {
             if (j == null) leftoverA += x else {
                 usedB[j] = true
                 val v = x.version
-                agreed += AgreedClaim(chunk.uid, v.quote, v.claimant, v.claimantAsWritten, v.subject, x.kind, v.place ?: b[j].version.place)
+                val ctx = context(chunk, x.raw, b[j].raw)
+                agreed += AgreedClaim(chunk.uid, v.quote, v.claimant, v.claimantAsWritten, v.subject, x.kind, v.place ?: b[j].version.place, ctx.passage, ctx.about, ctx.asOf)
             }
         }
         val leftoverB = b.filterIndexed { i, _ -> !usedB[i] }.toMutableList()

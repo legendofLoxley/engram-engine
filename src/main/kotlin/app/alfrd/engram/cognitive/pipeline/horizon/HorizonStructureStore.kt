@@ -656,7 +656,8 @@ class ArcadeHorizonStructureStore(
                 while (rs.hasNext()) (rs.next().toMap()["uid"] as? String)?.let { out += it }
                 out
             }
-            uids.distinct().mapNotNull { uid -> HorizonOwnership.findPhraseOwnedByUser(db, userEmail, uid)?.toItemRecord() }
+            // Established document claims stay out of conversation until the Horizon can present them as the source's, not the user's.
+            uids.distinct().mapNotNull { uid -> HorizonOwnership.findPhraseOwnedByUser(db, userEmail, uid)?.takeIf { it.get("claimSourceUid") == null }?.toItemRecord() }
                 .sortedByDescending { it.createdAt }.take(limit)
         }
 
@@ -817,8 +818,10 @@ class ArcadeHorizonStructureStore(
         return source
     }
 
+    // Only a Concept made in conversation: a document's Concepts (with a conceptKey: name, kind and parent) are kept apart and met at read
+    // time (db/ConceptStore.kt), never merged into by a chat mention of the same name.
     private fun findOrCreateConcept(name: String, normalizedName: String): Vertex =
-        db.query("sql", "SELECT FROM Concept WHERE normalizedName = :n", mapOf("n" to normalizedName))
+        db.query("sql", "SELECT FROM Concept WHERE normalizedName = :n AND conceptKey IS NULL", mapOf("n" to normalizedName))
             .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
             ?: db.newVertex("Concept").apply {
                 set("uid", UUID.randomUUID().toString())

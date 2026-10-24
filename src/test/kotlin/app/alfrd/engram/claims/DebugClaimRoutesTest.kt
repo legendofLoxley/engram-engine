@@ -179,7 +179,30 @@ class DebugClaimRoutesTest {
             client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-d"}""") }
             awaitRun("route-run-d")
             val run = json(client.get("/debug/claim-runs/route-run-d?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonObject
-            assertEquals("claims-v4", run["promptVersion"]!!.jsonPrimitive.content)
+            assertEquals("claims-v5", run["promptVersion"]!!.jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `claims show their passage, things and period, and things are looked up by name with their candidates`() = withEnv { m ->
+        val uid = ingest(m)
+        val model = FakeClaimModel { ch, _ ->
+            if (ch.ordinal == 0) listOf(PassClaim("Scenario A closes 14 schools.", "PPS", "closures", "number", passage = "Scenario A closes 14 schools.", about = listOf(ThingRef("Scenario A", "scenario"))))
+            else emptyList()
+        }
+        testApplication {
+            application { module(m, model) }
+            client.post("/debug/sources/$uid/claims/extract") { header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody("""{"syntheticUserId":"$label","runId":"route-run-c"}""") }
+            awaitRun("route-run-c")
+            val claim = json(client.get("/debug/sources/$uid/claims?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonArray.single().jsonObject
+            assertEquals("Scenario A closes 14 schools.", claim["passage"]!!.jsonPrimitive.content)
+            assertEquals("Scenario A", claim["about"]!!.jsonArray.single().jsonObject["name"]!!.jsonPrimitive.content)
+
+            val found = json(client.get("/debug/concepts?syntheticUserId=$label&name=scenario%20a") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonArray.single().jsonObject
+            assertEquals("scenario", found["kind"]!!.jsonPrimitive.content)
+            assertEquals("1", found["claims"]!!.jsonPrimitive.content)
+            assertEquals(HttpStatusCode.BadRequest, client.get("/debug/concepts?syntheticUserId=$label") { header(HttpHeaders.Authorization, auth) }.status)
+            assertEquals(HttpStatusCode.Forbidden, client.get("/debug/concepts?syntheticUserId=owner-jacob&name=x") { header(HttpHeaders.Authorization, auth) }.status)
         }
     }
 }

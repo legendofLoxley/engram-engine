@@ -9,7 +9,7 @@ import app.alfrd.engram.vision.VisionReading
  * Claims from a vision reading's checked entries, without a model call: each number, list item and table cell in a vision chunk is one claim,
  * quoted by its line of the chunk text, placed under its top heading (when it is short enough to be a place), its sub-headings (and a number's label) as the subject. Both passes are
  * the same reading, so they agree by construction; the independent check happened when the chunk was made (the vision model against the
- * page's text). Reads only vision chunks. The run's model name is the vision model that read the page, from the chunk.
+ * page's text). Reads only vision chunks. The context the check kept (passage, things, period) goes with each claim. The run's model name is the vision model that read the page, from the chunk.
  */
 class StructuredClaimModel : ClaimPassModel {
     override val endpoint: String? = null
@@ -27,6 +27,7 @@ class StructuredClaimModel : ClaimPassModel {
                 subject = (under + listOf(e.label).filter { it.isNotBlank() }).joinToString(" > ").ifEmpty { place ?: e.value },
                 kind = if (e.kind == "number") ClaimKind.NUMBER.name else ClaimKind.FACT.name,
                 place = place,
+                passage = e.passage, about = e.about.map { ThingRef(it.name, it.kind, it.parent) }, asOf = e.asOf,
             )
         }
         return PassResult(claims, "structure:" + (chunk.extractor ?: "vision"))

@@ -37,7 +37,11 @@ with a parenthesis after its number ("Figure 2.5 (DLI)") was not routed.
    filed under, and (for a number) its label is printed: as written, or each of its words somewhere on the page (a chart value's label is
    its category, legend entry and year, printed apart from it). An answer that cannot be read is asked for once more; a second failure says
    why (for example cut off at the token limit). A name the model misread by a letter or two is kept with the page's spelling when the
-   corrected value is then found whole (reported per page as `corrected`), and every kept value is written as the page prints it (its case). A table cell is kept with its row label and column header, all three
+   corrected value is then found whole (reported per page as `corrected`), and every kept value is written as the page prints it (its case).
+   Each number and item may also carry its context (reader v5): the passage it is printed in, the things it is about (name, kind, parent) and its period. The
+   passage is kept only when the page prints it as one run, and becomes a line of the chunk; a thing, its parent and the period only when the page prints them.
+   What is dropped is reported per page as `… — about 'X' not on the page (value kept)`; a value is never rejected for its context. Structure claims carry the
+   kept context into the claim (`docs/claim-extraction.md`, "Claims in context"). A table cell is kept with its row label and column header, all three
    found. Chart text is kept as text of the chunk but makes no claims. What is left out is reported per page (`rejectedValues`, naming which
    part failed: the cell, its row label or its column header), never stored.
    - A heading the page does not have is left out of the path; what the model put under it is checked as under the heading above. A number
@@ -50,7 +54,7 @@ with a parenthesis after its number ("Figure 2.5 (DLI)") was not routed.
    SCENARIO A > ATTENDANCE BOUNDARY CHANGES: 38
    Figure 6.1 Deriving Planning Floors for Well Resourced Schools > Elementary > Planning floor range estimate: Approximately 450+
    ```
-   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v4`): reading a page
+   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v5`): reading a page
    again adds nothing and calls no model, so a stopped run is resumed by running it again. The file must be the Source's own (same SHA-256).
 4. **Claims:** `ClaimExtractionCli --reader structure` makes one claim per kept entry, quoted by its line, placed under its top heading, with
    its sub-headings as the subject (a top heading longer than a place can be, such as a survey question set as a title, goes in the subject). No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
@@ -65,7 +69,7 @@ Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM
 checked against the page. The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
 The run stops after `--stop-after` pages fail in a row (a server that is down fails every page); run the same command again to resume.
 
-Chunks are keyed by reader version (now `structure-v4`), so a new version's reading of a page already read is a second chunk beside the
+Chunks are keyed by reader version (now `structure-v5`), so a new version's reading of a page already read is a second chunk beside the
 first, and its claims sit beside the old ones. Read a new version into a Source that has no older vision chunks (a fresh synthetic identity).
 
 ## One page, nothing written (`VisionPageCli`)

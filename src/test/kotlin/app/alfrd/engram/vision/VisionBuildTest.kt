@@ -260,4 +260,49 @@ class VisionBuildTest {
         assertEquals("SCENARIO A", claims[1].place)
         assertEquals("BOUNDARY CHANGES", claims[1].subject)
     }
+
+    @Test
+    fun `a value keeps the passage, things and period the page prints, and loses only what it does not print`() {
+        val page = """
+            Clark Elementary School
+
+            Student demographics
+
+            In 2023–24, 78% of Clark's students were students of color and 39% were multilingual learners.
+        """.trimIndent()
+        val passage = "In 2023–24, 78% of Clark's students were students of color and 39% were multilingual learners."
+        val answer = """{"sections": [{"heading": "Clark Elementary School", "subsections": [{"heading": "Student demographics",
+            "numbers": [
+              {"value": "78%", "label": "students of color", "passage": "${passage.replace("’", "'")}",
+               "about": [{"name": "Clark", "kind": "school", "parent": "PPS"}], "asOf": "2023–24"},
+              {"value": "39%", "label": "multilingual learners", "passage": "In 2023-24, 39% were multilingual learners.", "about": ["Lincoln High"], "asOf": "2022–23"}
+            ],
+            "items": [{"text": "students of color", "about": [{"name": "Clark Elementary School", "kind": "school"}]}]}]}]}"""
+        val sections = PageStructure.parse(answer)
+        val built = VisionReading.build(sections, StructureCheck.check(sections, page))
+        val first = built.entries.single { it.value == "78%" }
+        assertEquals(passage, first.passage)
+        assertEquals("2023–24", first.asOf)
+        assertEquals(listOf(PageThing("Clark", "school", null)), first.about, "the parent PPS is not printed, so it is left off")
+        val second = built.entries.single { it.value == "39%" }
+        assertNull(second.passage); assertNull(second.asOf); assertTrue(second.about.isEmpty(), "nothing it was given is printed as given")
+        assertTrue(built.rejected.any { it.contains(":: 39% — about 'Lincoln High' not on the page (value kept)") }, built.rejected.toString())
+        assertTrue(built.rejected.any { it.contains("period '2022–23' not on the page") })
+        assertTrue(built.rejected.any { it.contains("parent 'PPS' not on the page") })
+        assertEquals(listOf(PageThing("Clark Elementary School", "school", null)), built.entries.single { it.kind == "item" }.about)
+        assertTrue(passage in built.text.lines(), "the passage is a line of the chunk, so a claim's passage is a passage of its chunk")
+    }
+
+    @Test
+    fun `claims from structure carry the context the check kept`() = runBlocking<Unit> {
+        val passage = "In 2023–24, 78% of Clark's students were students of color."
+        val entries = listOf(ReadingEntry("number", listOf("Clark Elementary School"), "78%", "students of color", "Clark Elementary School: 78% students of color",
+            passage, listOf(PageThing("Clark", "school")), "2023–24"))
+        val chunk = ChunkRecord("c", "s", 9, "pdf p. 30, vision reading", entries.joinToString("\n") { it.line } + "\n" + passage, "h",
+            kind = VisionReading.CHUNK_KIND, extractor = "vision:m", reading = Json.encodeToString(entries))
+        val claim = StructuredClaimModel().extract(SourceRecord("s", "pdf", "file:x.pdf", "x", "pdf", null, "h", 0, 10), chunk, 1).claims.single()
+        assertEquals(passage, claim.passage); assertEquals("2023–24", claim.asOf); assertEquals("Clark", claim.about.single().name)
+        val ctx = app.alfrd.engram.claims.ClaimAgreement.context(chunk, claim, claim)
+        assertEquals(passage, ctx.passage, "both passes are the same reading, so its context is agreed")
+    }
 }
