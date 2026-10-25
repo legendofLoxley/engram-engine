@@ -191,3 +191,14 @@ not installed, so scanned pages are unread and those Sources partial; Arx image 
 **Whose Concepts are visible.** Concepts are shared between owners (one per name, kind and parent), but an owner sees a Concept only through their own ABOUT links: `/debug/concepts`, possibly-same links and Name checks never list, count or reveal another owner's Concepts. Found on the 2026-10-24 box gate, where a second identity's lookups listed the first identity's leftovers as twins. A school is never given another school named in the same claim as its parent (the page's heading was taken for one); the Source's issuer is its parent then. A short form defined with a possessive ("Portland Public Schools’ (PPS)") records the name without the apostrophe.
 
 `POSSIBLY_SAME` links are also made when an owner first has evidence about a Concept that already existed: a Concept made for an earlier owner is found, not made, so linking is repeated whenever a claim becomes about it (once per owner and pair), and a namesake under another parent (SCENARIO A with and without "Portland Public Schools") lands in the name checks. Never merged.
+
+## Linking the two readers (one fact, one claim)
+
+The vision reader and the text reader both make claims of a Source, and a fact on a page can be read by both. `ClaimLinker` (run when each extraction run completes, and by `POST /debug/sources/{uid}/claim-links`) connects them. It adds links and one state change; it never deletes, edits or re-establishes a claim, and the agreement rules of extraction are untouched.
+
+- **Which reader:** a claim's reader is its run's prompt version (`claims-from-structure-…` is the vision reader). Claims of one reader are never linked to each other.
+- **The same fact:** a vision claim and a text claim on the same page, where the vision claim's value (the part of its line after `: `) is printed in the text claim's quote as a whole value, and they share a passage, a thing they are about, or a distinctive word of what the value counts. A bare number alone ("11") is not enough.
+- **Agree:** the pair is linked `CORROBORATES` (two independent reads); both stay Settled.
+- **Disagree:** the pair is linked `CONFLICTS_WITH` and both claims go to Re-checking, kept as they were. They disagree when both name the same kind of thing and none in common (two different schools), or both give a period and the periods differ. A scenario on one side and the district on the other are two true descriptions, not a conflict; a missing thing or period is a gap.
+- **One reader only:** the claim stands on its own (reported as `structureOnly` / `textOnly`).
+- `GET /debug/sources/{uid}/claims` shows `corroboratedBy` and `conflictsWith` (claim ids) on each claim. Whether a one-reader claim counts as established for publishing is a separate decision; linking does not change what is stored.

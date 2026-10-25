@@ -71,6 +71,8 @@ data class DebugClaimView(
     val checkState: String, val runId: String?, val recheckRunId: String?, val locations: List<String>,
     /** The passage the claim was decomposed from, the things it is about and the period it refers to (claims in context). */
     val passage: String? = null, val about: List<app.alfrd.engram.db.ConceptRef> = emptyList(), val asOf: String? = null,
+    /** Claims of the other reader that state the same fact, and that disagree with it (cross-reader linking). */
+    val corroboratedBy: List<String> = emptyList(), val conflictsWith: List<String> = emptyList(),
 )
 
 @Serializable
@@ -155,13 +157,23 @@ fun Application.configureDebugClaimRoutes(
                         "inProgress" to active.containsKey("$email|${run.runId}").toString(),
                     ) + (run.report?.let { mapOf("report" to kotlinx.serialization.json.Json.encodeToString(RunReport.serializer(), it)) } ?: emptyMap()))
                 }
+                // Links the claims the two readers made of the same fact (one fact, one claim, however many readers saw it) and says how many agree,
+                // disagree (both kept, both Re-checking) or stand on one reader's say-so. Idempotent; extraction runs also do this when they finish.
+                post("/sources/{uid}/claim-links") {
+                    if (!isLoopback(call)) return@post call.respond(HttpStatusCode.Forbidden, mapOf("error" to "loopback only"))
+                    val req = call.receive<DebugSyntheticRequest>()
+                    val email = call.userOrRefuse(req.syntheticUserId) ?: return@post
+                    val uid = call.parameters["uid"].orEmpty()
+                    if (sources.sourceByUid(email, uid) == null) return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown source"))
+                    call.respond(HttpStatusCode.OK, claims.linkReaders(sources, email, uid, "link-" + java.util.UUID.randomUUID().toString().take(8)))
+                }
                 get("/sources/{uid}/claims") {
                     val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
                     val uid = call.parameters["uid"].orEmpty()
                     if (sources.sourceByUid(email, uid) == null) return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "unknown source"))
                     call.respond(HttpStatusCode.OK, claims.claims(email, uid).map { c ->
                         DebugClaimView(c.uid, c.quote, c.place, c.claimant, c.claimantAsWritten, c.subject, c.kind, c.checkState, c.runId, c.recheckRunId,
-                            sources.provenanceOf(email, c.uid).map { it.location }, c.passage, c.about, c.asOf)
+                            sources.provenanceOf(email, c.uid).map { it.location }, c.passage, c.about, c.asOf, c.corroboratedBy, c.conflictsWith)
                     })
                 }
                 // Things by name, as read time sees them: every Concept with that name, its kind and parent, how many of this user's claims

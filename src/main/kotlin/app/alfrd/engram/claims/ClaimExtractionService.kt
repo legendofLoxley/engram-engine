@@ -117,6 +117,15 @@ class ClaimExtractionService(
             val finished = finalReport(snapshot("complete"))
             claims.updateRun(userEmail, runId, status = "complete", modelName = finished.modelName, chunksDone = next, report = finished)
             logger.info("claims: run complete: {} chunk(s), {} claim(s) established, {} disagreement(s)", chunks.size, finished.claimsEstablished, finished.disagreements)
+            // Whichever reader finishes last links what the two read in common. Linking never decides whether a run succeeded.
+            try {
+                val links = claims.linkReaders(sources, userEmail, sourceUid, runId)
+                logger.info("claims: readers linked: {} corroborated, {} conflict(s), {} new link(s), {} structure-only, {} text-only", links.corroborated, links.conflicts, links.newLinks, links.structureOnly, links.textOnly)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.warn("claims: linking the readers failed: {}", e::class.java.simpleName)
+            }
             return finished
         } finally {
             ACTIVE.remove(lockKey)
