@@ -9,6 +9,8 @@ import app.alfrd.engram.pdf.PreparedPdf
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.slf4j.LoggerFactory
@@ -71,6 +73,8 @@ class VisionReadingService(
     private val preparer: PdfPreparer,
     private val cache: PdfPreparationCache,
     private val dpi: Float = 150f,
+    /** When set, each page's raw model answer and what became of its periods is written here (`<source>-p<page>-<version>.json`), for finding where a value is lost. Off by default; never the log. */
+    private val rawAnswerDir: java.io.File? = null,
 ) {
     private val logger = LoggerFactory.getLogger(VisionReadingService::class.java)
     private val json = Json { encodeDefaults = true }
@@ -122,6 +126,7 @@ class VisionReadingService(
         val checks = StructureCheck.check(sections, readingText, ocrAnswer?.text)
         val built = VisionReading.build(sections, checks)
         val ms = System.currentTimeMillis() - started
+        rawAnswerDir?.let { dir -> writeRaw(dir, sourceUid, page, answer, readingText, built) }
         // Counts only: never page text in the log.
         logger.info("vision: page {} read in {} ms: {} entr(ies) kept, {} rejected", page, ms, built.entries.size, built.rejected.size)
         if (built.entries.isEmpty()) {
@@ -139,6 +144,23 @@ class VisionReadingService(
             page, if (created) "added" else "already there", chunk.uid, chunk.ordinal, answer.model, ocrAnswer?.model, ms,
             built.entries.size, built.rejected.size, built.rejected, corrected = built.corrected,
         )
+    }
+
+    private fun writeRaw(dir: java.io.File, sourceUid: String, page: Int, answer: VisionAnswer, readingText: String, built: VisionReading.Built) {
+        try {
+            dir.mkdirs()
+            val out = buildJsonObject {
+                put("page", page); put("version", PageStructure.VERSION); put("model", answer.model ?: "unreported")
+                put("finishReason", answer.finishReason ?: ""); put("completionTokens", answer.completionTokens ?: 0)
+                put("pageStatedPeriod", StructureCheck.pageStatedPeriod(readingText) ?: "")
+                put("readingTextChars", readingText.length); put("readingTextMentionsPeriod", Regex("(19|20)\\d{2}\\s*[–—-]\\s*\\d{2}").containsMatchIn(readingText))
+                put("answer", answer.text)
+                put("entriesWithPeriod", built.entries.count { it.asOf != null }); put("entries", built.entries.size)
+                put("rejected", kotlinx.serialization.json.JsonArray(built.rejected.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            }
+            java.io.File(dir, "$sourceUid-p$page-${PageStructure.VERSION}.json").writeText(out.toString())
+            logger.info("vision: page {} raw answer written ({} entr(ies) with a period)", page, built.entries.count { it.asOf != null })
+        } catch (e: Exception) { logger.warn("vision: raw answer for page {} not written: {}", page, e::class.java.simpleName) }
     }
 }
 
@@ -291,7 +313,7 @@ object VisionReading {
                                 val r = printed(parts[1].second, rowLabel, prefix); val col = printed(parts[2].second, column, prefix)
                                 val v = printed(parts[0].second, cell, prefix)
                                 val l = "${(shown + r + col).joinToString(SEP)}: $v"
-                                lines += l; entries += ReadingEntry("cell", shown + r + col, v, line = l)
+                                lines += l; entries += ReadingEntry("cell", shown + r + col, v, line = l, asOf = parts[0].second?.context?.asOf)
                             } else rejected += "$where :: $cell — " + if (column == null) "no column header" else "${bad!!.first}: ${why(bad.second)}"
                         }
                     }
@@ -308,7 +330,11 @@ object VisionReading {
         walk(sections, emptyList(), emptyList())
         // Each kept passage is also a line of the chunk, so a claim's passage is a passage of its chunk like any quote.
         val passages = entries.mapNotNull { it.passage }.distinct().filter { it !in lines }
-        return Built((lines + passages).joinToString("\n"), entries, rejected, corrected)
+        // A period the page states about itself ("All figures are projections for the 2031–32 school year") is not in any entry's line; it is a line
+        // of the chunk like any printed text, so claims can carry it (a claim keeps a period only when its chunk prints it: ClaimAgreement.context).
+        val written = (lines + passages).joinToString("\n")
+        val periods = entries.mapNotNull { it.asOf }.distinct().filter { StructureCheck.printsPeriod(written, it).not() }
+        return Built((lines + passages + periods.map { "Period: $it" }).joinToString("\n"), entries, rejected, corrected)
     }
 
     /** The checked entries of a vision chunk. Empty for any other chunk. */

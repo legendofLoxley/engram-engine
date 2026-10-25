@@ -71,6 +71,27 @@ object StructureCheck {
      * The one period a page states for its figures ("All figures are projections for the 2031–32 school year unless noted"), as the page prints it,
      * or null. Read from the page's own text, not from the model, so it does not depend on which section the model chose to hang it on.
      */
+    /** Where a section's period came from: the page's own statement, the section's own heading, or neither (a caption elsewhere, the model's say-so). */
+    enum class PeriodSource { PAGE, HEADING, OTHER, DOCUMENT_DATE }
+    data class SectionPeriod(val period: String, val source: PeriodSource)
+
+    private val PERIOD_DASHES = Regex("[–—‑-]")
+    private fun periodKey(s: String) = normalize(s).replace(PERIOD_DASHES, "-").replace(Regex("\\s+"), " ").trim()
+
+    /** Whether [text] prints [period] (dash and case aside). */
+    fun printsPeriod(text: String?, period: String): Boolean = text != null && periodKey(text).contains(periodKey(period))
+
+    /** "Updated October 4, 2026", "Draft v2": when a document was made, not the period its figures are about. */
+    private val DOCUMENT_DATE = Regex("^\\s*(?:last\\s+)?(?:updated|revised|published|posted|printed|draft|version|rev\\.?)\\b", RegexOption.IGNORE_CASE)
+    fun isDocumentDate(period: String) = DOCUMENT_DATE.containsMatchIn(period)
+
+    private fun periodSource(period: String, heading: String, pageStated: String?): PeriodSource = when {
+        isDocumentDate(period) -> PeriodSource.DOCUMENT_DATE
+        pageStated != null && periodKey(period) == periodKey(pageStated) -> PeriodSource.PAGE
+        printsPeriod(heading, period) -> PeriodSource.HEADING
+        else -> PeriodSource.OTHER
+    }
+
     fun pageStatedPeriod(pageText: String): String? =
         PAGE_PERIOD.find(pageText.replace(Regex("\\s+"), " "))?.groupValues?.get(1)?.trim()
 
@@ -239,7 +260,7 @@ object StructureCheck {
 
         // [lo, hi) is the span of the parent heading in the reading-order text; a heading is looked for inside it, in order after its previous
         // sibling, and runs to its next sibling (or the end of the parent's span).
-        fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int, inheritedAsOf: String? = null) {
+        fun walk(level: List<PageSection>, parents: List<String>, lo: Int, hi: Int, inheritedAsOf: SectionPeriod? = null) {
             var cursor = lo
             val headingFix = level.map { s -> if (found(s.heading)) null else corrected(s.heading) }
             val starts = level.mapIndexed { i, s ->
@@ -250,7 +271,7 @@ object StructureCheck {
             level.forEachIndexed { i, s ->
                 val path = parents + s.heading
                 // The one period a heading (or the page) states covers what is under it, unless a value gives its own.
-                val sectionAsOf = s.asOf ?: inheritedAsOf
+                val sectionAsOf = s.asOf?.let { a -> SectionPeriod(a, periodSource(a, s.heading, pageAsOf)) } ?: inheritedAsOf
                 val fix = headingFix[i]
                 out += CheckedValue(parents, "heading", s.heading, fix != null || found(s.heading), null,
                     printedAs = fix ?: printedForm(s.heading)?.takeIf { it != s.heading })
@@ -265,17 +286,35 @@ object StructureCheck {
                     // "Unless noted": a value whose own passage or label names a year keeps to that, never the page's period.
                     val noted = A_YEAR.containsMatchIn(ctx?.passage.orEmpty()) || A_YEAR.containsMatchIn(label)
                     val figure = kind == "number" || (kind == "cell" && NUMERIC.matches(normalize(v)))
+                    // A period the model gives a value is kept when the value's own words (its passage, its label) or, for a value read from a chart
+                    // or table, the heading it sits under print it: a range from a figure caption does not become the period of prose beside it.
+                    val ownAsOf = ctx?.asOf
+                    val ownSupported = ownAsOf == null || (!isDocumentDate(ownAsOf) && (printsPeriod(ctx.passage, ownAsOf) || printsPeriod(label, ownAsOf) ||
+                        (ctx.passage.isNullOrBlank() && path.any { printsPeriod(it, ownAsOf) })))
+                    val hasPassage = !ctx?.passage.isNullOrBlank()
                     val period = when {
-                        sectionAsOf != null && (figure || kind == "item") -> sectionAsOf
-                        sectionAsOf == null && pageAsOf != null && figure && !noted -> pageAsOf
+                        // A period a heading prints covers what is under it.
+                        sectionAsOf?.source == PeriodSource.HEADING && (figure || kind == "item") -> sectionAsOf.period
+                        // Read from a figure or table: a range the model took from a caption covers what the figure or table says, not prose.
+                        sectionAsOf?.source == PeriodSource.OTHER && (kind == "cell" && figure || kind == "chart" || kind == "number" && !hasPassage) -> sectionAsOf.period
+                        // The page's own statement ("All figures are projections for the 2031–32 school year unless noted"): its figures, never its list items.
+                        pageAsOf != null && figure && !noted -> pageAsOf
                         else -> null
                     }
+                    val given = if (ownSupported) ctx else ctx?.copy(asOf = null)
                     val withPeriod = when {
                         earlier -> (ctx ?: PageContext()).copy(asOf = null)
-                        ctx?.asOf == null && period != null -> (ctx ?: PageContext()).copy(asOf = period)
-                        else -> ctx
+                        given?.asOf == null && period != null -> (given ?: PageContext()).copy(asOf = period)
+                        else -> given
                     }
-                    val (context, dropped) = checkContext(withPeriod)
+                    val (context0, dropped0) = checkContext(withPeriod)
+                    val context = context0
+                    val dropped = dropped0 + (when {
+                        ownSupported -> emptyList()
+                        isDocumentDate(ownAsOf!!) -> listOf("period '$ownAsOf' is a document date, not a period of its figures")
+                        found(ownAsOf) -> listOf("period '$ownAsOf' not in its passage, label or heading")
+                        else -> listOf("period '$ownAsOf' not on the page")
+                    })
                     out += CheckedValue(
                         path, kind, v, ok || fix != null, if (from == null || at.isEmpty()) null else at.any { it in from until to },
                         label, labelFound(label), printedAs = fix ?: printedForm(v)?.takeIf { it != v }, context = context, contextDropped = dropped,

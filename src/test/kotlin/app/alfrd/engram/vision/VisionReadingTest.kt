@@ -24,6 +24,9 @@ import app.alfrd.engram.pdf.PdfSourceService
 import app.alfrd.engram.pdf.poster
 import app.alfrd.engram.pdf.scenarios
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -222,5 +225,22 @@ class VisionReadingTest {
         assertFalse(LocalClaimModel(LocalLlmClient("http://127.0.0.1:1/v1")).reads(store.chunks(ana, uid).single { it.kind == VisionReading.CHUNK_KIND }))
         assertTrue(StructuredClaimModel().reads(store.chunks(ana, uid).single { it.kind == VisionReading.CHUNK_KIND }))
         assertFalse(StructuredClaimModel().reads(store.chunks(ana, uid).first { it.kind != VisionReading.CHUNK_KIND }))
+    }
+
+    @Test
+    fun `with a raw-answer directory set, the model's answer is written for the page, and by default nothing is`() {
+        val bytes = PdfFixtures.poster()
+        val uid = commitPdf(bytes, "file:cards.pdf")
+        val raw = dir.resolve("raw")
+        VisionReadingService(store, Scripted(posterAnswer), null, PdfExtractor(), cache, rawAnswerDir = raw).readPage(ana, uid, bytes, 1)
+        val file = raw.resolve("$uid-p1-${PageStructure.VERSION}.json")
+        assertTrue(file.isFile, raw.list()?.toList().toString())
+        val o = Json.parseToJsonElement(file.readText()).jsonObject
+        assertEquals(PageStructure.VERSION, o["version"]!!.jsonPrimitive.content)
+        assertEquals(posterAnswer, o["answer"]!!.jsonPrimitive.content)
+        assertTrue(o.containsKey("pageStatedPeriod") && o.containsKey("entriesWithPeriod"))
+        val other = commitPdf(PdfFixtures.scenarios(), "file:districtwide.pdf")
+        service(Scripted(posterAnswer)).readPage(ana, other, PdfFixtures.scenarios(), 1)
+        assertEquals(1, raw.list()?.size, "no second file: the default service writes none")
     }
 }
