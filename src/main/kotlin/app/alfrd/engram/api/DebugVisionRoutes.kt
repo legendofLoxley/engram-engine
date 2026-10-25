@@ -60,7 +60,7 @@ fun Application.configureDebugVisionRoutes(
     isLoopback: (ApplicationCall) -> Boolean = ::connectedFromLoopback,
 ) {
     val store = SourceStore(db)
-    val service = VisionReadingService(store, structure, ocr, preparer, cache)
+    val service = VisionReadingService(store, structure, ocr, preparer, cache, rawAnswerDir = System.getenv("VISION_RAW_ANSWER_DIR")?.takeIf { it.isNotBlank() }?.let(::File))
 
     suspend fun ApplicationCall.bad(msg: String) = respond(HttpStatusCode.BadRequest, mapOf("error" to msg))
 

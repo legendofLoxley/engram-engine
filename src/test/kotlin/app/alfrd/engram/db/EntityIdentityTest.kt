@@ -225,4 +225,24 @@ class EntityIdentityTest {
         assertEquals("Portland Public Schools", merged.canonical("PPS"))
         assertEquals("Pacific Pottery Society", merged.canonical("Pottery Society"))
     }
+
+    @Test
+    fun `a Concept found rather than made is still linked to its namesake once this owner has evidence about both`() {
+        // An earlier owner made "SCENARIO A" with no parent; this owner's first claim is about "SCENARIO A" under the issuer (made new, no
+        // evidence yet of this owner's on the other); the next is about the one with no parent.
+        thing("SCENARIO A", "scenario", null, owner = bea)
+        val underIssuer = thing("SCENARIO A", "scenario", "Portland Public Schools", owner = ana)
+        val bare = thing("SCENARIO A", "scenario", null, owner = ana)
+        assertNotEquals(underIssuer.uid, bare.uid.takeIf { it == underIssuer.uid } ?: "")
+        val pairs = concepts(ana).nameChecks(ana)
+        assertEquals(1, pairs.size, pairs.toString())
+        assertEquals(setOf(underIssuer.uid, bare.uid), setOf(pairs[0].a.uid, pairs[0].b.uid))
+        assertTrue(pairs[0].reason.startsWith("same name; parents differ"), pairs[0].reason)
+        // Linking again adds nothing, and the other owner has no pair of their own.
+        claimAbout(bare.uid, ana); claimAbout(underIssuer.uid, ana)
+        assertEquals(1, concepts(ana).nameChecks(ana).size)
+        assertEquals(0, concepts(bea).nameChecks(bea).size)
+        // Never merged: two Concepts remain.
+        assertEquals(2, concepts(ana).candidates(ana, "SCENARIO A").size)
+    }
 }

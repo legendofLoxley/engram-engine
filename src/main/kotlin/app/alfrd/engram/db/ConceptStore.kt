@@ -113,6 +113,26 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
         return out!!
     }
 
+    /**
+     * A Concept this owner now has evidence about is linked as possibly the same to every other Concept of its name this owner has evidence
+     * about and has no link to yet. [resolve] links a Concept only when it makes it, and a Concept made for an earlier owner is found, not made,
+     * so without this a pair first seen the other way round ("SCENARIO A" with no parent found, then "SCENARIO A" under the issuer made before
+     * the first had any evidence of this owner's) is never linked. Each owner has their own links; none is made twice.
+     */
+    private fun linkTwins(userEmail: String, concept: Vertex) {
+        val name = concept.get("name") as? String ?: return
+        val kind = concept.get("type") as? String ?: ""
+        val parent = concept.get("parentName") as? String
+        fun linkedAlready(a: Vertex, b: Vertex) =
+            (a.getEdges(Vertex.DIRECTION.OUT, "POSSIBLY_SAME").filter { it.get("ownerEmail") == userEmail }.any { it.inVertex.identity == b.identity }) ||
+                (a.getEdges(Vertex.DIRECTION.IN, "POSSIBLY_SAME").filter { it.get("ownerEmail") == userEmail }.any { it.outVertex.identity == b.identity })
+        sameName(userEmail, name, viaAliases = false).filter { it.identity != concept.identity && !linkedAlready(concept, it) }.forEach { other ->
+            concept.newEdge("POSSIBLY_SAME", other, true).apply {
+                set("reason", reason(name, kind, parent, other)); set("ownerEmail", userEmail); set("createdAt", System.currentTimeMillis()); save()
+            }
+        }
+    }
+
     private fun reason(name: String, kind: String, parent: String?, other: Vertex): String {
         val otherKind = other.get("type") as? String ?: ""
         val otherParent = other.get("parentName") as? String
@@ -166,6 +186,7 @@ class ConceptStore(private val db: Database, private val aliases: ClaimantResolv
                 save()
             }
             created = true
+            linkTwins(userEmail, concept)
         }
         return created
     }
