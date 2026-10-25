@@ -18,6 +18,8 @@ data class ClaimItem(
     val runId: String?, val checkState: String, val recheckRunId: String?, val chunkUids: List<String>,
     /** The passage the claim was decomposed from, the things it is about and the period it refers to; empty where none was agreed. */
     val passage: String? = null, val about: List<ConceptRef> = emptyList(), val asOf: String? = null,
+    /** Claims of the other reader that state the same fact, and claims of the other reader that disagree with it ([ClaimLinker]). */
+    val corroboratedBy: List<String> = emptyList(), val conflictsWith: List<String> = emptyList(),
 )
 
 /** A stored run: where it stands and, once it has run, its counts. */
@@ -250,8 +252,18 @@ class ClaimStore(private val db: Database) {
             checkState = v.get("checkState") as? String ?: CheckState.SETTLED.label, recheckRunId = v.get("recheckRunId") as? String,
             chunkUids = edges.map { it.inVertex.asVertex().get("uid") as String }.distinct(),
             passage = passage, about = about, asOf = v.get("claimAsOf") as? String,
+            corroboratedBy = linked(v, "CORROBORATES", owner), conflictsWith = linked(v, "CONFLICTS_WITH", owner),
         )
     }
+
+    /** Links the claims the two readers made of one Source ([ClaimLinker]). Idempotent. */
+    fun linkReaders(sources: app.alfrd.engram.db.SourceStore, userEmail: String, sourceUid: String, runId: String): LinkReport =
+        ClaimLinker(db, sources, this).link(userEmail, sourceUid, runId)
+
+    private fun linked(v: Vertex, type: String, owner: String?): List<String> =
+        (v.getEdges(Vertex.DIRECTION.OUT, type).filter { owner == null || it.get("ownerEmail") == owner }.map { it.inVertex.asVertex() } +
+            v.getEdges(Vertex.DIRECTION.IN, type).filter { owner == null || it.get("ownerEmail") == owner }.map { it.outVertex.asVertex() })
+            .mapNotNull { it.get("uid") as? String }.distinct()
 
     companion object {
         fun quoteHash(quote: String): String = digest(ClaimAgreement.quoteKey(quote))

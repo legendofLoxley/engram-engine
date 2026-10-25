@@ -428,6 +428,15 @@ object SchemaBootstrap {
                 et.createProperty("ownerEmail", Type.STRING)
                 et.createProperty("createdAt", Type.LONG)
             }
+            // Claims the two readers made of the same fact (claims/ClaimLinker.kt): CORROBORATES when they agree, CONFLICTS_WITH when they do not.
+            for (linkType in listOf("CORROBORATES", "CONFLICTS_WITH")) {
+                ensureEdge(schema, linkType) { et ->
+                    et.createProperty("ownerEmail", Type.STRING)
+                    et.createProperty("runId", Type.STRING)
+                    et.createProperty("reason", Type.STRING)
+                    et.createProperty("createdAt", Type.LONG)
+                }
+            }
             ensureProperty(schema, "POSSIBLY_SAME", "decision",      Type.STRING)
             ensureProperty(schema, "POSSIBLY_SAME", "decidedAt",     Type.LONG)
             ensureProperty(schema, "ExtractionRun", "modelName",     Type.STRING)
