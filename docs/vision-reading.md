@@ -54,7 +54,7 @@ with a parenthesis after its number ("Figure 2.5 (DLI)") was not routed.
    SCENARIO A > ATTENDANCE BOUNDARY CHANGES: 38
    Figure 6.1 Deriving Planning Floors for Well Resourced Schools > Elementary > Planning floor range estimate: Approximately 450+
    ```
-   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v6`): reading a page
+   The entries are also stored as JSON on the chunk (`reading`). Keyed by source, page and reader version (`structure-v7`): reading a page
    again adds nothing and calls no model, so a stopped run is resumed by running it again. The file must be the Source's own (same SHA-256).
 4. **Claims:** `ClaimExtractionCli --reader structure` makes one claim per kept entry, quoted by its line, placed under its top heading, with
    its sub-headings as the subject (a top heading longer than a place can be, such as a survey question set as a title, goes in the subject). No model call (the check was made when the chunk was made). The text passes (`--reader text`, the default)
@@ -69,7 +69,7 @@ Servers: `VISION_LLM_BASE_URL` (default `http://127.0.0.1:8083/v1`) and `OCR_LLM
 checked against the page. The file is passed by path, so the engine's process must be able to read it: `engram-dev` runs with `PrivateTmp=yes`, so not under `/tmp`.
 The run stops after `--stop-after` pages fail in a row (a server that is down fails every page); run the same command again to resume.
 
-Chunks are keyed by reader version (now `structure-v6`), so a new version's reading of a page already read is a second chunk beside the
+Chunks are keyed by reader version (now `structure-v7`), so a new version's reading of a page already read is a second chunk beside the
 first, and its claims sit beside the old ones. Read a new version into a Source that has no older vision chunks (a fresh synthetic identity).
 
 **v6 (entity identity).** Items given as objects are read under any usual key (v5 lost the four "What guides the work" items, the intro paragraph and the
@@ -120,3 +120,5 @@ Exit status: 0 read and checked, 2 a server failed or its answer could not be re
 - The model sometimes leaves a chart value's year out of its label (v2: "216 White students" without 2020–21). The v3 prompt asks for it; the
   check cannot add what the model leaves out.
 - 8083 is a transient unit on the box: after a reboot it must be started again (see its Deployments row).
+
+**Page-stated period (structure-v7).** A page that says "All figures are projections for the 2031–32 school year unless noted" gives that period to its numbers and numeric table cells, read from the page's own text, whichever section the model hung the period on (the model's answer varies from run to run: the 2026-10-24 box run found it on two sections one time and on none another). A value whose own passage or label names a year keeps to that; list items are not figures. A period the model puts on a section still reaches that section's numbers and items. Only the page that prints the sentence is covered: a period stated on page 1 is not carried to page 2.

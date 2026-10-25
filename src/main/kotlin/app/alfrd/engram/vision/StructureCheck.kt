@@ -61,6 +61,19 @@ object StructureCheck {
 
     private val NUMERIC = Regex("^[-+$]?[0-9][0-9,.]*\\s*%?$")
 
+    private val PAGE_PERIOD = Regex(
+        "\\b(?:all|the)\\s+(?:figures?|numbers?|data|values?|amounts?)\\b[^.]{0,80}?\\b((?:19|20)\\d{2}\\s*[–—-]\\s*\\d{2,4}(?:\\s+school\\s+year)?)",
+        RegexOption.IGNORE_CASE,
+    )
+    private val A_YEAR = Regex("(?<![0-9])(?:19|20)\\d{2}(?![0-9])")
+
+    /**
+     * The one period a page states for its figures ("All figures are projections for the 2031–32 school year unless noted"), as the page prints it,
+     * or null. Read from the page's own text, not from the model, so it does not depend on which section the model chose to hang it on.
+     */
+    fun pageStatedPeriod(pageText: String): String? =
+        PAGE_PERIOD.find(pageText.replace(Regex("\\s+"), " "))?.groupValues?.get(1)?.trim()
+
     /** Every position at which [value] occurs in [text] (both normalized). A number only counts where it is not part of a longer number. */
     fun occurrences(text: String, value: String): List<Int> {
         val v = normalize(value)
@@ -164,6 +177,7 @@ object StructureCheck {
         val text = reading.text
         val ocr = ocrText?.let { Text(normalize(it)) }
         val out = ArrayList<CheckedValue>()
+        val pageAsOf = pageStatedPeriod(readingText)
 
         fun found(v: String) = reading.locate(v).isNotEmpty() || (ocr != null && ocr.locate(v).isNotEmpty())
         val originals = listOfNotNull(readingText, ocrText)
@@ -248,9 +262,17 @@ object StructureCheck {
                     val at = reading.locate(fix ?: v)
                     // An earlier figure ("from 618 students to 355 students in 2023–24") is not given the period of the sentence it is printed in.
                     val earlier = ctx?.passage?.let { p -> Regex("\\bfrom\\s+" + Regex.escape(v.trim()) + "(?![\\p{L}\\p{N}])", RegexOption.IGNORE_CASE).containsMatchIn(p) } == true
+                    // "Unless noted": a value whose own passage or label names a year keeps to that, never the page's period.
+                    val noted = A_YEAR.containsMatchIn(ctx?.passage.orEmpty()) || A_YEAR.containsMatchIn(label)
+                    val figure = kind == "number" || (kind == "cell" && NUMERIC.matches(normalize(v)))
+                    val period = when {
+                        sectionAsOf != null && (figure || kind == "item") -> sectionAsOf
+                        sectionAsOf == null && pageAsOf != null && figure && !noted -> pageAsOf
+                        else -> null
+                    }
                     val withPeriod = when {
                         earlier -> (ctx ?: PageContext()).copy(asOf = null)
-                        ctx?.asOf == null && sectionAsOf != null && kind in setOf("number", "item") -> (ctx ?: PageContext()).copy(asOf = sectionAsOf)
+                        ctx?.asOf == null && period != null -> (ctx ?: PageContext()).copy(asOf = period)
                         else -> ctx
                     }
                     val (context, dropped) = checkContext(withPeriod)

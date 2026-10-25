@@ -75,8 +75,10 @@ object PageStructure {
      * v6: items given as objects are read under any usual key (v5 lost them when the model chose another); a section may carry the one period the
      * page states for it, which its values inherit; an earlier figure in "from X to Y" is not given the period of the sentence; a misread name is
      * never corrected to an ordinary word of the page.
+     * v7: a period the page itself states for its figures ("All figures are projections for the 2031–32 school year unless noted") is read from
+     * the page's text and given to its figures (and numeric table cells) whichever section the model hung it on; a value that names its own year keeps it.
      */
-    const val VERSION = "structure-v6"
+    const val VERSION = "structure-v7"
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
