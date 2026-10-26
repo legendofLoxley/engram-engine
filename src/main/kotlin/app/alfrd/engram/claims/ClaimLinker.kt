@@ -94,31 +94,62 @@ class ClaimLinker(private val db: Database, private val sources: SourceStore, pr
         /** The structure reader's runs are named for it (`claims-from-structure-v7`). */
         fun isStructure(promptVersion: String?): Boolean = promptVersion?.startsWith("claims-from-") == true
 
-        private val STOP = setOf("with", "that", "this", "from", "than", "have", "were", "will", "their", "which", "under", "more", "about", "other", "each", "into", "also", "such", "only", "students", "student")
+        private val STOP = setOf("with", "that", "this", "from", "than", "have", "were", "will", "their", "which", "under", "more", "about", "other", "each", "into", "also", "such", "only", "the", "and", "for", "are", "was", "has", "its", "not", "per", "all", "any", "can", "may", "who")
 
+        /** The words (three letters or more, ordinary connecting words aside) of [s], lower-cased. */
         private fun words(s: String): Set<String> =
-            Regex("\\p{L}{4,}").findAll(StructureCheck.normalize(s)).map { it.value }.filter { it !in STOP }.toSet()
+            Regex("\\p{L}{3,}").findAll(StructureCheck.normalize(s)).map { it.value }.filter { it !in STOP }.toSet()
 
         /** What the structure claim counts or lists: the part of its line after the label (`heading > label: value`). */
         fun valueOf(c: ClaimItem): String = c.quote.substringAfterLast(": ", c.quote).trim()
 
+        /**
+         * Whether [text] prints [value] as a whole value. A number is not part of a longer number, of a range ("9–12" does not print 12), and
+         * has the unit it was given ("0" is not "0%").
+         */
         private fun printsValue(text: String, value: String): Boolean {
             val v = StructureCheck.normalize(value)
             if (v.isEmpty()) return false
             val t = StructureCheck.normalize(text)
-            if (StructureCheck.occurrences(t, v).isNotEmpty() && v.any { it.isDigit() }) return true
+            if (v.any { it.isDigit() }) {
+                return StructureCheck.occurrences(t, v).any { at ->
+                    val before = t.getOrNull(at - 1); val beforeThat = t.getOrNull(at - 2)
+                    val inRange = before == '-' && beforeThat?.isDigit() == true
+                    val unitless = !v.endsWith("%") && t.getOrNull(at + v.length) == '%'
+                    !inRange && !unitless
+                }
+            }
             return Regex("(?<![\\p{L}\\p{N}])" + Regex.escape(v) + "(?![\\p{L}\\p{N}])").containsMatchIn(t)
         }
 
         private fun thingKey(t: ConceptRef) = EntityRules.looseName(t.name)
 
+        /**
+         * What a structure claim counts, from its line (`section > row label > column: value`): the segments between the section heading and the value
+         * that are not a scenario or a column of scenarios, as words. Empty when the line names nothing but a section and a scenario.
+         */
+        private fun labelWords(s: ClaimItem): List<Set<String>> {
+            val segments = s.quote.split(" > ").map { it.trim() }
+            val last = segments.last().substringBeforeLast(": ", segments.last())
+            val named = (if (segments.size == 1) listOf(last) else segments.drop(1).dropLast(1) + last)
+                .filter { it.isNotBlank() && EntityRules.kindByName(it) != "scenario" }
+            return named.map(::words).filter { it.isNotEmpty() }
+        }
+
+        /**
+         * A structure claim and a text claim state the same fact when the text claim prints the structure claim's value and either the two share one
+         * printed passage, or the value is a statement of several words, or the text claim also has what the value counts (the nearest
+         * label of the structure line, every one of its words). A shared number, a shared thing or a shared common word is not enough: table rows
+         * share words like "sustainable schools", and a count of 12 is not the 12 of "9–12".
+         */
         fun sameFact(s: ClaimItem, t: ClaimItem): Boolean {
             val value = valueOf(s)
             if (value.isBlank() || !printsValue(t.quote, value)) return false
             val samePassage = s.passage != null && t.passage != null && ClaimAgreement.quoteKey(s.passage) == ClaimAgreement.quoteKey(t.passage)
-            val sharedThing = s.about.map(::thingKey).toSet().intersect(t.about.map(::thingKey).toSet()).isNotEmpty()
-            val sharedWord = words(s.subject).intersect(words(t.quote + " " + t.subject)).isNotEmpty()
-            return samePassage || sharedThing || sharedWord
+            if (samePassage) return true
+            val labels = labelWords(s)
+            if (labels.isEmpty()) return value.trim().split(Regex("\\s+")).size >= 3
+            return words(t.quote + " " + t.subject).containsAll(labels.last())
         }
 
         /** Why [s] and [t], which state the same fact, disagree; null when they agree (or differ only by a gap). */

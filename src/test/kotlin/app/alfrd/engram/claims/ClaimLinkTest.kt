@@ -161,6 +161,30 @@ class ClaimLinkTest {
         assertEquals(1, r.report.structureOnly); assertEquals(1, r.report.textOnly)
     }
 
+    private fun item(quote: String, subject: String = "") =
+        ClaimItem("u", quote, null, null, null, subject, "NUMBER", "r", "Settled", null, emptyList())
+
+    @Test
+    fun `the 2026-10-26 box gate's false links are not links, and its true ones still are`() {
+        val row = "District-wide, side by side > Multilingual Learners in Sustainable Schools > STATUS QUO: 44%"
+        // True: the row label is in the text row and the value is a cell of it.
+        assertTrue(ClaimLinker.sameFact(item(row), item("Multilingual Learners in Sustainable Schools | 87% | 77% | 44%")))
+        assertTrue(ClaimLinker.sameFact(item("District-wide, side by side > Schools or sites that would close > STATUS QUO: 0"), item("Schools or sites that would close | 14 | 11 | 0")))
+        assertTrue(ClaimLinker.sameFact(item("What changes > SCENARIO A > SCHOOLS CLOSING: 14"), item("SCENARIO A: 14 schools closing", "schools closing")))
+        // A long statement printed in both is the same fact.
+        assertTrue(ClaimLinker.sameFact(item("The three scenarios > STATUS QUO: 48% of students will attend a sustainable school"), item("About 48% of students will attend a sustainable school.")))
+        // False: "0" is not "0%", and the row is another row.
+        assertTrue(!ClaimLinker.sameFact(item("District-wide, side by side > Schools or sites that would close > STATUS QUO: 0"), item("Students who would change schools | 27% | 24% | 0%")))
+        // False: 12 is not the 12 of "9–12", and PROGRAM MOVES is not in the sentence.
+        assertTrue(!ClaimLinker.sameFact(item("What changes under each scenario > SCENARIO B > PROGRAM MOVES: 12"), item("The MLC (9–12) high school program also closes; students move to their neighborhood high school.")))
+        // False: two rows of one table that share common words and a value.
+        assertTrue(!ClaimLinker.sameFact(item("District-wide, side by side > Multilingual Learners in Sustainable Schools > SCENARIO B: 77%"), item("Special Education in Sustainable Schools | 77% | 77% | 40%")))
+        assertTrue(!ClaimLinker.sameFact(item("District-wide, side by side > Special Education in Sustainable Schools > SCENARIO A: 77%"), item("Multilingual Learners in Sustainable Schools | 87% | 77% | 44%")))
+        // A shared passage is enough on its own.
+        val a = item("x > y: 5").copy(passage = "In 2024 there were 5 schools."); val b = item("There were 5 schools").copy(passage = "In 2024  there were 5 schools.")
+        assertTrue(ClaimLinker.sameFact(a, b))
+    }
+
     @Test
     fun `claims of one reader are never linked to each other`() {
         assertTrue(ClaimLinker.isStructure("claims-from-structure-v7"))
