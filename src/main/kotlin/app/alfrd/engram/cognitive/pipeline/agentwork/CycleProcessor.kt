@@ -427,6 +427,7 @@ class CycleProcessor(
             created += AgentTaskMapper.fromPage(result.page)
         }
         if (plan.rejected.isNotEmpty()) trace.notes += rejectionSummary(proposal.tasks.size, plan.rejected)
+        CrossItemRule.flag(goal.title, goal.doneWhen, plan.tasks)?.let { trace.notes += it }
         return Planned.Ready(created)
     }
 

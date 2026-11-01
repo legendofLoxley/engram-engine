@@ -124,7 +124,7 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
         return when (kind) {
             "blocked" -> {
                 val reason = str("blocked_reason").ifEmpty { str("result") }.ifEmpty { "the staged material was not enough" }
-                outcome(TaskExecution.Blocked(reason.take(MAX_REASON_CHARS)))
+                outcome(TaskExecution.Blocked(PromptText.capped(reason, MAX_REASON_CHARS)))
             }
             "done" -> {
                 val result = str("result")
@@ -137,7 +137,7 @@ open class DirectorTaskExecutor(private val llmClient: LlmClient?) : CycleTaskEx
                     .filter { it.isNotEmpty() }.distinct()
                 // The Result cites the staged page's own URL, never the model's spelling of it.
                 val valid = cited.mapNotNull { notionPageIdInPath(input.handles.resolve(it))?.let(staged::get)?.url }.distinct()
-                outcome(TaskExecution.Done(result.take(MAX_RESULT_CHARS), valid, droppedCitations = cited.size - valid.size))
+                outcome(TaskExecution.Done(PromptText.capped(result, MAX_RESULT_CHARS), valid, droppedCitations = cited.size - valid.size))
             }
             else -> outcome(TaskExecution.Failed("unknown_outcome"))
         }

@@ -185,3 +185,28 @@ object ForbiddenActions {
         DELETE(RejectReason.DELETES_OR_OVERWRITES_ROW),
     }
 }
+
+/**
+ * The cross-item rule, checked in code after the plan is validated (the prompt asks for it; this does not trust the prompt).
+ * A goal that compares items against a reference, or against each other, needs at least one Check task that asks about a
+ * relationship across two or more items, not only one-item lookups. General by design: it reads wording, never a goal's subject.
+ * Lexical and conservative, like [ForbiddenActions]; a miss is a flag on the trace, never a rejected plan.
+ */
+object CrossItemRule {
+    private val COMPARISON = Regex("""\b(compar\w*|reconcil\w*|versus|vs\.?|against|consisten\w*|conflict\w*|discrepanc\w*|mismatch\w*|differ\w*|contradict\w*|cross-?check\w*|align\w*|match\w*)\b""", RegexOption.IGNORE_CASE)
+    private val ACROSS_ITEMS = Regex(
+        """\b(each other|one another|across (the )?(items|rows|entries|pages|records)|between (the )?(items|rows|entries|pages|records)|among (the )?(items|rows|entries|pages|records)|(one|another|other) (item|row|entry|page|record)s?\b.*\b(item|row|entry|page|record)s?\b|relationship between|depends? on)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    fun isComparisonGoal(title: String, doneWhen: String): Boolean = COMPARISON.containsMatchIn("$title $doneWhen")
+
+    fun hasCrossItemCheck(tasks: List<PlannedTask>): Boolean =
+        tasks.any { it.type == TaskType.CHECK && ACROSS_ITEMS.containsMatchIn("${it.title} ${it.instructions}") }
+
+    /** A one-line flag for the trace, or null when the rule is met or does not apply. */
+    fun flag(title: String, doneWhen: String, tasks: List<PlannedTask>): String? =
+        if (isComparisonGoal(title, doneWhen) && !hasCrossItemCheck(tasks))
+            "Cross-item rule: the goal compares items, but no Check task asks about a relationship across two or more items."
+        else null
+}

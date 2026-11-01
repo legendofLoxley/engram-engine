@@ -122,10 +122,12 @@ class CycleTaskAndQcTest {
     }
 
     @Test
-    fun `a reason or a result is capped`() {
+    fun `a reason or a result over the cap is cut with a visible marker, never silently`() {
         val long = "x".repeat(20_000)
-        assertEquals(DirectorTaskExecutor.MAX_RESULT_CHARS, ((execute(answering(RoutedLlm.taskDone(long))).execution) as TaskExecution.Done).result.length)
-        assertEquals(DirectorTaskExecutor.MAX_REASON_CHARS, ((execute(answering(RoutedLlm.taskBlocked(long))).execution) as TaskExecution.Blocked).reason.length)
+        val result = ((execute(answering(RoutedLlm.taskDone(long))).execution) as TaskExecution.Done).result
+        assertEquals("x".repeat(DirectorTaskExecutor.MAX_RESULT_CHARS) + " [CUT ${20_000 - DirectorTaskExecutor.MAX_RESULT_CHARS} chars]", result)
+        val reason = ((execute(answering(RoutedLlm.taskBlocked(long))).execution) as TaskExecution.Blocked).reason
+        assertEquals("x".repeat(DirectorTaskExecutor.MAX_REASON_CHARS) + " [CUT ${20_000 - DirectorTaskExecutor.MAX_REASON_CHARS} chars]", reason)
     }
 
     @Test
