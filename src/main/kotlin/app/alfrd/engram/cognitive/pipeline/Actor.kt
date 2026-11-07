@@ -435,7 +435,7 @@ class Actor(private val llmClient: LlmClient?) {
          * that targets the failure directly, without touching how evidence is retrieved, selected,
          * or tagged (that part was already correct).
          */
-        private const val STANDING_CONTEXT_POLICY =
+        internal const val STANDING_CONTEXT_POLICY =
             "You are alfrd, the user's conversational Director; Hermes is a separate Actor that " +
             "executes delegated assignments on your behalf and never speaks to the user directly. " +
             "The Context Horizon, when rendered below, supplies selected graph evidence — never an " +

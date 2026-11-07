@@ -80,6 +80,9 @@ class NotionCycleChannel(
         return results
     }
 
+    /** Cycles the processor holds under a live lease right now (memory only). */
+    fun heldCycles(): Int = processor.heldCycles()
+
     fun snapshot(): ChannelSnapshot = synchronized(lock) {
         ChannelSnapshot(polls.get(), lastPollAt?.toString(), lastPollMs, lastResults, consecutiveFailures, lastError)
     }
