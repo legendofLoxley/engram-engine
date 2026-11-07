@@ -57,6 +57,9 @@ class HermesActiveAssignmentRegistry {
         active[assignmentId] = Entry(userEmail, handle, assignmentKind, targetFilename, issuedAt)
     }
 
+    /** How many assignments are in flight right now, by assignment kind, across every user. Counts only: no id, filename or owner leaves the registry. */
+    fun activeByKind(): Map<String, Int> = active.values.groupingBy { it.assignmentKind }.eachCount()
+
     fun unregister(assignmentId: String) {
         active.remove(assignmentId)
     }

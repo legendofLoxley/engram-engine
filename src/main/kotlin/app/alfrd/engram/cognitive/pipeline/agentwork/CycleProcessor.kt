@@ -94,6 +94,9 @@ class CycleProcessor(
 
     private val leaseGuards = ConcurrentHashMap<String, LeaseGuard>()
 
+    /** How many cycles this worker holds under a live lease right now. A read of memory only; nothing is written or asked of Notion. */
+    fun heldCycles(): Int = leaseGuards.size
+
     /** What the report of each running cycle is built from, by Cycle page id; dropped when the cycle's processing ends. */
     private val drafts = ConcurrentHashMap<String, ReportDraft>()
     private fun draft(cycle: Cycle): ReportDraft = drafts.getOrPut(cycle.pageId) { ReportDraft() }

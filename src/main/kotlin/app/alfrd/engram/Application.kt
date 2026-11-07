@@ -13,7 +13,9 @@ import app.alfrd.engram.api.configureDebugPdfSourceRoutes
 import app.alfrd.engram.api.configureDebugSourceRoutes
 import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
+import app.alfrd.engram.api.configureDebugDirectorTickRoutes
 import app.alfrd.engram.api.configureDebugNotionCycleRoutes
+import app.alfrd.engram.director.bootstrapDirectorTick
 import app.alfrd.engram.cognitive.pipeline.agentwork.bootstrapNotionCycles
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesAssignmentCompletionStore
@@ -146,6 +148,15 @@ fun main() {
     val notionStartup = bootstrapNotionCycles(notionScope)
     Runtime.getRuntime().addShutdownHook(Thread { notionScope.cancel() })
 
+    // One shared across every session's pipeline, the debug routes and the Director tick (which only counts what is in flight).
+    val hermesCompletionStore = HermesAssignmentCompletionStore()
+    val hermesActiveAssignments = HermesActiveAssignmentRegistry()
+
+    // The Director's standing-context tick (read-only: no model call, no graph write). Off unless DIRECTOR_TICK_IDENTITY is set.
+    val tickScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val directorTickStartup = bootstrapDirectorTick(tickScope, db, notionStartup, hermesActiveAssignments)
+    Runtime.getRuntime().addShutdownHook(Thread { tickScope.cancel() })
+
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
     // Defaults to Ktor's own default (0.0.0.0) so production/container behavior is unchanged;
     // set HOST=127.0.0.1 for a loopback-only local run.
@@ -185,8 +196,6 @@ fun main() {
             // to whatever polls for it. HermesActiveAssignmentRegistry needs the same sharing for
             // the mirror-image reason: a cancellation request (by assignmentId only) must reach
             // whichever session's pipeline actually dispatched it.
-            val hermesCompletionStore = HermesAssignmentCompletionStore()
-            val hermesActiveAssignments = HermesActiveAssignmentRegistry()
             val debugSessionManager = SessionManager(factory = {
                 CognitivePipelineFactory.create(db, hermesCompletionStore = hermesCompletionStore, hermesActiveAssignments = hermesActiveAssignments)
             })
@@ -196,6 +205,7 @@ fun main() {
             configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
             configureDebugHermesActivityRoutes(db, hermesActiveAssignments)
             configureDebugNotionCycleRoutes(notionStartup)
+            configureDebugDirectorTickRoutes(directorTickStartup)
             configureDebugGraphBackupRoutes(db, localBackup)
             configureDebugSourceRoutes(db)
             configureDebugPdfSourceRoutes(db)
