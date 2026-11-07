@@ -332,6 +332,19 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             },
         )
 
+        /**
+         * The `ops` array as the owner's Horizon tool accepts it: the same verbs and field schemas the interpretation model is given
+         * (so a drift between the two is impossible), minus `hold_for_choice`, which asks the user a question in a reply and so has
+         * no meaning where no reply is composed. `mcp/ops.schema.json` is this value, checked by a test.
+         */
+        val OWNER_OPS_SCHEMA: JsonObject = buildJsonObject {
+            put("type", "array")
+            putJsonObject("items") {
+                putJsonArray("anyOf") { OPERATION_VARIANTS.filterNot { v -> (v["properties"] as JsonObject)["verb"]?.toString()?.contains("hold_for_choice") == true }.forEach { add(it) } }
+            }
+            put("maxItems", OperationParser.MAX_OPERATIONS)
+        }
+
         internal val APPLY_OPERATIONS_TOOL = ToolDefinition(
             name = TOOL_NAME,
             description = "Write to the person's memory graph. ops may be EMPTY (most messages need nothing).",

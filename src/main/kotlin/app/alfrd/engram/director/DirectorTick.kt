@@ -105,6 +105,7 @@ class DirectorTick(
     }
 
     private val logger = LoggerFactory.getLogger(DirectorTick::class.java)
+    private val standing = StandingContext(email, true, interval.seconds, assembler, probe, notion, hermes, budgets, zone)
     private val lock = Any()
     private var ticks = 0L
     private var previous: ChangeMarker? = null
@@ -153,21 +154,10 @@ class DirectorTick(
 
         val t1 = System.nanoTime()
         return try {
-            val outcome = assembler.assemble(email, marker.lastCycleSeq + 1)
-            val state = SelfState(
-                tickEnabled = true,
-                intervalSeconds = interval.seconds,
-                tickAt = now.toString(),
-                renderReason = reason,
-                servers = withContext(Dispatchers.IO) { probe.servers() },
-                memory = withContext(Dispatchers.IO) { probe.memory() },
-                notion = notion(),
-                hermesInFlight = hermes(),
-                budgets = budgets(),
-                marker = marker,
-                changes = changes,
-            )
-            val text = DirectorPromptRenderer.render(state, outcome, zone, now)
+            val rendered = standing.render(marker, changes, reason, now, marker.lastCycleSeq + 1)
+            val outcome = rendered.outcome
+            val state = rendered.state
+            val text = rendered.text
             withContext(Dispatchers.IO) { write(text, now) }
             val items = (outcome as? AssembleOutcome.Assembled)?.horizon?.items?.size ?: 0
             val renderMs = (System.nanoTime() - t1) / 1_000_000
@@ -268,7 +258,6 @@ fun bootstrapDirectorTick(
     val dir = env[DirectorTick.ENV_DIR]?.trim()?.takeIf { it.isNotEmpty() }?.let(Path::of)
         ?: Path.of(System.getProperty("user.home"), "alfrd", "director-tick")
 
-    val running = (notionStartup as? NotionCycleStartup.Running)?.runtime
     val tick = DirectorTick(
         email = email,
         label = raw,
@@ -279,16 +268,7 @@ fun bootstrapDirectorTick(
         probe = probe,
         notion = { notionState(notionStartup) },
         hermes = { hermesActive.activeByKind() },
-        budgets = {
-            val info = running?.info
-            BudgetDefaults(
-                taskBudget = CycleProcessor.DEFAULT_BUDGET,
-                taskBudgetCeiling = CycleProcessor.MAX_BUDGET,
-                planTimeoutSeconds = info?.planTimeoutSeconds ?: (PlanRoute.DEFAULT_TIMEOUT_MS / 1000),
-                planMaxTokens = info?.planMaxTokens ?: PlanRoute.DEFAULT_MAX_TOKENS,
-                configured = info?.planEndpoint != null,
-            )
-        },
+        budgets = { budgetDefaults(notionStartup) },
     )
     if (start) tick.start(scope)
     bootLog.info("director-tick: running identity={} interval={}s dir={}", raw, seconds, dir)
@@ -301,4 +281,16 @@ internal fun notionState(startup: NotionCycleStartup): NotionState = when (start
         val snapshot = startup.runtime.channel.snapshot()
         NotionState(true, null, startup.runtime.info.pollSeconds, snapshot.lastPollAt, snapshot.consecutiveFailures, startup.runtime.channel.heldCycles())
     }
+}
+
+/** The limits one cycle runs under, as the Notion channel is configured (or the built-in defaults when it is not). Shared by the tick and the owner's Horizon tool. */
+internal fun budgetDefaults(startup: NotionCycleStartup): BudgetDefaults {
+    val info = (startup as? NotionCycleStartup.Running)?.runtime?.info
+    return BudgetDefaults(
+        taskBudget = CycleProcessor.DEFAULT_BUDGET,
+        taskBudgetCeiling = CycleProcessor.MAX_BUDGET,
+        planTimeoutSeconds = info?.planTimeoutSeconds ?: (PlanRoute.DEFAULT_TIMEOUT_MS / 1000),
+        planMaxTokens = info?.planMaxTokens ?: PlanRoute.DEFAULT_MAX_TOKENS,
+        configured = info?.planEndpoint != null,
+    )
 }

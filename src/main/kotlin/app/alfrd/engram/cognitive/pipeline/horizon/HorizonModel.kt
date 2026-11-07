@@ -23,6 +23,13 @@ import java.security.MessageDigest
 const val ENVIRONMENT_SOURCE_TYPE = "environment_signal"
 
 /**
+ * `Source.type` for what the owner's own Claude session writes through the Horizon tool (`POST /owner/horizon`). The owner trusts it
+ * (`User -TRUSTS-> Source`) like their conversational Source, and it is deliberately not in [ACTOR_ATTRIBUTED_SOURCE_TYPES]: it is the
+ * owner acting through a tool, so it reads as the owner's own statement, not as an Actor's report.
+ */
+const val CLAUDE_SESSION_SOURCE_TYPE = "claude_session"
+
+/**
  * `Source.type` values for the three Actor-attributed provenance kinds [ActorEventIngestionService]
  * distinguishes — never inferred from a caller-supplied free-text field (see that service's
  * `ActorEventKind`). Kept distinct from each other and from [ENVIRONMENT_SOURCE_TYPE] so

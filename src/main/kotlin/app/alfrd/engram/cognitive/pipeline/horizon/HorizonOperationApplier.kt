@@ -2,6 +2,7 @@ package app.alfrd.engram.cognitive.pipeline.horizon
 
 import app.alfrd.engram.db.LinkOutcome
 import app.alfrd.engram.db.SourceChunker
+import app.alfrd.engram.cognitive.pipeline.memory.DatabaseEngramClient
 import app.alfrd.engram.db.SourceStore
 import org.slf4j.LoggerFactory
 import java.time.ZoneId
@@ -128,11 +129,13 @@ class HorizonOperationApplier(
         requestId: String,
         operations: List<HorizonOperation>,
         zone: ZoneId = ZoneId.systemDefault(),
+        /** The `Source.type` that asserts the items this call creates: the user's conversation unless a caller (the owner's Claude session) says otherwise. */
+        sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
     ): List<AppliedOperation> {
         val createdContainerUids = mutableMapOf<String, String>()
         return operations.mapIndexed { index, op ->
             try {
-                applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone)
+                applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone, sourceType)
             } catch (e: Exception) {
                 logger.warn("apply ${op.verb} failed for userEmail=$userEmail: ${e.message}")
                 AppliedOperation(op, applied = false, summary = "Could not apply ${op.verb}")
@@ -147,6 +150,7 @@ class HorizonOperationApplier(
         op: HorizonOperation,
         createdContainerUids: MutableMap<String, String>,
         zone: ZoneId,
+        sourceType: String,
     ): AppliedOperation = when (op) {
         is CreateContainer -> {
             val record = structure.createContainer(userEmail, cycleSeq, op.kind, op.name, op.parentUid, tentative = !op.namedByUser)
@@ -154,7 +158,7 @@ class HorizonOperationApplier(
             AppliedOperation(op, record != null, if (record != null) "Created ${op.kind.name.lowercase()} \"${record.name}\"" else "Could not create ${op.kind.name.lowercase()} \"${op.name}\"")
         }
         is RecordItem -> if (op.chunkUid != null) applyFromChunk(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
-            else recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
+            else recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, sourceType)
         is ResolveItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val done = structure.resolve(userEmail, cycleSeq, op.targetUid, resolved = true)
@@ -165,7 +169,7 @@ class HorizonOperationApplier(
             val done = structure.resolve(userEmail, cycleSeq, op.targetUid, resolved = false)
             AppliedOperation(op, done, if (done) "Reopened: $label" else "Could not reopen $label")
         }
-        is CorrectItem -> applyCorrection(userEmail, cycleSeq, opKey, op)
+        is CorrectItem -> applyCorrection(userEmail, cycleSeq, opKey, op, sourceType)
         is FileItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val into = labelOf(userEmail, op.intoUid)
@@ -201,6 +205,7 @@ class HorizonOperationApplier(
     /** A [RecordItem] as the user's own words: the duplicate check, then project inference, then the write. */
     private suspend fun recordPlain(
         userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
+        sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
     ): AppliedOperation = duplicateOf(userEmail, opKey, op)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone) } ?: run {
             val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
             // The model rarely files an item even when the message plainly names its project, and an unfiled
@@ -210,7 +215,7 @@ class HorizonOperationApplier(
                 ProjectInference.infer("${op.quote} ${op.title ?: ""}", structure.listContainers(userEmail, ContainerKind.PROJECT))
             } else null
             val projectUid = stated ?: inferred?.uid
-            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
+            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType)
             if (record == null) {
                 AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
             } else {
@@ -291,10 +296,10 @@ class HorizonOperationApplier(
      * filed where the old one was and tied to the same entities (with the new date if it changed),
      * linked as superseding it; the old one is closed so it stops surfacing. Nothing is lost.
      */
-    private suspend fun applyCorrection(userEmail: String, cycleSeq: Long, opKey: String, op: CorrectItem): AppliedOperation {
+    private suspend fun applyCorrection(userEmail: String, cycleSeq: Long, opKey: String, op: CorrectItem, sourceType: String = DatabaseEngramClient.SOURCE_TYPE): AppliedOperation {
         val old = structure.getItem(userEmail, op.targetUid)
             ?: return AppliedOperation(op, false, "Could not find the item to correct")
-        val created = structure.createItem(userEmail, cycleSeq, old.kind, op.title ?: op.quote, op.dueAt ?: old.dueAt, old.projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote)
+        val created = structure.createItem(userEmail, cycleSeq, old.kind, op.title ?: op.quote, op.dueAt ?: old.dueAt, old.projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType)
             ?: return AppliedOperation(op, false, "Could not record the correction of \"${old.text}\"")
         old.about.forEach { structure.linkAbout(userEmail, cycleSeq, created.uid, it) }
         val linked = graph.markSuperseded(userEmail, cycleSeq, created.uid, old.uid)

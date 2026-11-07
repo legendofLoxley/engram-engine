@@ -335,6 +335,8 @@ object SchemaBootstrap {
             // Idempotency key for an item created by a Horizon write operation, namespaced by
             // owner — see HorizonStructureStore.createItem. Null for ordinarily-ingested phrases.
             ensureProperty(schema, "Phrase",  "opKey",               Type.STRING)
+            // Where an utterance arrived from (`claude` for the owner's Horizon tool); null means the ordinary conversation.
+            ensureProperty(schema, "Utterance", "channel",           Type.STRING)
             // The user's explicit "keep this in front of me" / "stop bringing this up" — pinned |
             // suppressed, absent = normal. Persisted here; the selector (not built yet) is what acts on it.
             ensureProperty(schema, "Phrase",  "attention",           Type.STRING)
