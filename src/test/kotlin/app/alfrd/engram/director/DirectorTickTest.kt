@@ -272,9 +272,8 @@ class DirectorTickTest {
     }
 
     @Test
-    fun `it is off unless DIRECTOR_TICK_IDENTITY is set, and refuses owner-jacob and a bad interval`() {
+    fun `it is off unless DIRECTOR_TICK_IDENTITY is set, and refuses a bad interval`() {
         assertTrue((boot(emptyMap()) as DirectorTickStartup.Disabled).let { !it.misconfigured })
-        assertTrue((boot(mapOf("DIRECTOR_TICK_IDENTITY" to "owner-jacob")) as DirectorTickStartup.Disabled).misconfigured)
         assertTrue((boot(mapOf("DIRECTOR_TICK_IDENTITY" to "tick-a", "DIRECTOR_TICK_INTERVAL_S" to "5")) as DirectorTickStartup.Disabled).misconfigured)
         assertTrue((boot(mapOf("DIRECTOR_TICK_IDENTITY" to "tick-a", "DIRECTOR_TICK_INTERVAL_S" to "soon")) as DirectorTickStartup.Disabled).misconfigured)
         val running = boot(mapOf("DIRECTOR_TICK_IDENTITY" to "tick-a", "DIRECTOR_TICK_DIR" to tempDir.resolve("o").toString())) as DirectorTickStartup.Running

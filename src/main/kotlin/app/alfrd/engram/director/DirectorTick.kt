@@ -243,9 +243,9 @@ sealed interface DirectorTickStartup {
 private val bootLog = LoggerFactory.getLogger("app.alfrd.engram.director.DirectorTickBootstrap")
 
 /**
- * Builds the tick from the environment and starts it in [scope], or says why not. Off unless `DIRECTOR_TICK_IDENTITY` is set. The value is a
- * synthetic id, resolved the way the debug routes resolve one, and never `owner-jacob`: that identity is real data and the debug surface
- * refuses it, so this does too. A bad interval leaves the tick off with a loud log line and never stops the engine.
+ * Builds the tick from the environment and starts it in [scope], or says why not. Off unless `DIRECTOR_TICK_IDENTITY` is set. The value is an
+ * id, resolved the way the debug routes resolve one. `owner-jacob` is allowed: the tick is read-only (no model call, no graph write), so it is
+ * exempt from the guard that stops the debug fixture routes writing to that real-data identity. A bad interval leaves the tick off with a loud log line and never stops the engine.
  */
 fun bootstrapDirectorTick(
     scope: CoroutineScope,
@@ -261,7 +261,6 @@ fun bootstrapDirectorTick(
     fun bad(reason: String) = DirectorTickStartup.Disabled(reason, misconfigured = true).also { bootLog.error("director-tick: NOT RUNNING: {}", reason) }
 
     val email = DebugConverseService.resolveUserId(raw)
-    if (email.contains("owner-jacob")) return bad("${DirectorTick.ENV_IDENTITY} names a real-data identity; the tick only runs for synthetic ones")
     val seconds = env[DirectorTick.ENV_INTERVAL]?.trim()?.takeIf { it.isNotEmpty() }?.let {
         it.toLongOrNull()?.takeIf { s -> s in DirectorTick.MIN_INTERVAL_SECONDS..DirectorTick.MAX_INTERVAL_SECONDS }
             ?: return bad("${DirectorTick.ENV_INTERVAL} must be a whole number of seconds between ${DirectorTick.MIN_INTERVAL_SECONDS} and ${DirectorTick.MAX_INTERVAL_SECONDS}")
