@@ -166,6 +166,7 @@ interface HorizonStructureStore {
         askedBy: String = "alfrd",
         opKey: String? = null,
         sourceQuote: String? = null,
+        sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
     ): ItemRecord?
 
     /**
@@ -324,6 +325,7 @@ class ArcadeHorizonStructureStore(
         askedBy: String,
         opKey: String?,
         sourceQuote: String?,
+        sourceType: String,
     ): ItemRecord? {
         if (userEmail.isBlank() || text.isBlank()) return null
         return mutate("createItem", null) {
@@ -347,7 +349,7 @@ class ArcadeHorizonStructureStore(
                     return@mutate null
                 }
             } else null
-            val source = findOrCreateConversationSource(userVertex, userEmail)
+            val source = findOrCreateConversationSource(userVertex, userEmail, sourceType)
             val now = System.currentTimeMillis()
             val vertex = db.newVertex(kind.typeName).apply {
                 set("uid", UUID.randomUUID().toString())
@@ -377,7 +379,7 @@ class ArcadeHorizonStructureStore(
                 save()
             }
             source.newEdge("ASSERTS", vertex, false).apply {
-                set("context", DatabaseEngramClient.SOURCE_TYPE)
+                set("context", sourceType)
                 set("timestamp", now)
                 set("scores", """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
@@ -665,9 +667,10 @@ class ArcadeHorizonStructureStore(
         read("listRecentItems", emptyList()) {
             if (limit <= 0) return@read emptyList()
             val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@read emptyList()
-            // Only the conversational Source: Actor and environment evidence are not things the user said.
+            // Only the conversational Sources: Actor and environment evidence are not things the user said. The owner's Claude session
+            // writes as the owner, so what it recorded is as visible here as what they typed.
             val sourceUids = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
-                .filter { it.get("type") == DatabaseEngramClient.SOURCE_TYPE }
+                .filter { it.get("type") == DatabaseEngramClient.SOURCE_TYPE || it.get("type") == CLAUDE_SESSION_SOURCE_TYPE }
                 .mapNotNull { it.get("uid") as? String }
             if (sourceUids.isEmpty()) return@read emptyList()
             val sql = if (openOnly) {
@@ -799,15 +802,15 @@ class ArcadeHorizonStructureStore(
         findOwnedContainer(userEmail, uid, ContainerKind.PROJECT)
             ?: HorizonOwnership.findPhraseOwnedByUser(db, userEmail, uid)
 
-    private fun findOrCreateConversationSource(userVertex: Vertex, userEmail: String): Vertex {
-        val sourceName = "${DatabaseEngramClient.SOURCE_TYPE}:$userEmail"
+    private fun findOrCreateConversationSource(userVertex: Vertex, userEmail: String, sourceType: String = DatabaseEngramClient.SOURCE_TYPE): Vertex {
+        val sourceName = "$sourceType:$userEmail"
         val existing = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
-            .firstOrNull { it.get("name") == sourceName && it.get("type") == DatabaseEngramClient.SOURCE_TYPE }
+            .firstOrNull { it.get("name") == sourceName && it.get("type") == sourceType }
         if (existing != null) return existing.modify()
         val source = db.newVertex("Source").apply {
             set("uid", UUID.randomUUID().toString())
             set("name", sourceName)
-            set("type", DatabaseEngramClient.SOURCE_TYPE)
+            set("type", sourceType)
             set("metadata", """{"userEmail":"$userEmail","createdAt":${System.currentTimeMillis()}}""")
             save()
         }

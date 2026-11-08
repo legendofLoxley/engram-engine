@@ -14,6 +14,8 @@ import app.alfrd.engram.api.configureDebugSourceRoutes
 import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
 import app.alfrd.engram.api.configureDebugDirectorTickRoutes
+import app.alfrd.engram.api.configureOwnerHorizonRoutes
+import app.alfrd.engram.director.bootstrapOwnerHorizon
 import app.alfrd.engram.api.configureDebugNotionCycleRoutes
 import app.alfrd.engram.director.bootstrapDirectorTick
 import app.alfrd.engram.cognitive.pipeline.agentwork.bootstrapNotionCycles
@@ -155,6 +157,7 @@ fun main() {
     // The Director's standing-context tick (read-only: no model call, no graph write). Off unless DIRECTOR_TICK_IDENTITY is set.
     val tickScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val directorTickStartup = bootstrapDirectorTick(tickScope, db, notionStartup, hermesActiveAssignments)
+    val ownerHorizonStartup = bootstrapOwnerHorizon(db, notionStartup, hermesActiveAssignments, directorTickStartup)
     Runtime.getRuntime().addShutdownHook(Thread { tickScope.cancel() })
 
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
@@ -187,6 +190,9 @@ fun main() {
         configureScaffoldRoutes(db)
         configurePhrasesRoutes(db)
         configureOnboardingRoutes(db)
+
+        // The owner's Horizon tool: its own token, loopback only, identity fixed by OWNER_IDENTITY. Not a debug route.
+        configureOwnerHorizonRoutes(ownerHorizonStartup)
 
         if (System.getenv("DEBUG_CONVERSE_ENABLED") == "true") {
             // Isolated session pool — debug sessions never share state with production sessions.

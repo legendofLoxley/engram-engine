@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Launches the alfrd MCP server (stdio) from the repo's venv. Meant to be run over SSH by Claude Desktop; stdout is the protocol, so nothing else prints there.
+set -euo pipefail
+REPO="${ALFRD_REPO:-/home/halo/development/engram-engine-horizon}"
+exec "$REPO/mcp/.venv/bin/python" "$REPO/mcp/alfrd_mcp.py"
