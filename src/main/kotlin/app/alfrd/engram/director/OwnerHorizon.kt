@@ -8,7 +8,14 @@ import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
+import app.alfrd.engram.cognitive.pipeline.horizon.CHANNEL_SOURCED_SOURCE_TYPE
 import app.alfrd.engram.cognitive.pipeline.horizon.CLAUDE_SESSION_SOURCE_TYPE
+import app.alfrd.engram.cognitive.pipeline.horizon.ItemWords
+import app.alfrd.engram.cognitive.pipeline.horizon.RecordItem
+import app.alfrd.engram.db.ChunkDraft
+import app.alfrd.engram.db.SourceChunker
+import app.alfrd.engram.db.SourceInput
+import app.alfrd.engram.db.SourceStore
 import app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPropagator
@@ -24,6 +31,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -37,7 +45,15 @@ import java.util.UUID
 
 /** What happened to one operation the caller sent. [applied] false means nothing was written for it; [detail] is the guard's reason or the change made. */
 @Serializable
-data class OwnerOperationReport(val verb: String, val applied: Boolean, val detail: String, val quote: String? = null)
+data class OwnerOperationReport(
+    val verb: String, val applied: Boolean, val detail: String, val quote: String? = null,
+    /** For an operation that cited a source: the document's title and the location of the passage it rests on. Null for a message-grounded one. */
+    val source: String? = null, val location: String? = null,
+)
+
+/** What happened to one entry of the `sources` array. [stored] false means nothing was written for it. */
+@Serializable
+data class OwnerSourceReport(val id: String, val title: String, val stored: Boolean, val detail: String, val chunks: Int = 0)
 
 /**
  * [horizon] is the standing prompt exactly as the Director tick renders it, after any writes. [refs] is what the operation verbs may name
@@ -45,7 +61,10 @@ data class OwnerOperationReport(val verb: String, val applied: Boolean, val deta
  * resolves against. [cycleSeq] is the cycle this call allocated, or null for a pure read.
  */
 @Serializable
-data class OwnerHorizonResponse(val horizon: String, val refs: String, val cycleSeq: Long?, val operations: List<OwnerOperationReport>)
+data class OwnerHorizonResponse(
+    val horizon: String, val refs: String, val cycleSeq: Long?, val operations: List<OwnerOperationReport>,
+    val sources: List<OwnerSourceReport> = emptyList(),
+)
 
 class OwnerHorizonUnavailable(message: String) : RuntimeException(message)
 
@@ -71,16 +90,18 @@ class OwnerHorizonService(
     private val snapshots: ViewSnapshotBuilder,
     private val seeder: HorizonSeeder,
     private val propagator: HorizonPropagator,
+    private val sourceStore: SourceStore = SourceStore(db),
     private val zone: ZoneId = ZoneId.systemDefault(),
     private val clock: () -> Instant = Instant::now,
 ) {
     private val logger = LoggerFactory.getLogger(OwnerHorizonService::class.java)
 
-    suspend fun handle(message: String?, ops: JsonArray?): OwnerHorizonResponse {
+    suspend fun handle(message: String?, ops: JsonArray?, sources: JsonArray? = null): OwnerHorizonResponse {
         val text = message?.trim()?.takeIf { it.isNotEmpty() }
         val sent = ops ?: JsonArray(emptyList())
-        if (text == null && sent.isEmpty()) return read()
-        return PerUserCycleLock.withLock(email) { write(text, sent) }
+        val supplied = sources ?: JsonArray(emptyList())
+        if (text == null && sent.isEmpty() && supplied.isEmpty()) return read()
+        return PerUserCycleLock.withLock(email) { write(text, sent, supplied) }
     }
 
     private suspend fun read(): OwnerHorizonResponse {
@@ -89,21 +110,38 @@ class OwnerHorizonService(
         return OwnerHorizonResponse(rendered.text, refs(), null, emptyList())
     }
 
-    private suspend fun write(text: String?, sent: JsonArray): OwnerHorizonResponse {
+    private suspend fun write(text: String?, sent: JsonArray, supplied: JsonArray): OwnerHorizonResponse {
         val before = markerOrThrow()
+        // Sources first, so an operation in this same call can cite one. A source alone allocates no cycle and records no item.
+        val sourceReports = if (supplied.isEmpty()) emptyList() else storeSources(supplied)
+        if (text == null && sent.isEmpty()) {
+            val after = markerOrThrow()
+            val rendered = standing.render(after, after.changesSince(before), "Horizon tool", clock(), after.lastCycleSeq + 1, forChannel = true)
+            logger.info("owner-horizon: sources={} stored={}", sourceReports.size, sourceReports.count { it.stored })
+            return OwnerHorizonResponse(rendered.text, refs(), null, emptyList(), sourceReports)
+        }
         val cycleSeq = sequencer.allocateCycle(email) ?: throw OwnerHorizonUnavailable("could not allocate a cycle")
         if (text != null) recordUtterance(text, cycleSeq)
 
         val reports = mutableListOf<OwnerOperationReport>()
         var applied: List<AppliedOperation> = emptyList()
+        var sourcedApplied: List<AppliedOperation> = emptyList()
         if (sent.isNotEmpty()) {
             // hold_for_choice asks the user a question in a reply; there is no reply here, so it is refused before it can suppress the rest.
-            val allowed = mutableListOf<kotlinx.serialization.json.JsonElement>()
-            for (element in sent) {
-                val verb = ((element as? JsonObject)?.get("verb") as? JsonPrimitive)?.takeIf { it.isString }?.content
-                if (verb == "hold_for_choice") {
-                    reports += OwnerOperationReport(verb, false, "not_available_on_owner_route", ((element as JsonObject)["quote"] as? JsonPrimitive)?.content)
-                } else allowed += element
+            // An operation beyond the cap is refused whichever kind it is; one that names a `source` rests on that document, not on the message.
+            val allowed = mutableListOf<JsonElement>()
+            val cited = mutableListOf<JsonObject>()
+            val overflow = mutableListOf<OwnerOperationReport>()
+            for ((index, element) in sent.withIndex()) {
+                val obj = element as? JsonObject
+                val verb = (obj?.get("verb") as? JsonPrimitive)?.takeIf { it.isString }?.content
+                val quote = (obj?.get("quote") as? JsonPrimitive)?.takeIf { it.isString }?.content
+                when {
+                    index >= OperationParser.MAX_OPERATIONS -> overflow += OwnerOperationReport(verb ?: "?", false, "too_many_operations", quote)
+                    verb == "hold_for_choice" -> reports += OwnerOperationReport(verb, false, "not_available_on_owner_route", quote)
+                    obj != null && obj.containsKey("source") -> cited += obj
+                    else -> allowed += element
+                }
             }
             val snapshot = try {
                 snapshots.build(email, zone)
@@ -115,12 +153,30 @@ class OwnerHorizonService(
             applied = applier.apply(email, cycleSeq, "claude-owner-${UUID.randomUUID()}", parsed.operations, zone, CLAUDE_SESSION_SOURCE_TYPE)
             applied.forEach { reports += OwnerOperationReport(it.operation.verb, it.applied, it.summary, it.operation.quote.takeIf { q -> q.isNotBlank() }) }
             parsed.rejections.forEach { reports += OwnerOperationReport(it.verb, false, it.reason, it.quote) }
+
+            // Operations that cite a source: the quote is checked against that source's chunk text, not the message.
+            val plans = cited.map { planSourced(it, snapshot) }
+            reports += plans.filterIsInstance<SourcedPlan.Refused>().map { it.report }
+            val ready = plans.filterIsInstance<SourcedPlan.Ready>()
+            if (ready.isNotEmpty()) {
+                sourcedApplied = applier.apply(
+                    email, cycleSeq, "claude-owner-src-${UUID.randomUUID()}", ready.map { it.op }, zone, CLAUDE_SESSION_SOURCE_TYPE,
+                    chunkSourceType = CHANNEL_SOURCED_SOURCE_TYPE,
+                )
+                sourcedApplied.forEachIndexed { i, a ->
+                    val plan = ready[i]
+                    val detail = if (a.applied) "${a.summary} — from the source \"${plan.title}\" (${plan.location}); not recorded as the owner's statement" else a.summary
+                    reports += OwnerOperationReport(a.operation.verb, a.applied, detail, a.operation.quote.takeIf { q -> q.isNotBlank() }, plan.title, plan.location)
+                }
+            }
+            reports += overflow
         }
 
-        if (text != null || applied.isNotEmpty()) {
+        val allApplied = applied + sourcedApplied
+        if (text != null || allApplied.isNotEmpty()) {
             try {
-                seeder.seedTurn(email, cycleSeq, text.orEmpty(), applied)
-                propagator.propagate(email, cycleSeq, applied.filter { it.applied && it.resultUid != null }.map { it.resultUid!! to (it.resultText ?: "") })
+                seeder.seedTurn(email, cycleSeq, text.orEmpty(), allApplied)
+                propagator.propagate(email, cycleSeq, allApplied.filter { it.applied && it.resultUid != null }.map { it.resultUid!! to (it.resultText ?: "") })
             } catch (e: Exception) {
                 logger.warn("owner-horizon: seeding or propagation failed: {}", e::class.java.simpleName)
             }
@@ -128,9 +184,127 @@ class OwnerHorizonService(
 
         val after = markerOrThrow()
         val rendered = standing.render(after, after.changesSince(before), "Horizon tool", clock(), cycleSeq, forChannel = true)
-        logger.info("owner-horizon: cycle={} message={} operations={} applied={}", cycleSeq, text != null, reports.size, reports.count { it.applied })
-        return OwnerHorizonResponse(rendered.text, refs(), cycleSeq, reports)
+        logger.info(
+            "owner-horizon: cycle={} message={} operations={} applied={} sources={} sourced={}",
+            cycleSeq, text != null, reports.size, reports.count { it.applied }, sourceReports.size, sourcedApplied.count { it.applied },
+        )
+        return OwnerHorizonResponse(rendered.text, refs(), cycleSeq, reports, sourceReports)
     }
+
+    // ── Sources a channel supplies ───────────────────────────────────────────
+
+    /**
+     * Stores each entry of `sources` as a Source with Chunks through the one [SourceStore] the Drive connector and the PDF reader use:
+     * idempotent by content hash, so text already stored adds nothing; changed text under the same id is a new Source and the earlier one is
+     * marked superseded (nothing is deleted). The Source records that the text was supplied by this channel and that the Director did not read it.
+     */
+    private suspend fun storeSources(entries: JsonArray): List<OwnerSourceReport> = withContext(Dispatchers.IO) {
+        val seen = HashSet<String>()
+        entries.withIndex().map { (index, element) ->
+            val obj = element as? JsonObject
+            val rawId = obj?.str("id")?.trim().orEmpty()
+            val title = obj?.str("title")?.trim().orEmpty()
+            fun refused(reason: String) = OwnerSourceReport(rawId.ifEmpty { "?" }, title, false, "refused: $reason")
+            when {
+                obj == null -> refused("malformed_source")
+                index >= MAX_SOURCES -> refused("too_many_sources")
+                rawId.isEmpty() -> refused("missing_id")
+                title.isEmpty() -> refused("missing_title")
+                obj.str("kind") != KIND_NOTION_PAGE -> refused("unsupported_source_kind")
+                !seen.add(locatorOf(rawId)) -> refused("duplicate_source_id")
+                else -> try {
+                    val chunks = obj.chunkDrafts()
+                    val body = obj.str("text")
+                    val joined = body ?: chunks?.joinToString("\n\n") { it.text }
+                    when {
+                        (body != null) == (chunks != null) -> refused("send_either_text_or_chunks")
+                        joined.isNullOrBlank() -> refused("empty_text")
+                        else -> {
+                            val result = sourceStore.ingest(
+                                email,
+                                SourceInput(
+                                    type = SOURCE_TYPE_NOTION, locator = locatorOf(rawId), title = title, text = joined, chunks = chunks,
+                                    suppliedBy = CHANNEL, url = obj.str("url")?.trim()?.takeIf { it.isNotEmpty() },
+                                    lastEditedAt = obj.str("last_edited")?.trim()?.takeIf { it.isNotEmpty() },
+                                ),
+                            )
+                            val changed = sourceStore.markCurrent(email, result.source.uid)
+                            OwnerSourceReport(
+                                rawId, title, true,
+                                when {
+                                    result.created && changed > 0 -> "stored: the text changed, so the earlier text of this page is superseded (kept, not deleted)"
+                                    result.created -> "stored: new source"
+                                    changed > 0 -> "unchanged text matched an earlier version of this page, which is current again"
+                                    else -> "unchanged: this text is already stored, nothing was added"
+                                },
+                                result.source.chunkCount,
+                            )
+                        }
+                    }
+                } catch (e: IllegalArgumentException) {
+                    refused("invalid_source")
+                } catch (e: Exception) {
+                    logger.warn("owner-horizon: storing a source failed: {}", e::class.java.simpleName)
+                    refused("could_not_store")
+                }
+            }
+        }
+    }
+
+    private sealed interface SourcedPlan {
+        data class Ready(val op: RecordItem, val title: String, val location: String) : SourcedPlan
+        data class Refused(val report: OwnerOperationReport) : SourcedPlan
+    }
+
+    /**
+     * One operation that cites a source. Only `record_item` may: the quote must be a passage of one chunk of the cited source (the same
+     * grounding rule as a message, run against the chunk), and the item is written with writer `claude_session` and the source as its claimant.
+     */
+    private suspend fun planSourced(obj: JsonObject, snapshot: ViewSnapshot): SourcedPlan {
+        val verb = obj.str("verb") ?: "?"
+        val quote = obj.str("quote")?.trim().orEmpty()
+        fun no(reason: String) = SourcedPlan.Refused(OwnerOperationReport(verb, false, reason, quote.takeIf { it.isNotBlank() }))
+        if (verb != "record_item") return no("source_only_for_record_item")
+        val id = obj.str("source")?.trim().orEmpty()
+        if (id.isEmpty()) return no("missing_source")
+        if (quote.isBlank()) return no("missing_quote")
+        val (source, chunks) = withContext(Dispatchers.IO) {
+            val found = sourceStore.currentByLocator(email, SOURCE_TYPE_NOTION, locatorOf(id))
+            found to found?.let { sourceStore.chunks(email, it.uid) }.orEmpty()
+        }
+        if (source == null) return no("unknown_source")
+        val chunk = chunks.firstOrNull { SourceChunker.normalize(it.text).contains(SourceChunker.normalize(quote)) } ?: return no("quote_not_in_source")
+        // The ordinary parser does the rest (shape, kind, question check, project ref, date, label), with the chunk as the text a quote is found in.
+        val parsed = OperationParser.parse(JsonObject(mapOf("ops" to JsonArray(listOf(obj)))), chunk.text, snapshot, zone)
+        parsed.rejections.firstOrNull()?.let { return no(it.reason) }
+        val op = parsed.operations.singleOrNull() as? RecordItem ?: return no("not_recordable")
+        val author = obj.str("author")?.trim()?.takeIf { it.isNotEmpty() }
+        val claimant = if (author != null) "$author (in ${source.title})" else "source: ${source.title} (author unknown)"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("${op.kind.name}|${ItemWords.normalize(op.title ?: op.quote)}|${chunk.ordinal}".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }.take(24)
+        return SourcedPlan.Ready(
+            op.copy(chunkUid = chunk.uid, claimant = claimant, writer = CLAUDE_SESSION_SOURCE_TYPE, itemKey = "chsrc:${source.uid}:$digest"),
+            source.title, chunk.location,
+        )
+    }
+
+    private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    /** The entry's `chunks` as drafts, or null when it has none. A malformed list throws [IllegalArgumentException]. */
+    private fun JsonObject.chunkDrafts(): List<ChunkDraft>? {
+        val raw = this["chunks"] ?: return null
+        val list = raw as? JsonArray ?: throw IllegalArgumentException("chunks must be an array")
+        require(list.size in 1..MAX_CHUNKS) { "chunks must hold 1 to $MAX_CHUNKS entries" }
+        return list.mapIndexed { i, c ->
+            val o = c as? JsonObject ?: throw IllegalArgumentException("a chunk must be an object")
+            ChunkDraft(location = o.str("location")?.trim()?.takeIf { it.isNotEmpty() } ?: "part ${i + 1}", text = o.str("text") ?: throw IllegalArgumentException("a chunk needs text"))
+        }
+    }
+
+    /** A Notion page id is the same page with or without dashes and in any case; other ids are kept as sent. */
+    private fun locatorOf(id: String): String =
+        id.trim().replace("-", "").takeIf { it.length == 32 && it.all { c -> c.isDigit() || c.lowercaseChar() in 'a'..'f' } }?.lowercase() ?: id.trim()
 
     private suspend fun refs(): String = try {
         snapshots.build(email, zone).render()
@@ -164,6 +338,10 @@ class OwnerHorizonService(
     companion object {
         const val CHANNEL = "claude"
         const val LEDGER_SESSION = "claude-owner"
+        const val KIND_NOTION_PAGE = "notion_page"
+        private const val SOURCE_TYPE_NOTION = "notion_page"
+        private const val MAX_SOURCES = 5
+        private const val MAX_CHUNKS = 200
     }
 }
 
@@ -242,6 +420,7 @@ fun bootstrapOwnerHorizon(
     }
     val email = DebugConverseService.resolveUserId(raw)
     val structure = ArcadeHorizonStructureStore(db)
+    val sourceStore = SourceStore(db)
     val graph = ArcadeHorizonGraphStore(db)
     val assembler = ArcadeHorizonAssembler(db)
     val tick = (tickStartup as? DirectorTickStartup.Running)?.tick
@@ -256,10 +435,11 @@ fun bootstrapOwnerHorizon(
             budgets = { budgetDefaults(notionStartup) },
         ),
         sequencer = ArcadeCycleSequencer(db),
-        applier = HorizonOperationApplier(structure, graph),
+        applier = HorizonOperationApplier(structure, graph, sourceStore),
         snapshots = ViewSnapshotBuilder(structure),
         seeder = HorizonSeeder(structure),
         propagator = SalientTokenPropagator(graph, assembler),
+        sourceStore = sourceStore,
     )
     ownerLog.info("owner-horizon: serving identity={}", raw)
     return OwnerHorizonStartup.Running(service, token)

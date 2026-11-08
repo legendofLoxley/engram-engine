@@ -333,6 +333,27 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         )
 
         /**
+         * `record_item` as the owner's Horizon tool accepts it when it cites a document a channel supplied instead of the message: the quote
+         * must be verbatim in the cited source's text. Recorded as coming from that source, never as the owner's statement.
+         */
+        private val SOURCED_RECORD_VARIANT: JsonObject = variant("record_item", listOf("source", "kind", "quote")) {
+            mapOf(
+                "source" to str("Cite a source instead of the message: the `id` of an entry in `sources` (this call or an earlier one). Use it for what a document says; what the owner says still uses the message."),
+                "kind" to enumOf("task", "event", "fact", "question"),
+                "quote" to str("A passage copied verbatim from the cited source's text (it is checked against that source, not the message)."),
+                "project" to str("c-ref of the project. Omit if unrelated or unsure."),
+                "due" to str("ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."),
+                "title" to str("Optional. For a task or event only: a short plain label (at most 8 words)."),
+                "about" to buildJsonObject {
+                    put("type", "array")
+                    putJsonObject("items") { put("type", "string") }
+                    put("description", "Short names of the people/things this concerns.")
+                },
+                "author" to str("Optional. Who wrote the passage, if you know. Left out, the author is recorded as unknown."),
+            )
+        }
+
+        /**
          * The `ops` array as the owner's Horizon tool accepts it: the same verbs and field schemas the interpretation model is given
          * (so a drift between the two is impossible), minus `hold_for_choice`, which asks the user a question in a reply and so has
          * no meaning where no reply is composed. `mcp/ops.schema.json` is this value, checked by a test.
@@ -340,9 +361,54 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         val OWNER_OPS_SCHEMA: JsonObject = buildJsonObject {
             put("type", "array")
             putJsonObject("items") {
-                putJsonArray("anyOf") { OPERATION_VARIANTS.filterNot { v -> (v["properties"] as JsonObject)["verb"]?.toString()?.contains("hold_for_choice") == true }.forEach { add(it) } }
+                putJsonArray("anyOf") {
+                    OPERATION_VARIANTS.filterNot { v -> (v["properties"] as JsonObject)["verb"]?.toString()?.contains("hold_for_choice") == true }.forEach { add(it) }
+                    add(SOURCED_RECORD_VARIANT)
+                }
             }
             put("maxItems", OperationParser.MAX_OPERATIONS)
+        }
+
+        /**
+         * The `sources` array of the owner's Horizon tool: documents a channel supplies (a Notion page first) so operations can cite them.
+         * Stored as a Source with Chunks, idempotent by content hash; changed text supersedes the earlier text. Recorded as supplied by the
+         * channel and not read by the Director.
+         */
+        val OWNER_SOURCES_SCHEMA: JsonObject = buildJsonObject {
+            put("type", "array")
+            putJsonObject("items") {
+                put("type", "object")
+                putJsonObject("properties") {
+                    put("id", str("Stable external id (the Notion page id). The same id again is the same document."))
+                    put("title", str("The document's title."))
+                    put("kind", enumOf("notion_page"))
+                    put("url", str("Where the document lives."))
+                    put("text", str("The full text. Send this or `chunks`, not both."))
+                    putJsonObject("chunks") {
+                        put("type", "array")
+                        putJsonObject("items") {
+                            put("type", "object")
+                            putJsonObject("properties") {
+                                put("text", str("The chunk's text."))
+                                put("location", str("Where it sits, e.g. \"section: Budget\"."))
+                            }
+                            putJsonArray("required") { add("text") }
+                            put("additionalProperties", false)
+                        }
+                        put("description", "The text already cut into chunks. Send this or `text`, not both.")
+                    }
+                    put("last_edited", str("When the document was last edited, if known (ISO time)."))
+                }
+                putJsonArray("required") { add("id"); add("title"); add("kind") }
+                put("additionalProperties", false)
+            }
+            put("maxItems", 5)
+        }
+
+        /** What `mcp/ops.schema.json` holds: the tool's two structured parameters. A test checks the file is exactly this. */
+        val OWNER_TOOL_SCHEMA: JsonObject = buildJsonObject {
+            put("operations", OWNER_OPS_SCHEMA)
+            put("sources", OWNER_SOURCES_SCHEMA)
         }
 
         internal val APPLY_OPERATIONS_TOOL = ToolDefinition(

@@ -411,6 +411,13 @@ object SchemaBootstrap {
             ensureProperty(schema, "Concept", "looseName",           Type.STRING)
             ensureProperty(schema, "Concept", "parentOrigin",        Type.STRING)
             ensureProperty(schema, "Source",  "issuer",              Type.STRING)
+            // Text a channel supplied (the owner Horizon tool's `sources`): which channel, that the Director did not read it, what the channel said
+            // about the page, and the later Source that replaced it when the same locator was re-sent with other text. See SourceStore.
+            ensureProperty(schema, "Source",  "suppliedBy",          Type.STRING)
+            ensureProperty(schema, "Source",  "readByDirector",      Type.BOOLEAN)
+            ensureProperty(schema, "Source",  "url",                 Type.STRING)
+            ensureProperty(schema, "Source",  "lastEditedAt",        Type.STRING)
+            ensureProperty(schema, "Source",  "supersededBy",        Type.STRING)
             ensureVertex(schema, "EntityAlias") { vt ->
                 vt.createProperty("uid", Type.STRING)
                 vt.createProperty("ownerEmail", Type.STRING)

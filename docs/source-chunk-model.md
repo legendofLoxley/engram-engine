@@ -44,3 +44,16 @@ Debug harness (loopback, debug token, synthetic identities only, never owner-jac
 `GET /debug/items/{uid}/provenance`. It stands in for the Hermes fetch assignment, which is not built yet.
 
 Claims made from a Source's chunks (two local passes, established on agreement, Settled or Re-checking) are described in `docs/claim-extraction.md`.
+
+## Text a channel supplies (the owner Horizon tool)
+
+`POST /owner/horizon` accepts an optional `sources` array (a Notion page first: `id`, `title`, `kind` `notion_page`, `text` or `chunks`, optional
+`url` and `last_edited`). Each entry is stored through `SourceStore.ingest` like any other Source, with the locator set to the page id (dashes and case
+ignored), `suppliedBy` = the channel (the `Utterance.channel` value, `claude`) and `readByDirector = false`: the Director did not read this text and
+nothing here claims it did. Same text again adds nothing; changed text is a new Source and the earlier one is marked `supersededBy` (kept, not deleted).
+
+An operation may cite a source instead of the message: `record_item` with `source` (the id) and a `quote` that must be a verbatim passage of one chunk
+of that source's current text. The item is asserted by a Source of type `channel_sourced` (not the owner's conversation or `claude_session` Source), tied to
+the chunk by `QUOTES` with writer `claude_session` and the source as claimant (author unknown unless the channel names one), and carries no trust score.
+The Horizon presents it as `CHANNEL_SOURCED`: from the document (title, location), not the owner's statement or commitment. A message-grounded
+operation by the owner (a plain `record_item`, a correction) is what adopts it; it is never merged into a sourced item as a duplicate.

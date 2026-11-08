@@ -191,7 +191,8 @@ class DirectorTickTest {
             director,
         )
         val channel = DirectorPromptRenderer.renderForChannel(state, outcome, ZoneOffset.UTC, now)
-        assertEquals(DirectorPromptRenderer.CHANNEL_PREAMBLE + "\n\n" + situation + "\n\n" + horizon + "\n", channel)
+        assertEquals(DirectorPromptRenderer.CHANNEL_PREAMBLE + "\n\n" + DirectorPromptRenderer.situation(state, ZoneOffset.UTC, "alfrd's situation:") + "\n\n" + horizon + "\n", channel)
+        assertTrue("alfrd's situation:" in channel && "Your situation:" !in channel)
         assertTrue("You are alfrd" in director && "You are alfrd" !in channel)
     }
 

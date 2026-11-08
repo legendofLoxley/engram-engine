@@ -27,7 +27,25 @@ class ViewSnapshotBuilder(
     ): ViewSnapshot {
         val live = structure.listContainers(userEmail).filter { it.status == "active" }
         // Domains first, then projects, each oldest first — so refs stay stable as more are added — keeping the newest if capped.
-        val ordered = (live.filter { it.kind == ContainerKind.DOMAIN } + live.filter { it.kind == ContainerKind.PROJECT }).takeLast(maxContainers)
+        // The cap never separates a project from its parent: projects are taken newest first, each with its domain, until the cap is
+        // reached, then any room left goes to the newest remaining domains. The total stays within [maxContainers].
+        val domains = live.filter { it.kind == ContainerKind.DOMAIN }
+        val projects = live.filter { it.kind == ContainerKind.PROJECT }
+        val kept = LinkedHashSet<String>()
+        if (domains.size + projects.size <= maxContainers) {
+            kept += (domains + projects).map { it.uid }
+        } else {
+            val domainUids = domains.map { it.uid }.toSet()
+            for (p in projects.asReversed()) {
+                val parent = p.parentUid?.takeIf { it in domainUids }
+                val needed = (if (p.uid in kept) 0 else 1) + (if (parent != null && parent !in kept) 1 else 0)
+                if (kept.size + needed > maxContainers) continue
+                kept += p.uid
+                parent?.let { kept += it }
+            }
+            for (d in domains.asReversed()) if (kept.size < maxContainers) kept += d.uid
+        }
+        val ordered = domains.filter { it.uid in kept } + projects.filter { it.uid in kept }
         val refByContainerUid = ordered.withIndex().associate { (i, c) -> c.uid to "c${i + 1}" }
         val containers = ordered.map { c ->
             SnapshotContainer(
@@ -131,11 +149,13 @@ class HorizonOperationApplier(
         zone: ZoneId = ZoneId.systemDefault(),
         /** The `Source.type` that asserts the items this call creates: the user's conversation unless a caller (the owner's Claude session) says otherwise. */
         sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
+        /** The `Source.type` that asserts an item taken from a chunk. The Director's own commits keep the default; the owner route passes [CHANNEL_SOURCED_SOURCE_TYPE]. */
+        chunkSourceType: String = DatabaseEngramClient.SOURCE_TYPE,
     ): List<AppliedOperation> {
         val createdContainerUids = mutableMapOf<String, String>()
         return operations.mapIndexed { index, op ->
             try {
-                applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone, sourceType)
+                applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone, sourceType, chunkSourceType)
             } catch (e: Exception) {
                 logger.warn("apply ${op.verb} failed for userEmail=$userEmail: ${e.message}")
                 AppliedOperation(op, applied = false, summary = "Could not apply ${op.verb}")
@@ -151,13 +171,14 @@ class HorizonOperationApplier(
         createdContainerUids: MutableMap<String, String>,
         zone: ZoneId,
         sourceType: String,
+        chunkSourceType: String,
     ): AppliedOperation = when (op) {
         is CreateContainer -> {
             val record = structure.createContainer(userEmail, cycleSeq, op.kind, op.name, op.parentUid, tentative = !op.namedByUser)
             record?.let { createdContainerUids[OperationParser.normalizeName(op.name)] = it.uid }
             AppliedOperation(op, record != null, if (record != null) "Created ${op.kind.name.lowercase()} \"${record.name}\"" else "Could not create ${op.kind.name.lowercase()} \"${op.name}\"")
         }
-        is RecordItem -> if (op.chunkUid != null) applyFromChunk(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
+        is RecordItem -> if (op.chunkUid != null) applyFromChunk(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, chunkSourceType)
             else recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, sourceType)
         is ResolveItem -> {
             val label = labelOf(userEmail, op.targetUid)
@@ -220,7 +241,8 @@ class HorizonOperationApplier(
                 AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
             } else {
                 op.about.forEach { structure.linkAbout(userEmail, cycleSeq, record.uid, it) }
-                val filed = inferred?.let { " (filed under \"${it.name}\", from what you said)" } ?: ""
+                val basis = if (op.chunkUid != null) "from the source's words" else "from what you said"
+                val filed = inferred?.let { " (filed under \"${it.name}\", $basis)" } ?: ""
                 AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed", record.uid, record.text)
             }
         
@@ -233,6 +255,7 @@ class HorizonOperationApplier(
      */
     private suspend fun applyFromChunk(
         userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
+        sourceType: String,
     ): AppliedOperation {
         val store = sources ?: return AppliedOperation(op, false, "Could not record from a source: no source store")
         // The chunk and the quote are checked on every path, a replay included: a replay is answered "already there" only for a quote
@@ -244,7 +267,7 @@ class HorizonOperationApplier(
         // A key already applied is a replay: the item (created, or matched when it was first applied) is found by the key on
         // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
         store.itemForOpKey(userEmail, opKey)?.let { return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)", existingUid = it) }
-        val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone)
+        val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, sourceType)
         val uid = result.resultUid ?: result.existingUid ?: return result
         val linked = store.linkItem(userEmail, uid, chunk.uid, op.writer?.takeIf { it.isNotBlank() } ?: "director", op.claimant, opKey, draftQuote = op.quote, draftDueAt = op.dueAt, runId = op.runId)
         return if (linked == LinkOutcome.REFUSED) result.copy(applied = false, summary = "Recorded but could not be tied to its chunk") else result
@@ -266,6 +289,8 @@ class HorizonOperationApplier(
         if (incoming.isEmpty()) return null
         return structure.listRecentItems(userEmail, DUPLICATE_SCAN).firstOrNull { existing ->
             existing.kind == op.kind && existing.status == "open" &&
+                // The owner saying the same thing as a document's item is their adoption, not a duplicate of it: it is recorded as theirs.
+                (op.chunkUid != null || !existing.channelSourced) &&
                 listOfNotNull(existing.text, existing.sourceQuote).map { SalientTokenPropagator.salientTokens(it) }.any { theirs ->
                     incoming.any { ours -> similarEnough(ours, theirs) }
                 }

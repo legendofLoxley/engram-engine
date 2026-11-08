@@ -41,14 +41,14 @@ object DirectorPromptRenderer {
     fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant): String = buildString {
         append(CHANNEL_PREAMBLE)
         append("\n\n")
-        append(situation(state, zone))
+        append(situation(state, zone, "alfrd's situation:"))
         append("\n\n")
-        append(horizonSection(horizon, zone, now))
+        append(horizonSection(horizon, zone, now, "alfrd's memory of the owner"))
         append('\n')
     }
 
-    fun situation(s: SelfState, zone: ZoneId): String = buildString {
-        appendLine("Your situation:")
+    fun situation(s: SelfState, zone: ZoneId, heading: String = "Your situation:"): String = buildString {
+        appendLine(heading)
         appendLine("- Tick: ${if (s.tickEnabled) "enabled" else "disabled"}, every ${s.intervalSeconds} s; this one at ${stamp.format(Instant.parse(s.tickAt).atZone(zone))} (${s.renderReason}).")
         appendLine("- Model servers: " + s.servers.joinToString(", ") { "${it.name} :${it.port} ${if (it.up) "up" else "DOWN"}" } + ".")
         appendLine("- Memory: GPU ${bytes(s.memory.vramUsedBytes)} of ${bytes(s.memory.vramTotalBytes)} in use; system RAM ${bytes(s.memory.ramUsedBytes)} of ${bytes(s.memory.ramTotalBytes)} in use.")
@@ -73,12 +73,12 @@ object DirectorPromptRenderer {
             "; newest source read ${m.newestSourceReadAt?.let { Instant.ofEpochMilli(it) } ?: "never"}" +
             ", newest extraction run started ${m.newestRunStartedAt?.let { Instant.ofEpochMilli(it) } ?: "never"}"
 
-    private fun horizonSection(outcome: AssembleOutcome, zone: ZoneId, now: Instant): String = when (outcome) {
+    private fun horizonSection(outcome: AssembleOutcome, zone: ZoneId, now: Instant, memoryOf: String = "your durable memory of this user"): String = when (outcome) {
         is AssembleOutcome.Assembled -> {
             val horizon = outcome.horizon
             val items = HorizonItemsRenderer.render(horizon, zone)
             val frame = HorizonItemsRenderer.composeOrientation(horizon, zone)
-            "Contextual awareness — background orientation from your durable memory of this user:\n" +
+            "Contextual awareness — background orientation from $memoryOf:\n" +
                 (frame?.let { "$it\n\n" } ?: "") +
                 if (items.isEmpty()) "(Nothing is in view: no focus, no open items, no recent reports. This says nothing about what is in memory.)" else grouped(items)
         }

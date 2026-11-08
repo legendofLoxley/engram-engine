@@ -81,6 +81,8 @@ data class ItemRecord(
     val sourceQuote: String? = null,
     /** For a question: who is waiting on the answer (`alfrd` when Alfrd asked it). Null for anything else. */
     val askedBy: String? = null,
+    /** True when a channel filed this from a document it supplied ([CHANNEL_SOURCED_SOURCE_TYPE]): not something the owner said. */
+    val channelSourced: Boolean = false,
 )
 
 data class FocusRecord(
@@ -381,7 +383,8 @@ class ArcadeHorizonStructureStore(
             source.newEdge("ASSERTS", vertex, false).apply {
                 set("context", sourceType)
                 set("timestamp", now)
-                set("scores", """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
+                // A document's words filed by a channel carry no trust from the owner: only their own adoption would.
+                set("scores", if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) "[]" else """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
                 // Kept in step with the vertex's own `status`: selection reads the vertex, but propagation
                 // (which items a new report may be linked to) and how an item's status is worded in the
@@ -668,9 +671,10 @@ class ArcadeHorizonStructureStore(
             if (limit <= 0) return@read emptyList()
             val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@read emptyList()
             // Only the conversational Sources: Actor and environment evidence are not things the user said. The owner's Claude session
-            // writes as the owner, so what it recorded is as visible here as what they typed.
+            // writes as the owner, so what it recorded is as visible here as what they typed. What a channel filed from a document is
+            // listed too (so it can be named by a ref and adopted or corrected), but it stays marked [ItemRecord.channelSourced].
             val sourceUids = userVertex.getVertices(Vertex.DIRECTION.OUT, "TRUSTS")
-                .filter { it.get("type") == DatabaseEngramClient.SOURCE_TYPE || it.get("type") == CLAUDE_SESSION_SOURCE_TYPE }
+                .filter { it.get("type") == DatabaseEngramClient.SOURCE_TYPE || it.get("type") == CLAUDE_SESSION_SOURCE_TYPE || it.get("type") == CHANNEL_SOURCED_SOURCE_TYPE }
                 .mapNotNull { it.get("uid") as? String }
             if (sourceUids.isEmpty()) return@read emptyList()
             val sql = if (openOnly) {
@@ -869,6 +873,9 @@ class ArcadeHorizonStructureStore(
             attention = attentionOf(),
             sourceQuote = get("sourceQuote") as? String,
             askedBy = if (kind == ItemKind.QUESTION) get("askedBy") as? String else null,
+            // SQL, not getVertices(IN, "ASSERTS"): ASSERTS edges are unidirectional, so incoming traversal is silently empty (see HorizonOwnership).
+            channelSourced = db.query("sql", "SELECT count(*) AS n FROM ASSERTS WHERE @in.uid = :u AND @out.type = :t", mapOf("u" to (get("uid") as String), "t" to CHANNEL_SOURCED_SOURCE_TYPE))
+                .use { rs -> rs.hasNext() && (rs.next().getProperty<Number>("n")?.toLong() ?: 0L) > 0 },
         )
     }
 

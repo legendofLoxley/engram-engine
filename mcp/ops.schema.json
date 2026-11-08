@@ -1,325 +1,447 @@
 {
-    "type": "array",
-    "items": {
-        "anyOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "record_item"
-                        ]
-                    },
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "task",
-                            "event",
-                            "fact",
-                            "question"
-                        ]
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "c-ref of the project, or exact name of one created in this same response. Omit if unrelated or unsure."
-                    },
-                    "ask_which_project": {
-                        "type": "boolean",
-                        "description": "true when it clearly belongs to one of the projects but you cannot tell which."
-                    },
-                    "due": {
-                        "type": "string",
-                        "description": "ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions."
-                    },
-                    "about": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
+    "operations": {
+        "type": "array",
+        "items": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "record_item"
+                            ]
                         },
-                        "description": "Short names of the people/things this concerns."
-                    }
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "task",
+                                "event",
+                                "fact",
+                                "question"
+                            ]
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "c-ref of the project, or exact name of one created in this same response. Omit if unrelated or unsure."
+                        },
+                        "ask_which_project": {
+                            "type": "boolean",
+                            "description": "true when it clearly belongs to one of the projects but you cannot tell which."
+                        },
+                        "due": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions."
+                        },
+                        "about": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Short names of the people/things this concerns."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "kind",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "kind",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "resolve_item"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "resolve_item"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of a task, event, question or project."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "item": {
-                        "type": "string",
-                        "description": "Ref of a task, event, question or project."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "item",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "reopen_item"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "reopen_item"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of the item."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "item": {
-                        "type": "string",
-                        "description": "Ref of the item."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "item",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "correct_item"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "correct_item"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of the item being corrected."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        },
+                        "due": {
+                            "type": "string",
+                            "description": "New ISO date, if the correction changes the date."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement."
+                        }
                     },
-                    "item": {
-                        "type": "string",
-                        "description": "Ref of the item being corrected."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    },
-                    "due": {
-                        "type": "string",
-                        "description": "New ISO date, if the correction changes the date."
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement."
-                    }
+                    "required": [
+                        "verb",
+                        "item",
+                        "quote",
+                        "title"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "item",
-                    "quote",
-                    "title"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "file_item"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "file_item"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of the item or project to move."
+                        },
+                        "into": {
+                            "type": "string",
+                            "description": "c-ref of the destination project or domain."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "item": {
-                        "type": "string",
-                        "description": "Ref of the item or project to move."
-                    },
-                    "into": {
-                        "type": "string",
-                        "description": "c-ref of the destination project or domain."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "item",
+                        "into",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "item",
-                    "into",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "create_container"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "create_container"
+                            ]
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "project",
+                                "domain"
+                            ]
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Short name."
+                        },
+                        "named_by_user": {
+                            "type": "boolean"
+                        },
+                        "parent": {
+                            "type": "string",
+                            "description": "c-ref of the domain a new project belongs under."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "project",
-                            "domain"
-                        ]
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Short name."
-                    },
-                    "named_by_user": {
-                        "type": "boolean"
-                    },
-                    "parent": {
-                        "type": "string",
-                        "description": "c-ref of the domain a new project belongs under."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "kind",
+                        "name",
+                        "named_by_user",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "kind",
-                    "name",
-                    "named_by_user",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "set_focus"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "set_focus"
+                            ]
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Ref of the project, domain or item."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "target": {
-                        "type": "string",
-                        "description": "Ref of the project, domain or item."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "target",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "target",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "release_focus"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "release_focus"
+                            ]
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "set_attention"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "set_attention"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of the item."
+                        },
+                        "attention": {
+                            "type": "string",
+                            "enum": [
+                                "pinned",
+                                "suppressed",
+                                "normal"
+                            ]
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "item": {
-                        "type": "string",
-                        "description": "Ref of the item."
-                    },
-                    "attention": {
-                        "type": "string",
-                        "enum": [
-                            "pinned",
-                            "suppressed",
-                            "normal"
-                        ]
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "item",
+                        "attention",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "item",
-                    "attention",
-                    "quote"
-                ],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "verb": {
-                        "type": "string",
-                        "enum": [
-                            "link_items"
-                        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "link_items"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of one item."
+                        },
+                        "other_item": {
+                            "type": "string",
+                            "description": "Ref of the other item."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
                     },
-                    "item": {
-                        "type": "string",
-                        "description": "Ref of one item."
-                    },
-                    "other_item": {
-                        "type": "string",
-                        "description": "Ref of the other item."
-                    },
-                    "quote": {
-                        "type": "string",
-                        "description": "The user's own words, verbatim from their message."
-                    }
+                    "required": [
+                        "verb",
+                        "item",
+                        "other_item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
                 },
-                "required": [
-                    "verb",
-                    "item",
-                    "other_item",
-                    "quote"
-                ],
-                "additionalProperties": false
-            }
-        ]
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "record_item"
+                            ]
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Cite a source instead of the message: the `id` of an entry in `sources` (this call or an earlier one). Use it for what a document says; what the owner says still uses the message."
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "task",
+                                "event",
+                                "fact",
+                                "question"
+                            ]
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "A passage copied verbatim from the cited source's text (it is checked against that source, not the message)."
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "c-ref of the project. Omit if unrelated or unsure."
+                        },
+                        "due": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Optional. For a task or event only: a short plain label (at most 8 words)."
+                        },
+                        "about": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Short names of the people/things this concerns."
+                        },
+                        "author": {
+                            "type": "string",
+                            "description": "Optional. Who wrote the passage, if you know. Left out, the author is recorded as unknown."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "source",
+                        "kind",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                }
+            ]
+        },
+        "maxItems": 8
     },
-    "maxItems": 8
+    "sources": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Stable external id (the Notion page id). The same id again is the same document."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "The document's title."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "notion_page"
+                    ]
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Where the document lives."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The full text. Send this or `chunks`, not both."
+                },
+                "chunks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "The chunk's text."
+                            },
+                            "location": {
+                                "type": "string",
+                                "description": "Where it sits, e.g. \"section: Budget\"."
+                            }
+                        },
+                        "required": [
+                            "text"
+                        ],
+                        "additionalProperties": false
+                    },
+                    "description": "The text already cut into chunks. Send this or `text`, not both."
+                },
+                "last_edited": {
+                    "type": "string",
+                    "description": "When the document was last edited, if known (ISO time)."
+                }
+            },
+            "required": [
+                "id",
+                "title",
+                "kind"
+            ],
+            "additionalProperties": false
+        },
+        "maxItems": 5
+    }
 }

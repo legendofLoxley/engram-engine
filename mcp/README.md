@@ -4,7 +4,7 @@ One tool, `horizon`, over stdio. It calls the engine's `POST /owner/horizon` (lo
 the refreshed Horizon as text. Design: "Channels, the Horizon tool and the alfrd connector" (Notion, Nov 7).
 
 - `alfrd_mcp.py` — the server (official MCP SDK, FastMCP).
-- `ops.schema.json` — the operation verbs, generated from `Interpreter.OWNER_OPS_SCHEMA`; `OwnerHorizonTest` fails if it drifts
+- `ops.schema.json` — the `operations` verbs (including the cite-a-source `record_item`) and the `sources` field, generated from `Interpreter.OWNER_TOOL_SCHEMA`; `OwnerHorizonTest` fails if it drifts
   (regenerate with `UPDATE_OPS_SCHEMA=1 ./gradlew test --tests '*OwnerHorizonTest*'`).
 - `alfrd-mcp` — launcher; install as `~/alfrd/bin/alfrd-mcp`. `ALFRD_REPO` points at the checkout holding `mcp/.venv`.
 

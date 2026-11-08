@@ -30,6 +30,14 @@ const val ENVIRONMENT_SOURCE_TYPE = "environment_signal"
 const val CLAUDE_SESSION_SOURCE_TYPE = "claude_session"
 
 /**
+ * `Source.type` of the asserting Source for an item a channel filed from a document it supplied (`record_item` citing a source on
+ * `POST /owner/horizon`). The owner trusts the Source like the others (so the item is reachable), but it is not the owner speaking and
+ * not an Actor: [ArcadeHorizonAssembler] presents such an item as [ProvenanceKind.CHANNEL_SOURCED], never as the owner's statement.
+ * Only a message-grounded operation by the owner (a correction, say) makes a sourced item theirs.
+ */
+const val CHANNEL_SOURCED_SOURCE_TYPE = "channel_sourced"
+
+/**
  * `Source.type` values for the three Actor-attributed provenance kinds [ActorEventIngestionService]
  * distinguishes — never inferred from a caller-supplied free-text field (see that service's
  * `ActorEventKind`). Kept distinct from each other and from [ENVIRONMENT_SOURCE_TYPE] so
@@ -117,7 +125,7 @@ object HorizonLimits {
     private const val REF_FIELD_CEILING_BYTES = 200
     // Per item: field names and punctuation, plus the score breakdown (MAX_SCORE_COMPONENTS entries with a
     // short kind and a short detail) and the container reference (a name of up to MAX_CONTAINER_NAME_LENGTH).
-    private const val PER_ITEM_STRUCTURAL_CEILING_BYTES = 1_500
+    private const val PER_ITEM_STRUCTURAL_CEILING_BYTES = 2_500 // + a document source note: title and location, each bounded
     // Top level: field names, the focus reference, and a bounded list of container views (each with a name
     // of up to MAX_CONTAINER_NAME_LENGTH units at worst-case width, a uid and its counts).
     private const val TOP_LEVEL_STRUCTURAL_CEILING_BYTES = 9_000
@@ -158,7 +166,13 @@ enum class AttentionDirective { PINNED, SUPPRESSED }
 enum class ProvenanceKind {
     EXPLICIT_USER_STATEMENT, ENVIRONMENT_SIGNAL, MODEL_INFERENCE,
     ACTOR_OBSERVATION, ACTOR_INTERPRETATION, ACTOR_TOOL_RESULT,
+    /** Filed by a channel from a document it supplied: the document's words, not the owner's and not read by the Director. */
+    CHANNEL_SOURCED,
 }
+
+/** Where a [ProvenanceKind.CHANNEL_SOURCED] item came from: the document's title and the location of the chunk it quotes. [superseded] when the document has since been re-sent with other text. */
+@Serializable
+data class DocumentSourceNote(val title: String, val location: String, val superseded: Boolean = false)
 
 /**
  * Inlined text capped at [HorizonLimits.MAX_ITEM_TEXT_LENGTH]. The full text is always recoverable
@@ -315,6 +329,8 @@ data class HorizonItem(
     /** For a question: who asked it (`alfrd` when Alfrd is the one waiting on the answer). */
     val askedBy: String? = null,
     val container: HorizonContainerRef? = null,
+    /** Non-null exactly when [provenance] is [ProvenanceKind.CHANNEL_SOURCED] and the quoted chunk could be found. */
+    val documentSource: DocumentSourceNote? = null,
 )
 
 /** A candidate excluded from `items` by the budget. Reference-only — no inlined text, nothing to truncate. */
