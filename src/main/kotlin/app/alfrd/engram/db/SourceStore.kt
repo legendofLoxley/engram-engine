@@ -251,6 +251,19 @@ class SourceStore(private val db: Database) {
         changed
     }
 
+    /** [sourceUid] and every other stored version of the same document (same owner, type and locator). Just [sourceUid] for one that is not found. */
+    fun versionsOf(userEmail: String, sourceUid: String): Set<String> {
+        val s = sourceByUid(userEmail, sourceUid) ?: return setOf(sourceUid)
+        return db.query(
+            "sql", "SELECT uid FROM Source WHERE ownerEmail = :o AND type = :t AND locator = :l", mapOf("o" to userEmail, "t" to s.type, "l" to s.locator),
+        ).use { rs -> val out = HashSet<String>(); while (rs.hasNext()) rs.next().getProperty<String>("uid")?.let(out::add); out + sourceUid }
+    }
+
+    /** The Sources whose chunks [itemUid] quotes: where the item was found. Empty for an item that came from no source. */
+    fun sourceUidsOfItem(userEmail: String, itemUid: String): Set<String> =
+        db.query("sql", "SELECT @in.sourceUid AS s FROM QUOTES WHERE @out.uid = :u AND ownerEmail = :o", mapOf("u" to itemUid, "o" to userEmail))
+            .use { rs -> val out = HashSet<String>(); while (rs.hasNext()) (rs.next().toMap()["s"] as? String)?.let(out::add); out }
+
     /** Records who issued a Source. False when the owner has no such Source. A blank issuer clears it. */
     fun setIssuer(userEmail: String, uid: String, issuer: String?): Boolean {
         var done = false

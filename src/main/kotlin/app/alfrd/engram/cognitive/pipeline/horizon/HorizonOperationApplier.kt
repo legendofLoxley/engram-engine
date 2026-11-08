@@ -15,7 +15,6 @@ import java.time.ZoneId
  */
 class ViewSnapshotBuilder(
     private val structure: HorizonStructureStore,
-    private val maxContainers: Int = 15,
     private val maxItems: Int = 14,
 ) {
 
@@ -26,26 +25,9 @@ class ViewSnapshotBuilder(
         pendingEmotionQuote: String? = null,
     ): ViewSnapshot {
         val live = structure.listContainers(userEmail).filter { it.status == "active" }
-        // Domains first, then projects, each oldest first — so refs stay stable as more are added — keeping the newest if capped.
-        // The cap never separates a project from its parent: projects are taken newest first, each with its domain, until the cap is
-        // reached, then any room left goes to the newest remaining domains. The total stays within [maxContainers].
-        val domains = live.filter { it.kind == ContainerKind.DOMAIN }
-        val projects = live.filter { it.kind == ContainerKind.PROJECT }
-        val kept = LinkedHashSet<String>()
-        if (domains.size + projects.size <= maxContainers) {
-            kept += (domains + projects).map { it.uid }
-        } else {
-            val domainUids = domains.map { it.uid }.toSet()
-            for (p in projects.asReversed()) {
-                val parent = p.parentUid?.takeIf { it in domainUids }
-                val needed = (if (p.uid in kept) 0 else 1) + (if (parent != null && parent !in kept) 1 else 0)
-                if (kept.size + needed > maxContainers) continue
-                kept += p.uid
-                parent?.let { kept += it }
-            }
-            for (d in domains.asReversed()) if (kept.size < maxContainers) kept += d.uid
-        }
-        val ordered = domains.filter { it.uid in kept } + projects.filter { it.uid in kept }
+        // Every domain and project gets a ref, however many there are: the cap is on items only. Domains first, then projects, each oldest
+        // first, so refs stay stable as more are added. Each is one short line in the render.
+        val ordered = live.filter { it.kind == ContainerKind.DOMAIN } + live.filter { it.kind == ContainerKind.PROJECT }
         val refByContainerUid = ordered.withIndex().associate { (i, c) -> c.uid to "c${i + 1}" }
         val containers = ordered.map { c ->
             SnapshotContainer(
@@ -60,16 +42,33 @@ class ViewSnapshotBuilder(
 
         val focus = structure.getFocus(userEmail).filter { it.mode == FocusMode.PINNED }
         val candidates = LinkedHashMap<String, ItemRecord>()
-        fun add(item: ItemRecord?) { if (item != null && item.uid !in candidates && candidates.size < maxItems) candidates[item.uid] = item }
+        // A suppressed item or a resolved one never takes a slot an open item needs: both are left out of the focus and open pools below.
+        fun live(item: ItemRecord) = item.attention != AttentionDirective.SUPPRESSED && item.status != "resolved"
+        fun add(item: ItemRecord?, limit: Int) { if (item != null && item.uid !in candidates && candidates.size < limit) candidates[item.uid] = item }
 
         // Everything the pipeline needs the model to be able to name goes first, so the cap never squeezes it out.
-        pendingFilingItemUid?.let { add(structure.getItem(userEmail, it)) }
-        focus.filter { it.targetKind == FocusTargetKind.ITEM }.forEach { add(structure.getItem(userEmail, it.targetUid)) }
+        val hardCap = FOCUS_OPEN_CAP + maxItems + 1 // the hidden section is added after this and has its own cap
+        pendingFilingItemUid?.let { add(structure.getItem(userEmail, it), hardCap) }
+        focus.filter { it.targetKind == FocusTargetKind.ITEM }.forEach { f -> structure.getItem(userEmail, f.targetUid)?.takeIf(::live)?.let { add(it, hardCap) } }
+        // What is in focus is listed in full (bounded by FOCUS_OPEN_CAP, well above maxItems): an item in view that has no ref cannot be
+        // suppressed, resolved or corrected. Only open items; the newest if there are more than the cap.
         focus.filter { it.targetKind == FocusTargetKind.PROJECT }.forEach { f ->
-            structure.itemsIn(userEmail, f.targetUid).takeLast(FOCUS_ITEM_CAP).forEach { add(it) }
+            structure.itemsIn(userEmail, f.targetUid).filter(::live).takeLast(FOCUS_OPEN_CAP).forEach { add(it, hardCap) }
         }
-        structure.listRecentItems(userEmail, OPEN_ITEM_CAP, openOnly = true).forEach { add(it) }
-        structure.listRecentItems(userEmail, RECENT_ITEM_CAP).forEach { add(it) }
+        // Up to maxItems as before; a focus larger than that keeps its items and still leaves a few places for the rest.
+        val room = if (candidates.size <= maxItems) maxItems else candidates.size + RECENT_ITEM_CAP
+        structure.listRecentItems(userEmail, OPEN_ITEM_CAP * POOL_OVERFETCH, openOnly = true).filter(::live).take(OPEN_ITEM_CAP).forEach { add(it, room) }
+        // Recent items fill what is left, so a just-resolved item can still be named to reopen it; a suppressed one never is.
+        structure.listRecentItems(userEmail, RECENT_ITEM_CAP * POOL_OVERFETCH).filter { it.attention != AttentionDirective.SUPPRESSED }.take(RECENT_ITEM_CAP).forEach { add(it, room) }
+
+        // The way back from suppression: with a project in focus, its suppressed open items are listed apart under "Hidden (suppressed)", with
+        // refs, so set_attention normal can restore one. Outside focus they stay invisible and take no slot. They come last, so other refs do not move.
+        val hidden = focus.filter { it.targetKind == FocusTargetKind.PROJECT }
+            .flatMap { f -> structure.itemsIn(userEmail, f.targetUid) }
+            .filter { it.attention == AttentionDirective.SUPPRESSED && it.status != "resolved" && it.uid !in candidates }
+            .distinctBy { it.uid }.takeLast(HIDDEN_CAP)
+        val hiddenUids = hidden.map { it.uid }.toSet()
+        hidden.forEach { candidates[it.uid] = it }
 
         val items = candidates.values.withIndex().map { (i, it) ->
             SnapshotItem(
@@ -82,6 +81,7 @@ class ViewSnapshotBuilder(
                 projectRef = it.projectUid?.let { p -> refByContainerUid[p] },
                 about = it.about,
                 attention = it.attention,
+                hidden = it.uid in hiddenUids,
             )
         }
         val refByItemUid = items.associate { it.uid to it.ref }
@@ -102,7 +102,12 @@ class ViewSnapshotBuilder(
     }
 
     private companion object {
-        const val FOCUS_ITEM_CAP = 8
+        /** The most open items of a focused project that are listed with refs. */
+        const val FOCUS_OPEN_CAP = 40
+        /** The most suppressed items of a focused project listed (with refs) in the "Hidden" section. */
+        const val HIDDEN_CAP = 20
+        /** Pools are read this many times over so that suppressed items filtered out do not leave the pool short. */
+        const val POOL_OVERFETCH = 4
         const val OPEN_ITEM_CAP = 8
         const val RECENT_ITEM_CAP = 6
     }
@@ -227,7 +232,7 @@ class HorizonOperationApplier(
     private suspend fun recordPlain(
         userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
         sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
-    ): AppliedOperation = duplicateOf(userEmail, opKey, op)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone) } ?: run {
+    ): AppliedOperation = duplicateOf(userEmail, opKey, op, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE) } ?: run {
             val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
             // The model rarely files an item even when the message plainly names its project, and an unfiled
             // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
@@ -266,7 +271,14 @@ class HorizonOperationApplier(
         }
         // A key already applied is a replay: the item (created, or matched when it was first applied) is found by the key on
         // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
-        store.itemForOpKey(userEmail, opKey)?.let { return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)", existingUid = it) }
+        store.itemForOpKey(userEmail, opKey)?.let { uid ->
+            // The same item again is idempotent, but from a channel a different date is said, not silently dropped or applied.
+            val have = structure.getItem(userEmail, uid)?.dueAt
+            val conflict = if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE && op.dueAt != null && have != null && op.dueAt != have) {
+                "; the source gives a different date (${describeDue(op.dueAt, zone)}, the item has ${describeDue(have, zone)}) — the date was not changed"
+            } else ""
+            return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)$conflict", existingUid = uid)
+        }
         val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, sourceType)
         val uid = result.resultUid ?: result.existingUid ?: return result
         val linked = store.linkItem(userEmail, uid, chunk.uid, op.writer?.takeIf { it.isNotBlank() } ?: "director", op.claimant, opKey, draftQuote = op.quote, draftDueAt = op.dueAt, runId = op.runId)
@@ -282,15 +294,23 @@ class HorizonOperationApplier(
      * longer wording, comparing the label and the user's own words on each side. A retry of the same request finds
      * the item it made the first time (by its key) and is never mistaken for a duplicate of it.
      */
-    private suspend fun duplicateOf(userEmail: String, opKey: String, op: RecordItem): ItemRecord? {
+    private suspend fun duplicateOf(userEmail: String, opKey: String, op: RecordItem, scopedToSource: Boolean = false): ItemRecord? {
         if (op.kind != ItemKind.TASK && op.kind != ItemKind.EVENT) return null
         if (structure.itemByOpKey(userEmail, opKey) != null) return null
         val incoming = listOfNotNull(op.title, op.quote).map { SalientTokenPropagator.salientTokens(it) }.filter { it.size >= MIN_DUPLICATE_WORDS }
         if (incoming.isEmpty()) return null
+        // An operation a channel files from a source (the owner's Horizon tool) may only match an item asserted from that same source (or another stored version of the same
+        // document): never an item from another source, never something the owner said. Without a source store it matches nothing.
+        val sameDocument: Set<String>? = op.chunkUid?.takeIf { scopedToSource }?.let { chunkUid ->
+            val store = sources ?: return null
+            val chunk = store.chunk(userEmail, chunkUid) ?: return null
+            store.versionsOf(userEmail, chunk.sourceUid)
+        }
         return structure.listRecentItems(userEmail, DUPLICATE_SCAN).firstOrNull { existing ->
             existing.kind == op.kind && existing.status == "open" &&
                 // The owner saying the same thing as a document's item is their adoption, not a duplicate of it: it is recorded as theirs.
                 (op.chunkUid != null || !existing.channelSourced) &&
+                (sameDocument == null || sources!!.sourceUidsOfItem(userEmail, existing.uid).any { it in sameDocument }) &&
                 listOfNotNull(existing.text, existing.sourceQuote).map { SalientTokenPropagator.salientTokens(it) }.any { theirs ->
                     incoming.any { ours -> similarEnough(ours, theirs) }
                 }
@@ -303,10 +323,16 @@ class HorizonOperationApplier(
     }
 
     /** The new record was the same as [existing]: add nothing, but carry over a date the user just gave, and say so plainly. */
-    private suspend fun applyDuplicate(userEmail: String, cycleSeq: Long, op: RecordItem, existing: ItemRecord, zone: ZoneId): AppliedOperation {
+    private suspend fun applyDuplicate(userEmail: String, cycleSeq: Long, op: RecordItem, existing: ItemRecord, zone: ZoneId, scopedToSource: Boolean = false): AppliedOperation {
         val newDue = op.dueAt?.takeIf { it != existing.dueAt }
-        val dueSet = newDue != null && structure.setDue(userEmail, cycleSeq, existing.uid, newDue)
-        val note = if (dueSet) ", and its date is now ${describeDue(newDue!!, zone)}" else ""
+        // A repeat from a source never moves a date: the item's own date stands and the difference is reported. (What the owner just said wins, as before.)
+        val conflict = scopedToSource && newDue != null && existing.dueAt != null
+        val dueSet = newDue != null && !conflict && structure.setDue(userEmail, cycleSeq, existing.uid, newDue)
+        val note = when {
+            conflict -> "; the source gives a different date (${describeDue(newDue!!, zone)}, the item has ${describeDue(existing.dueAt!!, zone)}) — the date was not changed"
+            dueSet -> ", and its date is now ${describeDue(newDue!!, zone)}"
+            else -> ""
+        }
         return AppliedOperation(op, true, "Already on the list: \"${existing.text}\"$note (nothing new was added)", existingUid = existing.uid)
     }
 
