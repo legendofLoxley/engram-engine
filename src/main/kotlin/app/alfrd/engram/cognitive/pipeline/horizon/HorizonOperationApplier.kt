@@ -16,6 +16,7 @@ import java.time.ZoneId
 class ViewSnapshotBuilder(
     private val structure: HorizonStructureStore,
     private val maxItems: Int = 14,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
     suspend fun build(
@@ -43,7 +44,17 @@ class ViewSnapshotBuilder(
         val focus = structure.getFocus(userEmail).filter { it.mode == FocusMode.PINNED }
         val candidates = LinkedHashMap<String, ItemRecord>()
         // A suppressed item or a resolved one never takes a slot an open item needs: both are left out of the focus and open pools below.
-        fun live(item: ItemRecord) = item.attention != AttentionDirective.SUPPRESSED && item.status != "resolved"
+        // Which projects count as "in focus" for a waiting item: a focused project, or any project of a focused domain.
+        val focusedProjects = HashSet<String>()
+        for (f in focus) when (f.targetKind) {
+            FocusTargetKind.PROJECT -> focusedProjects += f.targetUid
+            FocusTargetKind.DOMAIN -> structure.projectsIn(userEmail, f.targetUid).forEach { focusedProjects += it.uid }
+            FocusTargetKind.ITEM -> Unit
+        }
+        val now = clock()
+        // A waiting item surfaces only inside a focused project or once its check-in date has arrived (see [StateRules]).
+        fun surfaces(item: ItemRecord) = StateRules.visible(item.workState, item.nudgeAt, item.projectUid != null && item.projectUid in focusedProjects, now)
+        fun live(item: ItemRecord) = item.attention != AttentionDirective.SUPPRESSED && item.workState?.closed != true
         fun add(item: ItemRecord?, limit: Int) { if (item != null && item.uid !in candidates && candidates.size < limit) candidates[item.uid] = item }
 
         // Everything the pipeline needs the model to be able to name goes first, so the cap never squeezes it out.
@@ -57,15 +68,15 @@ class ViewSnapshotBuilder(
         }
         // Up to maxItems as before; a focus larger than that keeps its items and still leaves a few places for the rest.
         val room = if (candidates.size <= maxItems) maxItems else candidates.size + RECENT_ITEM_CAP
-        structure.listRecentItems(userEmail, OPEN_ITEM_CAP * POOL_OVERFETCH, openOnly = true).filter(::live).take(OPEN_ITEM_CAP).forEach { add(it, room) }
-        // Recent items fill what is left, so a just-resolved item can still be named to reopen it; a suppressed one never is.
-        structure.listRecentItems(userEmail, RECENT_ITEM_CAP * POOL_OVERFETCH).filter { it.attention != AttentionDirective.SUPPRESSED }.take(RECENT_ITEM_CAP).forEach { add(it, room) }
+        structure.listRecentItems(userEmail, OPEN_ITEM_CAP * POOL_OVERFETCH, openOnly = true).filter { live(it) && surfaces(it) }.take(OPEN_ITEM_CAP).forEach { add(it, room) }
+        // Recent items fill what is left, so a just-resolved item can still be named to reopen it, and a waiting one to move it on; a suppressed one never is.
+        structure.listRecentItems(userEmail, RECENT_ITEM_CAP * POOL_OVERFETCH).filter { it.attention != AttentionDirective.SUPPRESSED && (it.workState?.closed == true || it.workState == WorkState.WAITING || surfaces(it)) }.take(RECENT_ITEM_CAP).forEach { add(it, room) }
 
         // The way back from suppression: with a project in focus, its suppressed open items are listed apart under "Hidden (suppressed)", with
         // refs, so set_attention normal can restore one. Outside focus they stay invisible and take no slot. They come last, so other refs do not move.
         val hidden = focus.filter { it.targetKind == FocusTargetKind.PROJECT }
             .flatMap { f -> structure.itemsIn(userEmail, f.targetUid) }
-            .filter { it.attention == AttentionDirective.SUPPRESSED && it.status != "resolved" && it.uid !in candidates }
+            .filter { it.attention == AttentionDirective.SUPPRESSED && it.workState?.closed != true && it.uid !in candidates }
             .distinctBy { it.uid }.takeLast(HIDDEN_CAP)
         val hiddenUids = hidden.map { it.uid }.toSet()
         hidden.forEach { candidates[it.uid] = it }
@@ -82,6 +93,12 @@ class ViewSnapshotBuilder(
                 about = it.about,
                 attention = it.attention,
                 hidden = it.uid in hiddenUids,
+                state = it.workState,
+                dueKind = it.effectiveDueKind,
+                dueHasTime = it.dueHasTime,
+                nudgeAt = it.nudgeAt,
+                waitingOn = it.waitingOn,
+                stateFromSource = it.stateFromSource,
             )
         }
         val refByItemUid = items.associate { it.uid to it.ref }
@@ -195,7 +212,22 @@ class HorizonOperationApplier(
             val done = structure.resolve(userEmail, cycleSeq, op.targetUid, resolved = false)
             AppliedOperation(op, done, if (done) "Reopened: $label" else "Could not reopen $label")
         }
-        is CorrectItem -> applyCorrection(userEmail, cycleSeq, opKey, op, sourceType)
+        is SetState -> {
+            val label = labelOf(userEmail, op.targetUid)
+            val nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) }
+            val done = structure.setState(userEmail, cycleSeq, op.targetUid, op.state, nudge, op.waitingOn)
+            val note = if (op.state == WorkState.WAITING && op.waitingOn == null) " (nothing says who or what it waits on; say so to add it)" else ""
+            val nudgeNote = nudge?.let { ", check in ${describeDue(it.at, zone)}" } ?: ""
+            val phrase = when (op.state) {
+                WorkState.DONE -> "Marked done"
+                WorkState.DROPPED -> "Dropped"
+                WorkState.OPEN -> "Reopened"
+                WorkState.ACTIVE -> "Marked in progress"
+                WorkState.WAITING -> "Marked waiting" + (op.waitingOn?.let { " on $it" } ?: "")
+            }
+            AppliedOperation(op, done, if (done) "$phrase: $label$nudgeNote$note" else "Could not change the state of $label")
+        }
+        is CorrectItem -> applyCorrection(userEmail, cycleSeq, opKey, op, sourceType, zone)
         is FileItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val into = labelOf(userEmail, op.intoUid)
@@ -241,14 +273,25 @@ class HorizonOperationApplier(
                 ProjectInference.infer("${op.quote} ${op.title ?: ""}", structure.listContainers(userEmail, ContainerKind.PROJECT))
             } else null
             val projectUid = stated ?: inferred?.uid
-            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType)
+            val extras = ItemExtras(
+                state = op.state, dueKind = op.dueKind, dueHasTime = op.dueHasTime,
+                starts = op.startsAt?.let { TimeValue(it, op.startsHasTime) }, nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) },
+                happened = op.happenedAt?.let { TimeValue(it, op.happenedHasTime) }, waitingOn = op.waitingOn,
+                fromSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE,
+            )
+            val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType, extras = extras)
             if (record == null) {
                 AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
             } else {
                 op.about.forEach { structure.linkAbout(userEmail, cycleSeq, record.uid, it) }
                 val basis = if (op.chunkUid != null) "from the source's words" else "from what you said"
                 val filed = inferred?.let { " (filed under \"${it.name}\", $basis)" } ?: ""
-                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed", record.uid, record.text)
+                val stateNote = when {
+                    op.state == WorkState.WAITING && op.waitingOn == null -> " (waiting, but nothing says on whom or what; say so to add it)"
+                    op.state != null && op.state != WorkState.OPEN -> " (${op.state.wire()}${op.waitingOn?.let { " on $it" } ?: ""})"
+                    else -> ""
+                }
+                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed$stateNote", record.uid, record.text)
             }
         
     }
@@ -327,7 +370,7 @@ class HorizonOperationApplier(
         val newDue = op.dueAt?.takeIf { it != existing.dueAt }
         // A repeat from a source never moves a date: the item's own date stands and the difference is reported. (What the owner just said wins, as before.)
         val conflict = scopedToSource && newDue != null && existing.dueAt != null
-        val dueSet = newDue != null && !conflict && structure.setDue(userEmail, cycleSeq, existing.uid, newDue)
+        val dueSet = newDue != null && !conflict && structure.setDue(userEmail, cycleSeq, existing.uid, newDue, op.dueHasTime)
         val note = when {
             conflict -> "; the source gives a different date (${describeDue(newDue!!, zone)}, the item has ${describeDue(existing.dueAt!!, zone)}) — the date was not changed"
             dueSet -> ", and its date is now ${describeDue(newDue!!, zone)}"
@@ -347,10 +390,21 @@ class HorizonOperationApplier(
      * filed where the old one was and tied to the same entities (with the new date if it changed),
      * linked as superseding it; the old one is closed so it stops surfacing. Nothing is lost.
      */
-    private suspend fun applyCorrection(userEmail: String, cycleSeq: Long, opKey: String, op: CorrectItem, sourceType: String = DatabaseEngramClient.SOURCE_TYPE): AppliedOperation {
+    private suspend fun applyCorrection(userEmail: String, cycleSeq: Long, opKey: String, op: CorrectItem, sourceType: String = DatabaseEngramClient.SOURCE_TYPE, zone: ZoneId = ZoneId.systemDefault()): AppliedOperation {
         val old = structure.getItem(userEmail, op.targetUid)
             ?: return AppliedOperation(op, false, "Could not find the item to correct")
-        val created = structure.createItem(userEmail, cycleSeq, old.kind, op.title ?: op.quote, op.dueAt ?: old.dueAt, old.projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType)
+        // The corrected item keeps where the old one stood and what was said about its time, except what the correction changes.
+        val dueChanged = op.dueAt != null
+        val extras = if (old.kind == ItemKind.FACT) ItemExtras(happened = old.happenedAt?.let { TimeValue(it, old.happenedHasTime) }) else ItemExtras(
+            state = old.workState?.takeIf { !it.closed },
+            dueKind = op.dueKind ?: old.dueKind,
+            dueHasTime = if (dueChanged) op.dueHasTime else old.dueHasTime,
+            starts = old.startsAt?.let { TimeValue(it, old.startsHasTime) },
+            nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) } ?: old.nudgeAt?.let { TimeValue(it, old.nudgeHasTime) },
+            happened = old.happenedAt?.let { TimeValue(it, old.happenedHasTime) },
+            waitingOn = old.waitingOn,
+        )
+        val created = structure.createItem(userEmail, cycleSeq, old.kind, op.title ?: op.quote, op.dueAt ?: old.dueAt, old.projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType, extras = extras)
             ?: return AppliedOperation(op, false, "Could not record the correction of \"${old.text}\"")
         old.about.forEach { structure.linkAbout(userEmail, cycleSeq, created.uid, it) }
         val linked = graph.markSuperseded(userEmail, cycleSeq, created.uid, old.uid)
@@ -358,7 +412,9 @@ class HorizonOperationApplier(
         return AppliedOperation(
             op,
             applied = linked,
-            summary = if (linked) "Corrected \"${old.text}\" to \"${created.text}\"" else "Recorded the correction but could not link it to \"${old.text}\"",
+            summary = if (linked) "Corrected \"${old.text}\" to \"${created.text}\"" + listOfNotNull(
+                op.dueKind?.let { "; ${it.wire()} deadline" }, op.nudgeAt?.let { "; check in ${describeDue(it, zone)}" },
+            ).joinToString("") else "Recorded the correction but could not link it to \"${old.text}\"",
             resultUid = created.uid,
             resultText = created.text,
         )

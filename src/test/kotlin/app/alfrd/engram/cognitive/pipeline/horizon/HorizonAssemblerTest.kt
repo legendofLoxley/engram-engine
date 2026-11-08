@@ -1150,7 +1150,7 @@ class HorizonAssemblerTest {
             is SurfacingReason.DormantOpen -> s.lastStatusChangeCycleSeq
             // Reasons the structured selection adds; none of these tests builds the structure that produces them.
             is SurfacingReason.Pinned, is SurfacingReason.InFocus, is SurfacingReason.Activated,
-            is SurfacingReason.Urgent, is SurfacingReason.Peripheral -> item.sourceRefs.first().cycleSeq
+            is SurfacingReason.Urgent, is SurfacingReason.Peripheral, is SurfacingReason.CheckIn -> item.sourceRefs.first().cycleSeq
         }
         listOf(item.sourceRefs.first().phraseUid, item.category, item.status, cycleSeq)
     }.toSet()
@@ -1177,7 +1177,8 @@ class HorizonAssemblerTest {
         val openUid = seedConversationalPhraseWithCycle(email, "Getting Alfrd running on Arx is a priority for me.", cycleSeq = 1, openedAt = 1)
         val plainFactUid = seedConversationalPhraseWithCycle(email, "My dog's name is Newton.", cycleSeq = 2)
         val resolvedUid = seedConversationalPhraseWithCycle(email, "The delivery arrived.", cycleSeq = 3, openedAt = 3)
-        store.markAssertionStatus(email, cycleSeq = 4, phraseUid = resolvedUid, status = AssertionStatus.RESOLVED)
+        // A task's status is the item's own: resolving it is the structure store's, and the candidates read it from there.
+        ArcadeHorizonStructureStore(dbManager.getDatabase()).resolve(email, 4, resolvedUid)
 
         val candidates = assembler.listOpenCandidatesWithText(email)
 

@@ -301,6 +301,13 @@ class ArcadeHorizonAssembler(
                             if (state != null && (state.status == "resolved" || state.attention == AttentionDirective.SUPPRESSED || state.superseded ||
                                     state.containerAttention == AttentionDirective.SUPPRESSED || (state.container != null && state.containerStatus != "active"))
                             ) return@mapNotNull null
+                            // Done and dropped never show (the coarse status above already holds them back); a waiting item shows only inside a
+                            // focused project (or a project of a focused domain) or once its check-in date has arrived.
+                            if (state != null) {
+                                val focusUid = selection.focus?.uid
+                                val inFocusedProject = focusUid != null && (state.container?.uid == focusUid || state.containerParentUid == focusUid)
+                                if (!StateRules.visible(state.workState, state.nudgeAt, inFocusedProject, now)) return@mapNotNull null
+                            }
                             rank(c, state, selection, reactivationResult.infoByTargetUid[c.phraseUid], currentCycleSeq, c.phraseUid in actorUids, c.phraseUid in envUids)
                         }.filter { it.item.score >= policy.visibilityFloor }
 
@@ -399,7 +406,8 @@ class ArcadeHorizonAssembler(
             val conditions = mutableListOf("@out.uid IN :sourceUids")
             val params = mutableMapOf<String, Any>("sourceUids" to sourceUids, "offset" to offset, "limit" to limit)
             if (status != null) {
-                conditions += "status = :status"
+                // The item's own status; the assertion's older copy still answers for a plain phrase that has none.
+                conditions += "((@in.@type IN ['Task', 'Question'] AND @in.status = :status) OR (@in.@type NOT IN ['Task', 'Question'] AND status = :status))"
                 params["status"] = status.name.lowercase()
             }
             // Category is a secondary axis derived from source type + status presence (see
@@ -414,7 +422,7 @@ class ArcadeHorizonAssembler(
             // share a cycleSeq is not guaranteed stable across separate paged queries, which could
             // silently skip or repeat a row at a page boundary.
             val sql = """
-                SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, timestamp, cycleSeq, status
+                SELECT @out.uid as sourceUid, @out.type as sourceType, @in.uid as phraseUid, timestamp, cycleSeq, status, @in.status as itemStatus, @in.@type as itemType
                 FROM ASSERTS
                 WHERE ${conditions.joinToString(" AND ")}
                 ORDER BY cycleSeq DESC, phraseUid ASC
@@ -427,7 +435,7 @@ class ArcadeHorizonAssembler(
                     val row = rs.next().toMap()
                     rawCount++
                     val sourceType = row["sourceType"] as? String ?: ""
-                    val rowStatus = row["status"] as? String
+                    val rowStatus = if (row["itemType"] == "Task" || row["itemType"] == "Question") row["itemStatus"] as? String else row["status"] as? String
                     if (category != null && categoryFor(sourceType, rowStatus) != category) continue
                     out += SourceRef(
                         phraseUid = row["phraseUid"] as? String ?: continue,
@@ -455,8 +463,8 @@ class ArcadeHorizonAssembler(
             val sql = """
                 SELECT @in.uid as phraseUid, @in.text as phraseText, cycleSeq
                 FROM ASSERTS
-                WHERE @out.uid IN :sourceUids AND status = 'open'
-                ORDER BY statusCycleSeq DESC
+                WHERE @out.uid IN :sourceUids AND ((@in.@type IN ['Task', 'Question'] AND @in.status = 'open') OR (@in.@type NOT IN ['Task', 'Question'] AND status = 'open'))
+                ORDER BY timestamp DESC
                 LIMIT :limit
             """.trimIndent()
             db.query("sql", sql, mapOf("sourceUids" to sourceUids, "limit" to limit)).use { rs ->
@@ -729,13 +737,17 @@ class ArcadeHorizonAssembler(
             "justAsserted" -> SurfacingReason.JustAsserted(c.cycleSeq)
             "focus" -> SurfacingReason.InFocus(selection.focus?.name, selection.zoom, activation?.hops ?: 0)
             "urgency" -> SurfacingReason.Urgent(activation?.dueAt ?: state?.dueAt ?: 0L, activation?.overdue ?: false)
+            "checkin" -> SurfacingReason.CheckIn(state?.nudgeAt ?: 0L)
             "nudge", "spread" -> SurfacingReason.Activated(primary.detail ?: activation?.via ?: "mentioned", activation?.hops ?: 0)
             "peripheral" -> if (fromEnvironment) SurfacingReason.Peripheral(c.cycleSeq) else SurfacingReason.RecentActorEvidence(c.cycleSeq)
             else -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
         }
-        val status = c.status?.let { s -> runCatching { AssertionStatus.valueOf(s.uppercase()) }.getOrNull() }
+        // A task's or question's status is read from the item itself. Only a plain phrase that was never a structured item still has
+        // the older ASSERTS.status copy to fall back on (written by HorizonGraphStore.markAssertionStatus, which no conversation path calls).
+        val itemStatus = state?.takeIf { it.kind == "task" || it.kind == "question" }?.workState?.status ?: c.status
+        val status = itemStatus?.let { s -> runCatching { AssertionStatus.valueOf(s.uppercase()) }.getOrNull() }
         val item = HorizonItem(
-            category = categoryFor(c.sourceType, c.status),
+            category = categoryFor(c.sourceType, itemStatus),
             text = BoundedText.of(c.phraseText),
             status = status,
             attentionDirective = state?.attention,
@@ -751,6 +763,12 @@ class ArcadeHorizonAssembler(
             askedBy = state?.askedBy,
             container = state?.container,
             documentSource = if (c.sourceType == CHANNEL_SOURCED_SOURCE_TYPE) documentNote(c.phraseUid) else null,
+            state = state?.workState?.wire(),
+            dueKind = if (state?.dueAt != null) (state.dueKind ?: DueKind.SOFT).wire() else null,
+            dueHasTime = state?.dueHasTime == true,
+            waitingOn = state?.waitingOn,
+            nudgeAt = state?.nudgeAt,
+            stateFromSource = state?.stateFromSource == true,
         )
         // Ties keep the order the pools always gave them: by the cycle the thing that surfaced it happened in.
         val tie = when (surfacing) {
@@ -762,7 +780,7 @@ class ArcadeHorizonAssembler(
     }
 
     /** When two components tie, the one named first here is reported as the reason. */
-    private val SPECIFICITY = listOf("pinned", "reactivation", "justAsserted", "focus", "nudge", "urgency", "spread", "peripheral", "baseline")
+    private val SPECIFICITY = listOf("pinned", "reactivation", "justAsserted", "focus", "nudge", "checkin", "urgency", "spread", "peripheral", "baseline")
 
     /**
      * Decodes the `ASSERTS.kindMetadata` JSON [ActorEventIngestionService] wrote at ingestion into
@@ -830,5 +848,6 @@ class ArcadeHorizonAssembler(
         is SurfacingReason.Activated -> "activated"
         is SurfacingReason.Urgent -> "urgent"
         is SurfacingReason.Peripheral -> "peripheral"
+        is SurfacingReason.CheckIn -> "check-in"
     }
 }

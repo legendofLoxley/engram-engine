@@ -499,6 +499,21 @@ object SchemaBootstrap {
             ensureProperty(schema, "Project", "tentative",           Type.BOOLEAN)
             ensureProperty(schema, "Event",   "status",              Type.STRING)
             ensureProperty(schema, "Event",   "resolvedAt",          Type.LONG)
+            // Item state and time fields (additive: an item with no `state` reads from `status`, open -> open, resolved -> done).
+            // `status` stays as the coarse open/resolved projection of `state` and is what the (ownerEmail, status) index serves.
+            for (type in listOf("Task", "Event", "Question")) {
+                ensureProperty(schema, type, "state",          Type.STRING)   // open | active | waiting | done | dropped
+                ensureProperty(schema, type, "dueKind",        Type.STRING)   // hard | soft; absent reads as soft
+                ensureProperty(schema, type, "dueHasTime",     Type.BOOLEAN)  // the due carries a time of day as given (else date only)
+                ensureProperty(schema, type, "startsAt",       Type.LONG)     // scheduled start
+                ensureProperty(schema, type, "startsHasTime",  Type.BOOLEAN)
+                ensureProperty(schema, type, "nudgeAt",        Type.LONG)     // waiting: the date to check in
+                ensureProperty(schema, type, "nudgeHasTime",   Type.BOOLEAN)
+                ensureProperty(schema, type, "waitingOn",      Type.STRING)   // waiting: who or what, short free text
+                ensureProperty(schema, type, "stateFromSource", Type.BOOLEAN) // state / due kind is the filing document's claim, not the owner's
+            }
+            ensureProperty(schema, "Phrase", "happenedAt",      Type.LONG)    // events and facts: when it took place
+            ensureProperty(schema, "Phrase", "happenedHasTime", Type.BOOLEAN)
             ensureProperty(schema, "ASSERTS", "scores",              Type.STRING)
             ensureProperty(schema, "INVITED", "relationshipContext", Type.STRING)
             ensureProperty(schema, "INVITED", "trustPhase",          Type.STRING)

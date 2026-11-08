@@ -1175,6 +1175,7 @@ open class CognitivePipeline(
             is SurfacingReason.Activated -> "Activated"
             is SurfacingReason.Urgent -> "Urgent"
             is SurfacingReason.Peripheral -> "Peripheral"
+            is SurfacingReason.CheckIn -> "CheckIn"
         },
         score = item.score,
         why = item.why.map { "${it.kind}=${"%.2f".format(it.value)}" + (it.detail?.let { d -> " ($d)" } ?: "") },

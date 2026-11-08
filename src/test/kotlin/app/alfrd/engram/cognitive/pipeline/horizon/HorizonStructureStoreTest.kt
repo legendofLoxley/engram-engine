@@ -618,25 +618,26 @@ class HorizonStructureStoreTest {
     // ── Legacy Horizon compatibility ──────────────────────────────────────────
 
     @Test
-    fun `a task or question carries the legacy open status, and resolving or reopening keeps it in step`() = runBlocking {
+    fun `status lives on the item alone, no copy is written to the assertion, and resolving or reopening moves the item's own state`() = runBlocking {
         val user = newUser()
         val db = dbManager.getDatabase()
         val task = store.createItem(user, 3, ItemKind.TASK, "Send the invoice")!!
         val question = store.createItem(user, 3, ItemKind.QUESTION, "What next?")!!
         val fact = store.createItem(user, 3, ItemKind.FACT, "A plain fact")!!
-        fun legacy(uid: String) = HorizonOwnership.ownedAssertsEdges(db, user, uid).single().get("status") as String?
+        fun copy(uid: String) = HorizonOwnership.ownedAssertsEdges(db, user, uid).single().get("status") as String?
 
-        assertEquals("open", legacy(task.uid))
-        assertEquals("open", legacy(question.uid))
-        assertNull(legacy(fact.uid), "a fact was never intention-shaped")
+        listOf(task.uid, question.uid, fact.uid).forEach { assertNull(copy(it), "nothing writes ASSERTS.status for an item") }
+        assertEquals(WorkState.OPEN, task.workState); assertEquals(WorkState.OPEN, question.workState)
+        assertNull(fact.workState, "a fact has no state")
 
         assertTrue(store.resolve(user, 4, task.uid))
-        assertEquals("resolved", legacy(task.uid))
-        assertEquals(4L, (HorizonOwnership.ownedAssertsEdges(db, user, task.uid).single().get("statusCycleSeq") as Number).toLong())
+        assertEquals(WorkState.DONE, store.getItem(user, task.uid)!!.workState)
+        assertEquals("resolved", store.getItem(user, task.uid)!!.status)
+        assertNull(copy(task.uid))
         assertTrue(store.resolve(user, 5, task.uid, resolved = false))
-        assertEquals("open", legacy(task.uid))
-        val history = HorizonOwnership.ownedAssertsEdges(db, user, task.uid).single().get("statusHistory") as String
-        assertEquals(3, Regex("\"state\"").findAll(history).count(), "open, resolved, open — every transition kept")
+        assertEquals(WorkState.OPEN, store.getItem(user, task.uid)!!.workState)
+        assertEquals("open", store.getItem(user, task.uid)!!.status)
+        assertNull(copy(task.uid))
     }
 
     @Test

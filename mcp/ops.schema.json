@@ -47,6 +47,39 @@
                                 "type": "string"
                             },
                             "description": "Short names of the people/things this concerns."
+                        },
+                        "state": {
+                            "type": "string",
+                            "enum": [
+                                "open",
+                                "active",
+                                "waiting",
+                                "done",
+                                "dropped"
+                            ]
+                        },
+                        "due_kind": {
+                            "type": "string",
+                            "enum": [
+                                "hard",
+                                "soft"
+                            ]
+                        },
+                        "starts": {
+                            "type": "string",
+                            "description": "When it is scheduled to start (an event, a block of work): ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."
+                        },
+                        "nudge": {
+                            "type": "string",
+                            "description": "For a waiting item: the date to check in on it, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."
+                        },
+                        "waiting_on": {
+                            "type": "string",
+                            "description": "For a waiting item: who or what it waits on, in a few words."
+                        },
+                        "happened": {
+                            "type": "string",
+                            "description": "When an event or fact took place, if known: ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."
                         }
                     },
                     "required": [
@@ -112,6 +145,50 @@
                         "verb": {
                             "type": "string",
                             "enum": [
+                                "set_state"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of a task, event or question."
+                        },
+                        "state": {
+                            "type": "string",
+                            "enum": [
+                                "open",
+                                "active",
+                                "waiting",
+                                "done",
+                                "dropped"
+                            ]
+                        },
+                        "nudge": {
+                            "type": "string",
+                            "description": "For waiting: the date to check in, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."
+                        },
+                        "waiting_on": {
+                            "type": "string",
+                            "description": "For waiting: who or what it waits on, in a few words. Waiting is accepted without it."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "item",
+                        "state",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
                                 "correct_item"
                             ]
                         },
@@ -130,6 +207,17 @@
                         "title": {
                             "type": "string",
                             "description": "The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement."
+                        },
+                        "due_kind": {
+                            "type": "string",
+                            "enum": [
+                                "hard",
+                                "soft"
+                            ]
+                        },
+                        "nudge": {
+                            "type": "string",
+                            "description": "New check-in date for a waiting item, ISO date or date and time."
                         }
                     },
                     "required": [
@@ -368,6 +456,23 @@
                         "author": {
                             "type": "string",
                             "description": "Optional. Who wrote the passage, if you know. Left out, the author is recorded as unknown."
+                        },
+                        "state": {
+                            "type": "string",
+                            "enum": [
+                                "open",
+                                "active",
+                                "waiting",
+                                "done",
+                                "dropped"
+                            ]
+                        },
+                        "due_kind": {
+                            "type": "string",
+                            "enum": [
+                                "hard",
+                                "soft"
+                            ]
                         }
                     },
                     "required": [

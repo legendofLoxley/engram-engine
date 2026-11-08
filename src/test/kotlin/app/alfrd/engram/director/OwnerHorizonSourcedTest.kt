@@ -365,4 +365,66 @@ class OwnerHorizonSourcedTest {
         assertEquals(1, due.size)
         assertEquals(java.time.LocalDate.parse("2026-03-31").plusDays(1).atStartOfDay(zone).minusNanos(1_000_000).toInstant().toEpochMilli(), due[0], "the date did not move")
     }
+
+    // ── State and time fields ────────────────────────────────────────────────
+
+    private fun JsonObject.refs() = this["refs"]!!.jsonPrimitive.content
+    private fun refOf(refs: String, fragment: String): String =
+        Regex("""\b(i\d+) \w+ "[^"]*${Regex.escape(fragment)}""").find(refs)?.groupValues?.get(1) ?: error("no ref for '$fragment' in:\n$refs")
+
+    @Test
+    fun `a state and a hard deadline claimed by a document read as the document's claim, not the owner's`() = app { c ->
+        val id = "eeee0000-0000-0000-0000-00000000000e"
+        val text = "# Launch\n\nSign off the press release, in progress, hard deadline 2099-05-01.\n\nCheck the signage budget."
+        val r = c.send(
+            null,
+            """[{"verb":"record_item","source":"$id","kind":"task","quote":"Sign off the press release","title":"Sign off the press release","state":"active","due_kind":"hard","due":"2099-05-01","waiting_on":"nobody"}]""",
+            sourceFor(id, "Launch", text),
+        )
+        assertTrue(r.applied(0), r.toString())
+        assertTrue(r.detail(0).contains("active"), r.detail(0))
+        val item = manager.getDatabase().query("sql", "SELECT FROM Task WHERE text = 'Sign off the press release'").use { it.next().toElement().asVertex() }
+        assertEquals("active", item.get("state")); assertEquals("hard", item.get("dueKind")); assertEquals(true, item.get("stateFromSource"))
+        assertNull(item.get("waitingOn"), "only a state and a hard or soft deadline are taken from a source")
+        val read = c.send(null, "[]")
+        val line = read.horizon().lines().first { it.contains("Sign off the press release") }
+        assertTrue(line.contains("[active per the source]"), line)
+        assertTrue(line.contains("not the owner's own statement or commitment"), line)
+        val snapshotLine = read.refs().lines().first { it.contains("Sign off the press release") }
+        assertTrue(snapshotLine.contains("(active, per the source)") && snapshotLine.contains("due 2099-05-01 hard"), snapshotLine)
+        // The owner changing the state is their claim: the marker goes.
+        val ref = refOf(read.refs(), "Sign off the press release")
+        val say = c.send("The press release sign-off is on hold, waiting on legal.", """[{"verb":"set_state","item":"$ref","state":"waiting","waiting_on":"legal","quote":"waiting on legal"}]""")
+        assertTrue(say.applied(0), say.toString())
+        assertEquals(null, manager.getDatabase().query("sql", "SELECT FROM Task WHERE text = 'Sign off the press release'").use { it.next().toElement().asVertex().get("stateFromSource") })
+    }
+
+    @Test
+    fun `set_state through the tool keeps the quote guard and the cap, and says when a waiting item names no one`() = app { c ->
+        val msg = "I need to chase the printer quote and I am waiting on it."
+        val made = c.send(msg, """[{"verb":"record_item","kind":"task","quote":"chase the printer quote","title":"Chase the printer quote","due":"2099-06-01T09:30","due_kind":"hard"}]""")
+        assertTrue(made.applied(0), made.toString())
+        val line = made.refs().lines().first { it.contains("Chase the printer quote") }
+        assertTrue(line.contains("due 2099-06-01 09:30 hard"), line)
+        val ref = refOf(made.refs(), "Chase the printer quote")
+
+        // Waiting without a name is allowed, and the result says so.
+        val waiting = c.send(msg, """[{"verb":"set_state","item":"$ref","state":"waiting","quote":"I am waiting on it"}]""")
+        assertTrue(waiting.applied(0), waiting.toString())
+        assertTrue(waiting.detail(0).contains("nothing says who or what it waits on"), waiting.detail(0))
+        // The quote guard is the same as for every operation.
+        val ungrounded = c.send(msg, """[{"verb":"set_state","item":"$ref","state":"done","quote":"the printer quote arrived"}]""")
+        assertFalse(ungrounded.applied(0)); assertEquals("ungrounded_quote", ungrounded.detail(0))
+        // resolve_item still works, as set_state done.
+        // Refs are positional: take the next one from the latest response.
+        val refNow = refOf(waiting.refs(), "Chase the printer quote")
+        val done = c.send("The printer quote is sorted.", """[{"verb":"resolve_item","item":"$refNow","quote":"The printer quote is sorted"}]""")
+        assertTrue(done.applied(0), done.toString())
+        assertEquals("resolved", manager.getDatabase().query("sql", "SELECT FROM Task WHERE text = 'Chase the printer quote'").use { it.next().toElement().asVertex().get("status") })
+        assertEquals("done", manager.getDatabase().query("sql", "SELECT FROM Task WHERE text = 'Chase the printer quote'").use { it.next().toElement().asVertex().get("state") })
+        // The cap of eight counts the new verb.
+        val many = (1..9).joinToString(",") { """{"verb":"set_state","item":"$refNow","state":"waiting","waiting_on":"person $it","quote":"I am waiting on it"}""" }
+        val capped = c.send(msg, "[$many]")
+        assertEquals("too_many_operations", capped.detail(8))
+    }
 }
