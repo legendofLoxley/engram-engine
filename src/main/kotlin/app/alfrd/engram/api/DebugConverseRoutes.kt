@@ -71,6 +71,8 @@ data class DebugConverseResponse(
 data class DebugPurgeResponse(
     val deletedUserCount: Int,
     val message: String,
+    /** Protected identities (emails) the purge found and left alone. */
+    val skippedProtected: List<String> = emptyList(),
 )
 
 internal data class DebugResolution(
@@ -112,6 +114,7 @@ internal fun classifyDebugResolution(synthesisSource: String): DebugResolution {
 fun Application.configureDebugConverseRoutes(
     debugSessionManager: SessionManager,
     db: Database?,
+    protectedIdentities: ProtectedIdentities = ProtectedIdentities.fromEnvironment(),
 ) {
     routing {
         authenticate("debug-token") {
@@ -179,13 +182,16 @@ fun Application.configureDebugConverseRoutes(
                         return@delete
                     }
                     try {
-                        val deletedCount = DebugConverseService.purgeAllSyntheticUsers(db)
-                        logger.info("debug: purge complete deletedCount={}", deletedCount)
+                        val outcome = DebugConverseService.purge(db, protectedIdentities)
+                        val deletedCount = outcome.deleted
+                        logger.info("debug: purge complete deletedCount={} skippedProtected={}", deletedCount, outcome.skippedProtected.size)
                         call.respond(
                             HttpStatusCode.OK,
                             DebugPurgeResponse(
                                 deletedUserCount = deletedCount,
-                                message = "Deleted $deletedCount synthetic user(s) and all associated edges",
+                                message = "Deleted $deletedCount synthetic user(s) and all associated edges" +
+                                    if (outcome.skippedProtected.isEmpty()) "" else "; skipped ${outcome.skippedProtected.size} protected identit${if (outcome.skippedProtected.size == 1) "y" else "ies"}",
+                                skippedProtected = outcome.skippedProtected,
                             )
                         )
                     } catch (e: Exception) {

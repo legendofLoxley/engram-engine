@@ -48,7 +48,41 @@ This replaces the live graph, so it is done by hand and with the engine stopped.
    `owner-jacob`.
 5. When satisfied, delete the `.damaged-` directory. Do not send a turn as `owner-jacob` to test it.
 
-Never call `DELETE /debug/converse/purge`: it deletes `owner-jacob` along with the test users.
+## Snapshot before anything risky
+
+Before a migration, a bulk import or a deploy that touches the graph, take a snapshot first and keep its file name:
+`systemctl start engram-graph-backup.service && journalctl -u engram-graph-backup -n 3 --no-pager` (the log line names
+the new `auto/graph-<stamp>.zip`). Never copy `data/dev/engram-db` while `engram-dev.service` is running: the embedded
+database holds a lock and a live copy is not consistent. To restore that snapshot, use "Restore for real" above.
+
+## The purge guard
+
+`DELETE /debug/converse/purge` (debug token, `DEBUG_CONVERSE_ENABLED=true`) deletes every user whose email ends in
+`@test.alfrd.internal`, which `owner-jacob` does. It now skips protected identities, and the reply says which
+(`{"deletedUserCount":N,"skippedProtected":["debug+owner-jacob@test.alfrd.internal"],...}`). Protected is the union of
+
+- `PURGE_PROTECTED_IDENTITIES`, comma-separated ids or full emails (unset means `owner-jacob`; setting it replaces that default), and
+- `OWNER_IDENTITY` and `DIRECTOR_TICK_IDENTITY`, read from the engine's own environment, so they cannot be left off.
+
+At start the engine logs `purge-guard: protected identities (never purged): <emails>`. Names only. Purging when only
+protected users match is a normal `200` with `deletedUserCount: 0`. The guard does not make it safe to *send turns*
+as `owner-jacob`; that rule in `CLAUDE.md` still stands, and a snapshot is still the answer to "what if".
+
+## What is missing (as of 2026-11-08, found by audit, not built)
+
+- **One disk.** `GRAPH_BACKUP_COPY_TO` is unset, so every backup sits on the disk the graph is on. `halo-backup.timer`
+  (03:30) is a separate vendor job; whether it covers `/home/halo/backups` was not verified.
+- **The installed unit does not match the repo.** The unit in `/etc/systemd/system` runs
+  `/home/halo/development/engram-engine/deploy/scripts/graph-backup.sh` (the checkout), not the
+  `~/.local/share/engram/graph-backup.sh` copy that the repo unit and `deploy/README.md` describe (that file does not
+  exist). It works today because that checkout is on `master`; checking out a branch without the script, or with a
+  changed one, changes what the 05:20 job runs.
+- **Failures are silent.** A failed run is only a `failed` unit and a journal line; nothing alerts anyone. Nobody is told if
+  the engine is down at 05:20, the disk fills, or the timer stops.
+- **The restore proof is manual.** `graph-restore-proof.sh` is not scheduled, so a backup that stops restoring is found
+  only when someone runs it. (Each backup is CRC-verified at write time.)
+- **Backups are unencrypted** and contain all of Jacob's graph (mode 600 in a mode 700 folder).
+- **No automatic snapshot before risky operations**; it is the manual step above.
 
 ## Cold copy
 
