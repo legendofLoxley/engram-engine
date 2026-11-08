@@ -60,16 +60,24 @@ class ViewSnapshotBuilder(
 
         val focus = structure.getFocus(userEmail).filter { it.mode == FocusMode.PINNED }
         val candidates = LinkedHashMap<String, ItemRecord>()
-        fun add(item: ItemRecord?) { if (item != null && item.uid !in candidates && candidates.size < maxItems) candidates[item.uid] = item }
+        // A suppressed item or a resolved one never takes a slot an open item needs: both are left out of the focus and open pools below.
+        fun live(item: ItemRecord) = item.attention != AttentionDirective.SUPPRESSED && item.status != "resolved"
+        fun add(item: ItemRecord?, limit: Int) { if (item != null && item.uid !in candidates && candidates.size < limit) candidates[item.uid] = item }
 
         // Everything the pipeline needs the model to be able to name goes first, so the cap never squeezes it out.
-        pendingFilingItemUid?.let { add(structure.getItem(userEmail, it)) }
-        focus.filter { it.targetKind == FocusTargetKind.ITEM }.forEach { add(structure.getItem(userEmail, it.targetUid)) }
+        val hardCap = FOCUS_OPEN_CAP + maxItems + 1
+        pendingFilingItemUid?.let { add(structure.getItem(userEmail, it), hardCap) }
+        focus.filter { it.targetKind == FocusTargetKind.ITEM }.forEach { f -> structure.getItem(userEmail, f.targetUid)?.takeIf(::live)?.let { add(it, hardCap) } }
+        // What is in focus is listed in full (bounded by FOCUS_OPEN_CAP, well above maxItems): an item in view that has no ref cannot be
+        // suppressed, resolved or corrected. Only open items; the newest if there are more than the cap.
         focus.filter { it.targetKind == FocusTargetKind.PROJECT }.forEach { f ->
-            structure.itemsIn(userEmail, f.targetUid).takeLast(FOCUS_ITEM_CAP).forEach { add(it) }
+            structure.itemsIn(userEmail, f.targetUid).filter(::live).takeLast(FOCUS_OPEN_CAP).forEach { add(it, hardCap) }
         }
-        structure.listRecentItems(userEmail, OPEN_ITEM_CAP, openOnly = true).forEach { add(it) }
-        structure.listRecentItems(userEmail, RECENT_ITEM_CAP).forEach { add(it) }
+        // Up to maxItems as before; a focus larger than that keeps its items and still leaves a few places for the rest.
+        val room = if (candidates.size <= maxItems) maxItems else candidates.size + RECENT_ITEM_CAP
+        structure.listRecentItems(userEmail, OPEN_ITEM_CAP * POOL_OVERFETCH, openOnly = true).filter(::live).take(OPEN_ITEM_CAP).forEach { add(it, room) }
+        // Recent items fill what is left, so a just-resolved item can still be named to reopen it; a suppressed one never is.
+        structure.listRecentItems(userEmail, RECENT_ITEM_CAP * POOL_OVERFETCH).filter { it.attention != AttentionDirective.SUPPRESSED }.take(RECENT_ITEM_CAP).forEach { add(it, room) }
 
         val items = candidates.values.withIndex().map { (i, it) ->
             SnapshotItem(
@@ -102,7 +110,10 @@ class ViewSnapshotBuilder(
     }
 
     private companion object {
-        const val FOCUS_ITEM_CAP = 8
+        /** The most open items of a focused project that are listed with refs. */
+        const val FOCUS_OPEN_CAP = 40
+        /** Pools are read this many times over so that suppressed items filtered out do not leave the pool short. */
+        const val POOL_OVERFETCH = 4
         const val OPEN_ITEM_CAP = 8
         const val RECENT_ITEM_CAP = 6
     }
