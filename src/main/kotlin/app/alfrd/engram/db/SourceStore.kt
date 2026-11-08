@@ -259,6 +259,18 @@ class SourceStore(private val db: Database) {
         ).use { rs -> val out = HashSet<String>(); while (rs.hasNext()) rs.next().getProperty<String>("uid")?.let(out::add); out + sourceUid }
     }
 
+    /** Every item that quotes a chunk of one of [sourceUids], with the passage it quoted (null when none was kept). Items repeat once per chunk link. */
+    fun itemsQuotedFrom(userEmail: String, sourceUids: Set<String>): List<Pair<String, String?>> {
+        if (sourceUids.isEmpty()) return emptyList()
+        return db.query(
+            "sql", "SELECT @out.uid AS i, draftQuote AS q FROM QUOTES WHERE @in.sourceUid IN :s AND ownerEmail = :o", mapOf("s" to sourceUids.toList(), "o" to userEmail),
+        ).use { rs ->
+            val out = ArrayList<Pair<String, String?>>()
+            while (rs.hasNext()) { val m = rs.next().toMap(); (m["i"] as? String)?.let { out += it to (m["q"] as? String) } }
+            out
+        }
+    }
+
     /** The Sources whose chunks [itemUid] quotes: where the item was found. Empty for an item that came from no source. */
     fun sourceUidsOfItem(userEmail: String, itemUid: String): Set<String> =
         db.query("sql", "SELECT @in.sourceUid AS s FROM QUOTES WHERE @out.uid = :u AND ownerEmail = :o", mapOf("u" to itemUid, "o" to userEmail))

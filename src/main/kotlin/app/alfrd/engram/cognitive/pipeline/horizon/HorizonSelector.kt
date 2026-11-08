@@ -70,6 +70,8 @@ internal class HorizonSelector(
         /** The domain the item's project is filed under, if any (a focus on that domain is a focus on the project). */
         val containerParentUid: String? = null,
         val stateFromSource: Boolean = false,
+        /** When anything last confirmed the item: its stamp, else when it was last changed, else when it was made. */
+        val evidenceAt: Long = 0L,
     )
 
     data class Selection(
@@ -200,9 +202,11 @@ internal class HorizonSelector(
         for (uid in openUnfiled.uids) addItem(uid, "baseline", policy.unfiledOpenActivation, "still open", 0)
 
         // ── Waiting items whose check-in date has come ───────────────────────
-        val (checkIns, checkInsCut) = waitingCheckIns(userEmail, nowMillis)
-        truncated = truncated || checkInsCut
-        for ((uid, nudgeAt) in checkIns) addItem(uid, "checkin", policy.checkInActivation, "check-in date reached", 0)
+        val scan = stateScan(userEmail, nowMillis)
+        truncated = truncated || scan.truncated
+        for (uid in scan.checkIns.keys) addItem(uid, "checkin", policy.checkInActivation, "check-in date reached", 0)
+        // Zoomed out, what they are working on is part of the picture; with a focus set, the focus decides.
+        if (focusRef == null) for (uid in scan.active) addItem(uid, "active", policy.activeActivation, "in progress", 0)
 
         // ── Combine ──────────────────────────────────────────────────────────
         val activations = LinkedHashMap<String, ItemActivation>()
@@ -371,9 +375,15 @@ internal class HorizonSelector(
         return OpenScan(newestFirst.take(policy.openBaselineItems), truncated || newestFirst.size > policy.openBaselineItems)
     }
 
-    /** The user's waiting tasks, events and questions whose check-in date has arrived, with that date. Bounded by the scan limit like the other open scans. */
-    private fun waitingCheckIns(userEmail: String, nowMillis: Long): Pair<Map<String, Long>, Boolean> {
-        val found = LinkedHashMap<String, Long>()
+    private data class StateScan(val checkIns: Map<String, Long>, val active: List<String>, val truncated: Boolean)
+
+    /**
+     * One pass over the user's open tasks, events and questions for the two things that come into view by state alone: waiting items whose
+     * check-in date has arrived (with that date), and active ones. Bounded by the scan limit like the other open scans.
+     */
+    private fun stateScan(userEmail: String, nowMillis: Long): StateScan {
+        val checkIns = LinkedHashMap<String, Long>()
+        val active = LinkedHashSet<String>()
         var truncated = false
         for (type in listOf("Task", "Event", "Question")) {
             var rows = 0
@@ -381,15 +391,16 @@ internal class HorizonSelector(
                 while (rs.hasNext()) {
                     rows++
                     val vertex = rs.next().toElement().asVertex()
-                    if (vertex.get("state") != WorkState.WAITING.wire()) continue
                     val uid = vertex.get("uid") as? String ?: continue
-                    val nudgeAt = (vertex.get("nudgeAt") as? Number)?.toLong() ?: continue
-                    if (nudgeAt <= nowMillis) found[uid] = nudgeAt
+                    when (vertex.get("state")) {
+                        WorkState.WAITING.wire() -> (vertex.get("nudgeAt") as? Number)?.toLong()?.takeIf { it <= nowMillis }?.let { checkIns[uid] = it }
+                        WorkState.ACTIVE.wire() -> active += uid
+                    }
                 }
             }
             if (rows >= policy.urgencyScanLimit) truncated = true
         }
-        return found to truncated
+        return StateScan(checkIns, active.toList(), truncated)
     }
 
     // ── Attention ────────────────────────────────────────────────────────────
@@ -456,6 +467,7 @@ internal class HorizonSelector(
                 waitingOn = v.get("waitingOn") as? String,
                 containerParentUid = project?.getVertices(Vertex.DIRECTION.OUT, "PART_OF")?.firstOrNull { it.typeName == "Domain" }?.get("uid") as? String,
                 stateFromSource = v.get("stateFromSource") == true,
+                evidenceAt = (v.get("lastEvidenceAt") as? Number)?.toLong() ?: (v.get("updatedAt") as? Number)?.toLong() ?: (v.get("createdAt") as? Number)?.toLong() ?: 0L,
             )
         }
         return out
@@ -487,6 +499,8 @@ internal class HorizonSelector(
                 val uid = v.get("uid") as String
                 val members = if (v.typeName == "Project") v.getVertices(Vertex.DIRECTION.IN, "PART_OF").filter { it.isItem() }.take(MEMBER_SCAN_CAP) else emptyList()
                 val open = members.filter { it.get("status") == "open" }
+                val activeCount = open.count { it.get("state") == WorkState.ACTIVE.wire() }
+                val waitingCount = open.count { it.get("state") == WorkState.WAITING.wire() }
                 val next = open.filter { StateRules.canBeOverdue(WorkState.of(it.get("state") as? String, it.get("status") as? String)) }.mapNotNull { (it.get(if (it.typeName == "Event") "occursAt" else "dueAt") as? Number)?.toLong() }.minOrNull()
                 val projectDue = (v.get("dueAt") as? Number)?.toLong()
                 HorizonContainerView(
@@ -498,6 +512,9 @@ internal class HorizonSelector(
                     nextDueAt = listOfNotNull(next, projectDue).minOrNull(),
                     score = HorizonPolicy.combine(reaches[uid] ?: emptyList()),
                     inFocus = uid == focusUid,
+                    parentUid = if (v.typeName == "Project") v.getVertices(Vertex.DIRECTION.OUT, "PART_OF").firstOrNull { it.typeName == "Domain" }?.get("uid") as? String else null,
+                    activeItems = activeCount,
+                    waitingItems = waitingCount,
                 )
             }
             .sortedWith(compareByDescending<HorizonContainerView> { it.inFocus }.thenByDescending { it.score }.thenByDescending { it.openItems })

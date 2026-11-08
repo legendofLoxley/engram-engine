@@ -106,6 +106,22 @@ data class HorizonPolicy(
     /** A gap this long since the user's last turn makes Alfrd open a question about what they have been up to. */
     val silenceThreshold: Duration = Duration.ofDays(7),
 
+    // ── Staleness, breakthrough deadlines, and what a focus lists ────────────
+    /** An open or active item with a passed due date and no evidence for more than this many days is asked about, not alarmed over (a hard one keeps its alarm). */
+    val staleEvidenceDays: Long = 14,
+    /** "Also due": a hard deadline this many calendar days out (or any hard one overdue) breaks through whatever the focus. */
+    val alsoDueHardDays: Long = 3,
+    /** "Also due": a soft deadline this many calendar days after today (so 1 is today and tomorrow) breaks through whatever the focus. */
+    val alsoDueSoftDays: Long = 1,
+    /** At most this many lines in the "also due" block; the rest are counted. */
+    val alsoDueMaxLines: Int = 10,
+    /** Zoomed out, an item the user is working on (active) comes into view on its own. */
+    val activeActivation: Double = 0.5,
+    /** The most items of a focused project listed in full (grouped by state), however many the budget allows others. */
+    val focusItemCap: Int = 40,
+    /** The most suppressed items of a focused project listed under "Hidden". */
+    val hiddenItemCap: Int = 20,
+
     // ── Overall ──────────────────────────────────────────────────────────────
     /** Anything scoring below this stays out of view, however much room there is. */
     val visibilityFloor: Double = 0.1,
@@ -155,6 +171,22 @@ data class HorizonPolicy(
 
     companion object {
         private const val MILLIS_PER_DAY = 86_400_000.0
+
+        /**
+         * The defaults with the staleness and "also due" windows overridden from the environment (`HORIZON_STALE_DAYS`,
+         * `HORIZON_ALSO_DUE_HARD_DAYS`, `HORIZON_ALSO_DUE_SOFT_DAYS`, `HORIZON_ALSO_DUE_MAX_LINES`). A value that is not a
+         * non-negative whole number is ignored.
+         */
+        fun fromEnvironment(env: Map<String, String> = System.getenv()): HorizonPolicy {
+            fun days(name: String): Long? = env[name]?.trim()?.toLongOrNull()?.takeIf { it >= 0 }
+            val base = HorizonPolicy()
+            return base.copy(
+                staleEvidenceDays = days("HORIZON_STALE_DAYS") ?: base.staleEvidenceDays,
+                alsoDueHardDays = days("HORIZON_ALSO_DUE_HARD_DAYS") ?: base.alsoDueHardDays,
+                alsoDueSoftDays = days("HORIZON_ALSO_DUE_SOFT_DAYS") ?: base.alsoDueSoftDays,
+                alsoDueMaxLines = days("HORIZON_ALSO_DUE_MAX_LINES")?.toInt()?.takeIf { it > 0 } ?: base.alsoDueMaxLines,
+            )
+        }
 
         /** Independent contributions add but can't pass 1: 1 - the product of what each leaves unreached. */
         fun combine(contributions: Collection<Double>): Double =

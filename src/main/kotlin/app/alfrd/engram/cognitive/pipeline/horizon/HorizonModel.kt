@@ -275,6 +275,10 @@ sealed interface SurfacingReason {
     @Serializable
     data class Urgent(val dueAt: Long, val overdue: Boolean) : SurfacingReason
 
+    /** Something the user is working on (active) that came into view on its own while zoomed out. */
+    @Serializable
+    data object InProgress : SurfacingReason
+
     /** A waiting item whose check-in date ([nudgeAt]) has arrived: shown whatever the focus, so it can be asked about. */
     @Serializable
     data class CheckIn(val nudgeAt: Long) : SurfacingReason
@@ -308,6 +312,11 @@ data class HorizonContainerView(
     val nextDueAt: Long? = null,
     val score: Double = 0.0,
     val inFocus: Boolean = false,
+    /** For a project: the domain it is filed under. */
+    val parentUid: String? = null,
+    /** Of [openItems], how many are active and how many waiting; the rest are plain open. */
+    val activeItems: Int = 0,
+    val waitingItems: Int = 0,
 )
 
 /** One bounded candidate in a [ContextHorizon]. [actorMetadata] is non-null exactly when [provenance] is one of the three Actor-attributed [ProvenanceKind]s — see [ActorEventMetadata]. */
@@ -346,7 +355,27 @@ data class HorizonItem(
     val nudgeAt: Long? = null,
     /** True while [state] / [dueKind] is the filing document's claim, not the owner's. */
     val stateFromSource: Boolean = false,
+    /** When anything last confirmed the item (see [HorizonStructureStore.touchEvidence]); falls back to when it was last changed or made. */
+    val lastEvidenceAt: Long? = null,
+    /** True for an open or active item whose due date has passed and which nothing has confirmed for longer than the policy's staleness window. */
+    val stale: Boolean = false,
 )
+
+/** A deadline that breaks through whatever the focus is: see [ContextHorizon.alsoDue]. */
+@Serializable
+data class AlsoDueEntry(
+    val uid: String,
+    val text: String,
+    val dueAt: Long,
+    /** `hard` or `soft`. */
+    val dueKind: String,
+    val dueHasTime: Boolean = false,
+    val overdue: Boolean = false,
+)
+
+/** A suppressed item of the focused project, listed apart so it can be brought back. */
+@Serializable
+data class HiddenEntry(val uid: String, val text: String)
 
 /** A candidate excluded from `items` by the budget. Reference-only — no inlined text, nothing to truncate. */
 @Serializable
@@ -384,6 +413,12 @@ data class ContextHorizon(
     val focus: HorizonFocusRef? = null,
     /** The user's projects and domains, most relevant first, bounded — the shape of what they have going on, even where none of a container's items is in view. */
     val containers: List<HorizonContainerView> = emptyList(),
+    /** Hard deadlines close (or passed) and soft ones due today or tomorrow, whatever the focus; bounded. Waiting, done and dropped items are never here. */
+    val alsoDue: List<AlsoDueEntry> = emptyList(),
+    /** How many more would have qualified than [alsoDue] lists. */
+    val alsoDueMore: Int = 0,
+    /** With a project in focus: its suppressed open items, listed under "Hidden (suppressed)". */
+    val hidden: List<HiddenEntry> = emptyList(),
 )
 
 /** One page of a full, explicitly paginated candidate enumeration — see [HorizonAssembler.listCandidates]. */

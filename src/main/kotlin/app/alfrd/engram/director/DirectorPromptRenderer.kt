@@ -18,12 +18,12 @@ object DirectorPromptRenderer {
 
     private val stamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
 
-    fun render(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant): String = buildString {
+    fun render(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap()): String = buildString {
         append(Actor.STANDING_CONTEXT_POLICY)
         append("\n\nThis is your standing context, built without a message from the user: no one is speaking to you, and nothing here was just said.\n\n")
         append(situation(state, zone))
         append("\n\n")
-        append(horizonSection(horizon, zone, now))
+        append(horizonSection(horizon, zone, now, refs = refs))
         append('\n')
     }
 
@@ -38,12 +38,12 @@ object DirectorPromptRenderer {
      * The same situation and Horizon as [render], opened with [CHANNEL_PREAMBLE] instead of the Director's policy. Used only by the owner's
      * Horizon tool: the channel reading it is Claude and stays itself; alfrd is the memory behind it.
      */
-    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant): String = buildString {
+    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap()): String = buildString {
         append(CHANNEL_PREAMBLE)
         append("\n\n")
         append(situation(state, zone, "alfrd's situation:"))
         append("\n\n")
-        append(horizonSection(horizon, zone, now, "alfrd's memory of the owner"))
+        append(horizonSection(horizon, zone, now, "alfrd's memory of the owner", refs))
         append('\n')
     }
 
@@ -73,11 +73,11 @@ object DirectorPromptRenderer {
             "; newest source read ${m.newestSourceReadAt?.let { Instant.ofEpochMilli(it) } ?: "never"}" +
             ", newest extraction run started ${m.newestRunStartedAt?.let { Instant.ofEpochMilli(it) } ?: "never"}"
 
-    private fun horizonSection(outcome: AssembleOutcome, zone: ZoneId, now: Instant, memoryOf: String = "your durable memory of this user"): String = when (outcome) {
+    private fun horizonSection(outcome: AssembleOutcome, zone: ZoneId, now: Instant, memoryOf: String = "your durable memory of this user", refs: Map<String, String> = emptyMap()): String = when (outcome) {
         is AssembleOutcome.Assembled -> {
             val horizon = outcome.horizon
-            val items = HorizonItemsRenderer.render(horizon, zone)
-            val frame = HorizonItemsRenderer.composeOrientation(horizon, zone)
+            val items = HorizonItemsRenderer.render(horizon, zone, refs = refs)
+            val frame = HorizonItemsRenderer.composeOrientation(horizon, zone, refs = refs)
             "Contextual awareness — background orientation from $memoryOf:\n" +
                 (frame?.let { "$it\n\n" } ?: "") +
                 if (items.isEmpty()) "(Nothing is in view: no focus, no open items, no recent reports. This says nothing about what is in memory.)" else grouped(items)

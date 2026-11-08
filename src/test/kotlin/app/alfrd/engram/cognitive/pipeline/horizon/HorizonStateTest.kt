@@ -75,6 +75,13 @@ class HorizonStateTest {
         runBlocking { structure.setState(user, 2, uid, state, nudge?.let { TimeValue(daysFromNow(it)) }, waitingOn) }
     private fun get(user: String, uid: String) = runBlocking { structure.getItem(user, uid)!! }
 
+    /** Evidence is stamped with the real clock; these tests run on a made-up one, so say when each item was last confirmed. */
+    private fun evidence(uid: String, at: Long) {
+        val db = dbManager.getDatabase()
+        db.transaction { db.command("sql", "UPDATE Phrase SET lastEvidenceAt = :a WHERE uid = :u", mapOf("a" to at, "u" to uid)) }
+    }
+    private fun fresh(vararg items: ItemRecord) = items.forEach { evidence(it.uid, now) }
+
     // ── Migration: existing items keep their meaning ─────────────────────────
 
     @Test
@@ -237,10 +244,11 @@ class HorizonStateTest {
     fun `overdue is for open and active items only`() {
         val user = newUser()
         val demo = project(user, "Demo")
-        task(user, "Open and late", due = -4.0)
+        val open = task(user, "Open and late", due = -4.0)
         val active = task(user, "Active and late", due = -4.0); setState(user, active.uid, WorkState.ACTIVE)
         // A waiting item that is in view (its project is focused) is not called overdue.
-        task(user, "Waiting and late", demo, due = -4.0, extras = ItemExtras(state = WorkState.WAITING, waitingOn = "Sam"))
+        val waiting = task(user, "Waiting and late", demo, due = -4.0, extras = ItemExtras(state = WorkState.WAITING, waitingOn = "Sam"))
+        fresh(open, active, waiting)
         runBlocking { structure.setFocus(user, 2, demo.uid, FocusMode.PINNED) }
 
         val h = view(user)

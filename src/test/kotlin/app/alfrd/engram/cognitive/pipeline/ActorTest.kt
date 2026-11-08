@@ -177,7 +177,7 @@ class ActorTest {
         )
         assertEquals(
             listOf(
-                "In \"Meridian demo\" (project) — what they are focused on",
+                "In \"Meridian demo\" (project) — what they are focused on (Open)",
                 "In \"Garden\" (project)",
                 "Not filed under any project",
                 "Reported from outside this conversation",
