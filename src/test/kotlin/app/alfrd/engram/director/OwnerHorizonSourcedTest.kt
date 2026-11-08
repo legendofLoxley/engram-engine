@@ -278,22 +278,23 @@ class OwnerHorizonSourcedTest {
     }
 
     @Test
-    fun `with many containers a shown project always has its parent shown, and refs stay bounded`() {
+    fun `every domain and project has a ref however many there are, and a project's parent is always shown`() {
         val structure = ArcadeHorizonStructureStore(manager.getDatabase())
         val mail = DebugConverseService.resolveUserId("owner-many")
         val db = manager.getDatabase()
         db.transaction { db.newVertex("User").apply { set("uid", UUID.randomUUID().toString()); set("username", "owner-many"); set("email", mail); set("tier", -1); set("createdAt", 1L); set("updatedAt", 1L); save() } }
         runBlocking {
-            // Four domains, each with five projects, the projects created interleaved so the newest 15 containers span every domain.
+            // Four domains, each with six projects: 28 containers, twice the old cap of 15.
             val domains = (1..4).map { structure.createContainer(mail, 1, ContainerKind.DOMAIN, "Domain $it", null, tentative = false)!! }
-            for (p in 1..5) for ((d, dom) in domains.withIndex()) structure.createContainer(mail, 1, ContainerKind.PROJECT, "Project ${d + 1}.$p", dom.uid, tentative = false)
+            for (p in 1..6) for ((d, dom) in domains.withIndex()) structure.createContainer(mail, 1, ContainerKind.PROJECT, "Project ${d + 1}.$p", dom.uid, tentative = false)
             val snap = ViewSnapshotBuilder(structure).build(mail, zone)
-            assertTrue(snap.containers.size <= 15, "bounded: ${snap.containers.size}")
+            assertEquals(28, snap.containers.size, "every container has a ref")
+            assertEquals(28, snap.containers.map { it.ref }.toSet().size)
             val shown = snap.containers.associateBy { it.ref }
             snap.containers.filter { it.kind == ContainerKind.PROJECT }.forEach { p ->
                 assertNotNull(p.parentRef, "${p.name} lost its parent"); assertEquals(ContainerKind.DOMAIN, shown.getValue(p.parentRef!!).kind)
             }
-            // Under the cap nothing changes: all of it is shown, domains first.
+            assertTrue(snap.containers.any { it.name == "Project 1.1" }, "the oldest project is still there")
             val small = DebugConverseService.resolveUserId("owner-few")
             db.transaction { db.newVertex("User").apply { set("uid", UUID.randomUUID().toString()); set("username", "owner-few"); set("email", small); set("tier", -1); set("createdAt", 1L); set("updatedAt", 1L); save() } }
             val d = structure.createContainer(small, 1, ContainerKind.DOMAIN, "Home", null, tentative = false)!!
@@ -301,5 +302,67 @@ class OwnerHorizonSourcedTest {
             val few = ViewSnapshotBuilder(structure).build(small, zone)
             assertEquals(listOf("Home", "Garden"), few.containers.map { it.name }); assertNull(few.containers[0].parentRef); assertEquals("c1", few.containers[1].parentRef)
         }
+    }
+
+    // ── Dedup is scoped to the source ────────────────────────────────────────
+
+    private fun sourceFor(id: String, title: String, text: String) = source(text, id, title)
+
+    private fun taskFrom(id: String, quote: String, title: String, due: String? = null) =
+        """{"verb":"record_item","source":"$id","kind":"task","quote":${q(quote)},"title":${q(title)}${due?.let { ""","due":"$it"""" } ?: ""}}"""
+
+    @Test
+    fun `similar items from two different sources stay separate, and the first one's date does not move`() = app { c ->
+        val a = "aaaa0000-0000-0000-0000-00000000000a"; val b = "bbbb0000-0000-0000-0000-00000000000b"
+        val textA = "# Tracker A\n\nStatus: Open; Priority: High; Ship the quarterly budget report to finance."
+        val textB = "# Tracker B\n\nStatus: Open; Priority: Low; Ship the quarterly budget report to finance."
+        val ra = c.send(null, "[${taskFrom(a, "Ship the quarterly budget report to finance", "Ship budget report", "2026-12-01")}]", sourceFor(a, "Tracker A", textA))
+        assertTrue(ra.applied(0), ra.toString())
+        val rb = c.send(null, "[${taskFrom(b, "Ship the quarterly budget report to finance", "Ship budget report", "2026-12-20")}]", sourceFor(b, "Tracker B", textB))
+        assertTrue(rb.applied(0), rb.toString())
+        assertTrue(rb.detail(0).startsWith("Recorded task"), "a new item, not a merge: ${rb.detail(0)}")
+        val rows = manager.getDatabase().query("sql", "SELECT text, dueAt FROM Task WHERE text = 'Ship budget report'").use { rs ->
+            generateSequence { if (rs.hasNext()) rs.next().toMap() else null }.toList()
+        }
+        assertEquals(2, rows.size, "two items")
+        assertEquals(2, rows.map { it["dueAt"] }.toSet().size, "each keeps its own date")
+        // The two items each point at their own source.
+        val srcs = manager.getDatabase().query("sql", "SELECT @in.sourceUid AS s FROM QUOTES WHERE @out.text = 'Ship budget report'").use { rs ->
+            generateSequence { if (rs.hasNext()) rs.next().toMap()["s"] as String else null }.toSet()
+        }
+        assertEquals(2, srcs.size)
+    }
+
+    @Test
+    fun `a sourced operation never merges into something the owner said`() = app { c ->
+        val id = "cccc0000-0000-0000-0000-00000000000c"
+        c.send("I need to file the annual tax return.", """[{"verb":"record_item","kind":"task","quote":"I need to file the annual tax return"}]""")
+        val r = c.send(null, "[${taskFrom(id, "File the annual tax return", "File annual tax return", "2026-04-15")}]", sourceFor(id, "Admin list", "# Admin\n\nFile the annual tax return by April."))
+        assertTrue(r.applied(0), r.toString())
+        assertTrue(r.detail(0).startsWith("Recorded task"), r.detail(0))
+        val types = manager.getDatabase().query("sql", "SELECT @out.type AS t FROM ASSERTS WHERE @in.text LIKE '%tax return%'").use { rs ->
+            generateSequence { if (rs.hasNext()) rs.next().getProperty<String>("t") else null }.toList().sorted()
+        }
+        assertEquals(listOf("channel_sourced", "claude_session"), types)
+    }
+
+    @Test
+    fun `a repeat from the same source is the same item, and a different date is reported, not applied`() = app { c ->
+        val id = "dddd0000-0000-0000-0000-00000000000d"
+        val text = "# Plan\n\nRenew the domain registration by March.\n\nRenew domain registration, due in April."
+        val first = c.send(null, "[${taskFrom(id, "Renew the domain registration by March", "Renew domain registration", "2026-03-31")}]", sourceFor(id, "Plan", text))
+        assertTrue(first.applied(0), first.toString())
+        // The very same item again with another date: idempotent, and the difference is reported.
+        val replay = c.send(null, "[${taskFrom(id, "Renew the domain registration by March", "Renew domain registration", "2026-04-30")}]")
+        assertTrue(replay.applied(0) && replay.detail(0).startsWith("Already recorded from this source"), replay.detail(0))
+        assertTrue(replay.detail(0).contains("the source gives a different date") && replay.detail(0).contains("the date was not changed"), replay.detail(0))
+        // Another wording of it from the same source: matched to the same item, the date reported and not moved.
+        val again = c.send(null, "[${taskFrom(id, "Renew domain registration, due in April", "Renew the domain registration", "2026-04-30")}]")
+        assertTrue(again.applied(0), again.toString())
+        assertTrue(again.detail(0).startsWith("Already on the list"), again.detail(0))
+        assertTrue(again.detail(0).contains("the source gives a different date") && again.detail(0).contains("the date was not changed"), again.detail(0))
+        val due = manager.getDatabase().query("sql", "SELECT dueAt FROM Task WHERE text = 'Renew domain registration'").use { rs -> rs.asSequence().map { it.getProperty<Number>("dueAt").toLong() }.toList() }
+        assertEquals(1, due.size)
+        assertEquals(java.time.LocalDate.parse("2026-03-31").plusDays(1).atStartOfDay(zone).minusNanos(1_000_000).toInstant().toEpochMilli(), due[0], "the date did not move")
     }
 }

@@ -123,6 +123,8 @@ data class SnapshotItem(
     val projectRef: String?,
     val about: List<String>,
     val attention: AttentionDirective?,
+    /** A suppressed item of the focused project, listed apart under "Hidden (suppressed)" so it can be restored by ref. */
+    val hidden: Boolean = false,
 )
 
 /**
@@ -169,17 +171,22 @@ data class ViewSnapshot(
                 append(")\n")
             }
         }
-        if (items.isNotEmpty()) {
+        fun line(i: SnapshotItem) {
+            append("  ${i.ref} ${i.kind.name.lowercase()} \"${i.text.replace('"', '\'').take(ITEM_TEXT_CAP)}\"")
+            i.projectRef?.let { append(" [in $it]") }
+            i.dueAt?.let { append(" due ${java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate()}") }
+            if (i.status == "resolved") append(" (resolved)")
+            if (i.about.isNotEmpty()) append(" (about: ${i.about.joinToString(", ")})")
+            i.attention?.let { append(" (${it.name.lowercase()})") }
+            append('\n')
+        }
+        if (items.any { !it.hidden }) {
             append("Items:\n")
-            items.forEach { i ->
-                append("  ${i.ref} ${i.kind.name.lowercase()} \"${i.text.replace('"', '\'').take(ITEM_TEXT_CAP)}\"")
-                i.projectRef?.let { append(" [in $it]") }
-                i.dueAt?.let { append(" due ${java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate()}") }
-                if (i.status == "resolved") append(" (resolved)")
-                if (i.about.isNotEmpty()) append(" (about: ${i.about.joinToString(", ")})")
-                i.attention?.let { append(" (${it.name.lowercase()})") }
-                append('\n')
-            }
+            items.filter { !it.hidden }.forEach { line(it) }
+        }
+        if (items.any { it.hidden }) {
+            append("Hidden (suppressed; set_attention normal brings one back):\n")
+            items.filter { it.hidden }.forEach { line(it) }
         }
         pendingFilingRef?.let { ref ->
             append("Pending: last turn the user was asked which project $ref belongs to. If their message answers that, use file_item on $ref.\n")
