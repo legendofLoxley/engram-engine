@@ -27,6 +27,26 @@ object DirectorPromptRenderer {
         append('\n')
     }
 
+    /** Opening of the channel rendering: a description of what follows, with provenance guidance for a reader; no identity or role. */
+    internal const val CHANNEL_PREAMBLE =
+        "alfrd Horizon for the owner, as read by a channel. Below: alfrd's own situation, what changed in memory, and what the Context Horizon " +
+            "brings into view. The Horizon is a selection, not an exhaustive inventory; missing evidence does not mean something never happened. " +
+            "Each item keeps its own source, uncertainty and status; something a document or Hermes reported is not the owner's commitment " +
+            "unless the owner adopted it."
+
+    /**
+     * The same situation and Horizon as [render], opened with [CHANNEL_PREAMBLE] instead of the Director's policy. Used only by the owner's
+     * Horizon tool: the channel reading it is Claude and stays itself; alfrd is the memory behind it.
+     */
+    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant): String = buildString {
+        append(CHANNEL_PREAMBLE)
+        append("\n\n")
+        append(situation(state, zone))
+        append("\n\n")
+        append(horizonSection(horizon, zone, now))
+        append('\n')
+    }
+
     fun situation(s: SelfState, zone: ZoneId): String = buildString {
         appendLine("Your situation:")
         appendLine("- Tick: ${if (s.tickEnabled) "enabled" else "disabled"}, every ${s.intervalSeconds} s; this one at ${stamp.format(Instant.parse(s.tickAt).atZone(zone))} (${s.renderReason}).")
