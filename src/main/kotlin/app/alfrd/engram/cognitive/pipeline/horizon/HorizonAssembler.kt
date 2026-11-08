@@ -120,9 +120,11 @@ class ArcadeHorizonAssembler(
     private val db: Database,
     private val lockTimeoutMs: Long = HorizonConsistencyLock.DEFAULT_TIMEOUT_MS,
     /** Every tunable behind what is in view. See [HorizonPolicy]. */
-    private val policy: HorizonPolicy = HorizonPolicy(),
+    private val policy: HorizonPolicy = HorizonPolicy.fromEnvironment(),
     /** Wall-clock milliseconds. Deadlines are judged against this at read time; injected so a test can move time. */
     private val clock: () -> Long = System::currentTimeMillis,
+    /** The user's zone: "today" and "tomorrow" in the also-due windows are calendar days here. */
+    private val zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
 ) : HorizonAssembler {
 
     private val logger = LoggerFactory.getLogger(ArcadeHorizonAssembler::class.java)
@@ -208,8 +210,12 @@ class ArcadeHorizonAssembler(
                     // these two paths while correctly failing for a populated one — inconsistent
                     // behavior depending only on whether the user happened to have data.
                     var moreCandidatesAvailable = false
-                    val prioritized: List<HorizonItem>
+                    var prioritized: List<HorizonItem>
+                    var focusMemberCount = 0
                     var containerViews: List<HorizonContainerView> = emptyList()
+                    var alsoDue: List<AlsoDueEntry> = emptyList()
+                    var alsoDueMore = 0
+                    var hidden: List<HiddenEntry> = emptyList()
                     var focusRef: HorizonFocusRef? = null
                     var zoomLevel = FocusZoom.OVERVIEW
                     if (sourceUids.isEmpty()) {
@@ -274,7 +280,8 @@ class ArcadeHorizonAssembler(
                         val selection = HorizonSelector(db, policy).select(userEmail, currentCycleSeq, now, freshPool.map { it.phraseUid })
                         // More was offered than the pool takes, or the selector's own scans hit a bound: say so, never silently.
                         if (selection.truncated || selection.activations.size > poolLimit) moreCandidatesAvailable = true
-                        val selectorPicks = selection.activations.values.sortedByDescending { it.score }.take(poolLimit)
+                        // A focused project is listed in full (grouped by state), so its members get room beyond the pool.
+                        val selectorPicks = selection.activations.values.sortedByDescending { it.score }.take(poolLimit + if (selection.focus?.kind == "project") policy.focusItemCap else 0)
                         for (pick in selectorPicks) {
                             if (byUid.containsKey(pick.uid)) continue
                             // Ownership is proved here: an item is admitted only if one of the user's own Sources asserts it.
@@ -308,7 +315,7 @@ class ArcadeHorizonAssembler(
                                 val inFocusedProject = focusUid != null && (state.container?.uid == focusUid || state.containerParentUid == focusUid)
                                 if (!StateRules.visible(state.workState, state.nudgeAt, inFocusedProject, now)) return@mapNotNull null
                             }
-                            rank(c, state, selection, reactivationResult.infoByTargetUid[c.phraseUid], currentCycleSeq, c.phraseUid in actorUids, c.phraseUid in envUids)
+                            rank(c, state, selection, reactivationResult.infoByTargetUid[c.phraseUid], currentCycleSeq, c.phraseUid in actorUids, c.phraseUid in envUids, now)
                         }.filter { it.item.score >= policy.visibilityFloor }
 
                         // Reports from outside the conversation may come in, but only in a few slots.
@@ -320,6 +327,15 @@ class ArcadeHorizonAssembler(
                         containerViews = selection.containers
                         focusRef = selection.focus
                         zoomLevel = selection.zoom
+                        val (due, more) = alsoDueEntries(userEmail, now)
+                        alsoDue = due; alsoDueMore = more
+                        focusRef?.takeIf { it.kind == "project" }?.let { hidden = hiddenEntries(userEmail, it.uid) }
+                        // Focused on a project, all its items are listed (bounded), ahead of the rest, which keep the budget they always had.
+                        focusRef?.takeIf { it.kind == "project" }?.let { f ->
+                            val members = prioritized.filter { it.container?.uid == f.uid }.take(policy.focusItemCap)
+                            focusMemberCount = members.size
+                            prioritized = members + prioritized.filterNot { it in members }
+                        }
                     }
 
                     // Enforce the actual serialized-output byte budget, not just item count —
@@ -330,11 +346,12 @@ class ArcadeHorizonAssembler(
                     // omittedSample/omittedAtLeast — never silently discarded — until the encoded
                     // payload fits. If even zero items doesn't fit, budgetExceeded signals the outer
                     // scope to return AssembleOutcome.BudgetExceeded instead of an oversized result.
-                    var keptCount = minOf(budget.maxItems, prioritized.size)
-                    var built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable, zoomLevel, focusRef, containerViews)
+                    var keptCount = minOf(budget.maxItems + focusMemberCount, prioritized.size)
+                    val tail = Triple(alsoDue, alsoDueMore, hidden)
+                    var built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable, zoomLevel, focusRef, containerViews, tail)
                     while (encodedByteSize(built) > byteBudget && keptCount > 0) {
                         keptCount--
-                        built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable, zoomLevel, focusRef, containerViews)
+                        built = buildHorizon(userEmail, now, budget, prioritized, keptCount, moreCandidatesAvailable, zoomLevel, focusRef, containerViews, tail)
                     }
                     if (encodedByteSize(built) > byteBudget) {
                         budgetExceeded = true
@@ -364,6 +381,7 @@ class ArcadeHorizonAssembler(
     private fun buildHorizon(
         userEmail: String, now: Long, budget: HorizonBudget, prioritized: List<HorizonItem>, keptCount: Int, moreCandidatesAvailable: Boolean,
         zoom: FocusZoom, focus: HorizonFocusRef?, containers: List<HorizonContainerView>,
+        extra: Triple<List<AlsoDueEntry>, Int, List<HiddenEntry>> = Triple(emptyList(), 0, emptyList()),
     ): ContextHorizon {
         val kept = prioritized.take(keptCount)
         val inView = kept.mapNotNull { it.container?.uid }.groupingBy { it }.eachCount()
@@ -383,7 +401,61 @@ class ArcadeHorizonAssembler(
             zoom = zoom,
             focus = focus,
             containers = containers.map { it.copy(itemsInView = inView[it.uid] ?: 0) },
+            alsoDue = extra.first,
+            alsoDueMore = extra.second,
+            hidden = extra.third,
         )
+    }
+
+    /**
+     * The deadlines that break through whatever the focus is: hard ones due within [HorizonPolicy.alsoDueHardDays] calendar days (and any hard one
+     * overdue), and soft ones due today or within [HorizonPolicy.alsoDueSoftDays] more day(s). Open and active items only; a waiting item only once its
+     * check-in date has arrived; never done, dropped, suppressed, or in a project that is done or silenced. Hard overdue first, then by date, at
+     * most [HorizonPolicy.alsoDueMaxLines]; the second value is how many more qualified.
+     */
+    private fun alsoDueEntries(userEmail: String, now: Long): Pair<List<AlsoDueEntry>, Int> {
+        val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+        fun endOfDay(date: java.time.LocalDate) = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        val hardEnd = endOfDay(today.plusDays(policy.alsoDueHardDays))
+        val softEnd = endOfDay(today.plusDays(policy.alsoDueSoftDays))
+        val found = LinkedHashMap<String, AlsoDueEntry>()
+        for (type in listOf("Task", "Event")) {
+            val property = if (type == "Event") "occursAt" else "dueAt"
+            db.query("sql", "SELECT FROM $type WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.urgencyScanLimit}", mapOf("e" to userEmail)).use { rs ->
+                while (rs.hasNext()) {
+                    val v = rs.next().toElement().asVertex()
+                    val uid = v.get("uid") as? String ?: continue
+                    if (uid in found) continue
+                    val raw = (v.get(property) as? Number)?.toLong() ?: continue
+                    val hasTime = v.get("dueHasTime") == true
+                    // A date-only event is stored at the start of its day; it is happening today until the day is over.
+                    val dueAt = if (type == "Event" && !hasTime) endOfDay(java.time.Instant.ofEpochMilli(raw).atZone(zone).toLocalDate()) - 1 else raw
+                    val state = WorkState.of(v.get("state") as? String, v.get("status") as? String)
+                    val nudgeAt = (v.get("nudgeAt") as? Number)?.toLong()
+                    if (!StateRules.visible(state, nudgeAt, inFocusedProject = false, now = now)) continue
+                    if (v.get("attention") == AttentionDirective.SUPPRESSED.name.lowercase()) continue
+                    val project = v.getVertices(com.arcadedb.graph.Vertex.DIRECTION.OUT, "PART_OF").firstOrNull { it.typeName == "Project" }
+                    if (project != null && (project.get("status") != "active" || project.get("attention") == AttentionDirective.SUPPRESSED.name.lowercase())) continue
+                    val hard = DueKind.fromWire(v.get("dueKind") as? String) == DueKind.HARD
+                    val overdue = dueAt < now
+                    val qualifies = if (hard) dueAt < hardEnd && (type == "Task" || !overdue) else !overdue && dueAt < softEnd
+                    if (!qualifies) continue
+                    found[uid] = AlsoDueEntry(uid, (v.get("text") as? String ?: "").take(HorizonLimits.MAX_CONTAINER_NAME_LENGTH * 2), dueAt, if (hard) "hard" else "soft", hasTime, overdue)
+                }
+            }
+        }
+        val ordered = found.values.sortedWith(compareByDescending<AlsoDueEntry> { it.overdue && it.dueKind == "hard" }.thenBy { it.dueAt })
+        return ordered.take(policy.alsoDueMaxLines) to maxOf(0, ordered.size - policy.alsoDueMaxLines)
+    }
+
+    /** The suppressed, unfinished items of a focused project, so the way back from suppression is visible. */
+    private fun hiddenEntries(userEmail: String, projectUid: String): List<HiddenEntry> {
+        val project = db.query("sql", "SELECT FROM Project WHERE uid = :u AND ownerEmail = :e", mapOf("u" to projectUid, "e" to userEmail))
+            .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null } ?: return emptyList()
+        return project.getVertices(com.arcadedb.graph.Vertex.DIRECTION.IN, "PART_OF")
+            .filter { it.get("attention") == AttentionDirective.SUPPRESSED.name.lowercase() && it.get("status") != "resolved" && it.get("claimSourceUid") == null }
+            .mapNotNull { v -> (v.get("uid") as? String)?.let { HiddenEntry(it, (v.get("text") as? String ?: "").take(HorizonLimits.MAX_CONTAINER_NAME_LENGTH * 2)) } }
+            .distinctBy { it.uid }.take(policy.hiddenItemCap)
     }
 
     /** The real encoded byte size [assemble] enforces its budget against — not a hand-derived estimate. */
@@ -720,6 +792,7 @@ class ArcadeHorizonAssembler(
         currentCycleSeq: Long,
         fromActor: Boolean,
         fromEnvironment: Boolean,
+        now: Long,
     ): Ranked? {
         val activation = selection.activations[c.phraseUid]
         val parts = mutableListOf<ScoreComponent>()
@@ -738,6 +811,7 @@ class ArcadeHorizonAssembler(
             "focus" -> SurfacingReason.InFocus(selection.focus?.name, selection.zoom, activation?.hops ?: 0)
             "urgency" -> SurfacingReason.Urgent(activation?.dueAt ?: state?.dueAt ?: 0L, activation?.overdue ?: false)
             "checkin" -> SurfacingReason.CheckIn(state?.nudgeAt ?: 0L)
+            "active" -> SurfacingReason.InProgress
             "nudge", "spread" -> SurfacingReason.Activated(primary.detail ?: activation?.via ?: "mentioned", activation?.hops ?: 0)
             "peripheral" -> if (fromEnvironment) SurfacingReason.Peripheral(c.cycleSeq) else SurfacingReason.RecentActorEvidence(c.cycleSeq)
             else -> SurfacingReason.DormantOpen(c.statusCycleSeq ?: c.cycleSeq)
@@ -769,6 +843,10 @@ class ArcadeHorizonAssembler(
             waitingOn = state?.waitingOn,
             nudgeAt = state?.nudgeAt,
             stateFromSource = state?.stateFromSource == true,
+            lastEvidenceAt = state?.evidenceAt?.takeIf { it > 0L },
+            // Asked about, not alarmed over: an open or active item that is past due and that nothing has confirmed for a long while.
+            stale = state != null && StateRules.canBeOverdue(state.workState) && state.dueAt != null && state.dueAt < now &&
+                state.evidenceAt > 0L && now - state.evidenceAt > policy.staleEvidenceDays * 86_400_000L,
         )
         // Ties keep the order the pools always gave them: by the cycle the thing that surfaced it happened in.
         val tie = when (surfacing) {
@@ -849,5 +927,6 @@ class ArcadeHorizonAssembler(
         is SurfacingReason.Urgent -> "urgent"
         is SurfacingReason.Peripheral -> "peripheral"
         is SurfacingReason.CheckIn -> "check-in"
+        is SurfacingReason.InProgress -> "in progress"
     }
 }

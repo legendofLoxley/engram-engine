@@ -29,8 +29,16 @@ class StandingContext(
 ) {
     data class Rendered(val text: String, val outcome: AssembleOutcome, val state: SelfState)
 
-    suspend fun render(marker: ChangeMarker, changes: List<ChangeMarker.Change>, reason: String, now: Instant, cycleSeq: Long, forChannel: Boolean = false): Rendered {
+    /**
+     * [refsFor], when given, is shown the assembled Horizon and returns the short ref of each phrase uid it will let the reader name (the owner's tool
+     * builds its snapshot there, so the refs printed beside a stale question or an also-due line are the very ones the snapshot lists).
+     */
+    suspend fun render(
+        marker: ChangeMarker, changes: List<ChangeMarker.Change>, reason: String, now: Instant, cycleSeq: Long, forChannel: Boolean = false,
+        refsFor: suspend (AssembleOutcome) -> Map<String, String> = { emptyMap() },
+    ): Rendered {
         val outcome = assembler.assemble(email, cycleSeq)
+        val refs = refsFor(outcome)
         val state = SelfState(
             tickEnabled = tickEnabled,
             intervalSeconds = intervalSeconds,
@@ -44,8 +52,8 @@ class StandingContext(
             marker = marker,
             changes = changes,
         )
-        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now)
-        else DirectorPromptRenderer.render(state, outcome, zone, now)
+        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs)
+        else DirectorPromptRenderer.render(state, outcome, zone, now, refs)
         return Rendered(text, outcome, state)
     }
 }

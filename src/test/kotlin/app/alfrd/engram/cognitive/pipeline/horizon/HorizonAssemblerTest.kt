@@ -1150,7 +1150,7 @@ class HorizonAssemblerTest {
             is SurfacingReason.DormantOpen -> s.lastStatusChangeCycleSeq
             // Reasons the structured selection adds; none of these tests builds the structure that produces them.
             is SurfacingReason.Pinned, is SurfacingReason.InFocus, is SurfacingReason.Activated,
-            is SurfacingReason.Urgent, is SurfacingReason.Peripheral, is SurfacingReason.CheckIn -> item.sourceRefs.first().cycleSeq
+            is SurfacingReason.Urgent, is SurfacingReason.Peripheral, is SurfacingReason.CheckIn, is SurfacingReason.InProgress -> item.sourceRefs.first().cycleSeq
         }
         listOf(item.sourceRefs.first().phraseUid, item.category, item.status, cycleSeq)
     }.toSet()

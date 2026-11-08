@@ -369,6 +369,11 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             )
         }
 
+        /** `confirm_item`: "yes, still live" - refreshes when the item was last confirmed and changes nothing else. */
+        private val CONFIRM_ITEM_VARIANT: JsonObject = variant("confirm_item", listOf("item", "quote")) {
+            mapOf("item" to str("Ref of a task, event or question the owner says is still live."), "quote" to QUOTE)
+        }
+
         private fun extend(base: JsonObject, extra: Map<String, JsonObject>): JsonObject = buildJsonObject {
             base.forEach { (k, v) ->
                 if (k == "properties") putJsonObject("properties") { (v as JsonObject).forEach { (pk, pv) -> put(pk, pv) }; extra.forEach { (pk, pv) -> put(pk, pv) } } else put(k, v)
@@ -411,7 +416,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         when (verbOf(v)) {
                             "record_item" -> add(OWNER_RECORD_VARIANT)
                             "correct_item" -> add(OWNER_CORRECT_VARIANT)
-                            "reopen_item" -> { add(v); add(SET_STATE_VARIANT) }
+                            "reopen_item" -> { add(v); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT) }
                             else -> add(v)
                         }
                     }

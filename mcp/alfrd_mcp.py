@@ -58,6 +58,11 @@ precision you give (a date, or a date and time). Done and dropped items never sh
 in focus or its nudge date has arrived; overdue applies only to open and active items. From a document, a record_item may set `state` and
 `due_kind`, which then read as the document's claim, not the owner's. When a Notion status maps: Not Reviewed and Approved = open, In Progress =
 active, External = waiting, Completed = done, Cancelled = dropped.
+
+An open or active item whose due date has passed and which nothing has confirmed for a while (14 days by default) shows as a question ("? ...
+Still live?") rather than an alarm; a hard deadline stays overdue with a no-evidence note. Answer with set_state done or dropped, correct_item
+for a new date, or `confirm_item` (item, quote) for "yes, still live", which only refreshes when it was last confirmed. Pinning or suppressing
+is not confirmation. "Also due" lists hard deadlines within 3 days (or overdue) and soft ones due today or tomorrow, whatever the focus.
 """
 
 mcp = FastMCP("alfrd", instructions="alfrd's memory Horizon. One tool: horizon.")

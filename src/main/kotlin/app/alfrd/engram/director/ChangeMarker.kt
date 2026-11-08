@@ -72,8 +72,14 @@ class ChangeMarkerReader(private val db: Database) {
         }
         val sourceUids = (trusted + owned).distinct()
 
+        // Distinct vertices, not rows: the owner-indexed scan of a Phrase subtype returns an item once per index entry it has had, so
+        // count(*) over it reported 56 for 11 real tasks and moved when an item was merely updated. A uid is one vertex.
         fun count(type: String): Long =
-            db.query("sql", "SELECT count(*) AS n FROM $type WHERE ownerEmail = :e", params).use { rs -> if (rs.hasNext()) rs.next().getProperty<Number>("n").toLong() else 0L }
+            db.query("sql", "SELECT uid FROM $type WHERE ownerEmail = :e", params).use { rs ->
+                val uids = HashSet<String>()
+                while (rs.hasNext()) rs.next().getProperty<String>("uid")?.let(uids::add)
+                uids.size.toLong()
+            }
         fun max(type: String, field: String): Long? =
             db.query("sql", "SELECT max($field) AS m FROM $type WHERE ownerEmail = :e", params).use { rs -> if (rs.hasNext()) rs.next().getProperty<Number?>("m")?.toLong() else null }
 

@@ -558,8 +558,11 @@ class HorizonScenarioTest {
 
         val h = view(user, policy = HorizonPolicy(maxExpansions = 20))
 
-        assertTrue(h.items.size <= 12)
-        assertTrue(h.moreCandidatesAvailable || h.items.size <= 12, "the cap is reported, never silently lost")
+        // The budget is 12; a focused project is listed in full beyond it, but to its own cap, however many tasks it holds.
+        val bound = 12 + HorizonPolicy().focusItemCap
+        assertTrue(h.items.size <= bound, "${h.items.size} items")
+        assertTrue(h.items.size >= 12)
+        assertTrue(h.moreCandidatesAvailable || h.items.size <= bound, "the cap is reported, never silently lost")
     }
 
     // ── Still open, in no project ────────────────────────────────────────────

@@ -4,6 +4,7 @@ import app.alfrd.engram.api.DebugConverseService
 import app.alfrd.engram.cognitive.pipeline.agentwork.NotionCycleStartup
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.horizon.AppliedOperation
+import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
@@ -19,6 +20,7 @@ import app.alfrd.engram.db.SourceStore
 import app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPropagator
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonStructureStore
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonSeeder
 import app.alfrd.engram.cognitive.pipeline.horizon.OperationParser
 import app.alfrd.engram.cognitive.pipeline.horizon.PerUserCycleLock
@@ -92,6 +94,8 @@ class OwnerHorizonService(
     private val propagator: HorizonPropagator,
     private val sourceStore: SourceStore = SourceStore(db),
     private val zone: ZoneId = ZoneId.systemDefault(),
+    /** Stamps the evidence of items a re-sent document still says. */
+    private val structure: HorizonStructureStore = ArcadeHorizonStructureStore(db),
     private val clock: () -> Instant = Instant::now,
 ) {
     private val logger = LoggerFactory.getLogger(OwnerHorizonService::class.java)
@@ -106,8 +110,8 @@ class OwnerHorizonService(
 
     private suspend fun read(): OwnerHorizonResponse {
         val marker = markerOrThrow()
-        val rendered = standing.render(marker, emptyList(), "Horizon tool", clock(), marker.lastCycleSeq + 1, forChannel = true)
-        return OwnerHorizonResponse(rendered.text, refs(), null, emptyList())
+        val (rendered, refsText) = renderStanding(marker, emptyList(), marker.lastCycleSeq + 1)
+        return OwnerHorizonResponse(rendered.text, refsText, null, emptyList())
     }
 
     private suspend fun write(text: String?, sent: JsonArray, supplied: JsonArray): OwnerHorizonResponse {
@@ -116,9 +120,9 @@ class OwnerHorizonService(
         val sourceReports = if (supplied.isEmpty()) emptyList() else storeSources(supplied)
         if (text == null && sent.isEmpty()) {
             val after = markerOrThrow()
-            val rendered = standing.render(after, after.changesSince(before), "Horizon tool", clock(), after.lastCycleSeq + 1, forChannel = true)
+            val (rendered, refsText) = renderStanding(after, after.changesSince(before), after.lastCycleSeq + 1)
             logger.info("owner-horizon: sources={} stored={}", sourceReports.size, sourceReports.count { it.stored })
-            return OwnerHorizonResponse(rendered.text, refs(), null, emptyList(), sourceReports)
+            return OwnerHorizonResponse(rendered.text, refsText, null, emptyList(), sourceReports)
         }
         val cycleSeq = sequencer.allocateCycle(email) ?: throw OwnerHorizonUnavailable("could not allocate a cycle")
         if (text != null) recordUtterance(text, cycleSeq)
@@ -183,12 +187,12 @@ class OwnerHorizonService(
         }
 
         val after = markerOrThrow()
-        val rendered = standing.render(after, after.changesSince(before), "Horizon tool", clock(), cycleSeq, forChannel = true)
+        val (rendered, refsText) = renderStanding(after, after.changesSince(before), cycleSeq)
         logger.info(
             "owner-horizon: cycle={} message={} operations={} applied={} sources={} sourced={}",
             cycleSeq, text != null, reports.size, reports.count { it.applied }, sourceReports.size, sourcedApplied.count { it.applied },
         )
-        return OwnerHorizonResponse(rendered.text, refs(), cycleSeq, reports, sourceReports)
+        return OwnerHorizonResponse(rendered.text, refsText, cycleSeq, reports, sourceReports)
     }
 
     // ── Sources a channel supplies ───────────────────────────────────────────
@@ -229,6 +233,7 @@ class OwnerHorizonService(
                                 ),
                             )
                             val changed = sourceStore.markCurrent(email, result.source.uid)
+                            confirmItemsFrom(result.source.uid, joined)
                             OwnerSourceReport(
                                 rawId, title, true,
                                 when {
@@ -249,6 +254,18 @@ class OwnerHorizonService(
                 }
             }
         }
+    }
+
+    /**
+     * A document sent again, unchanged or not, confirms what was filed from it: every item that quotes any stored version of this page, and whose
+     * quoted passage is still in the text just sent, has its evidence refreshed. An item whose passage is gone is left as it was.
+     */
+    private suspend fun confirmItemsFrom(sourceUid: String, text: String) {
+        val wanted = SourceChunker.normalize(text)
+        val items = sourceStore.itemsQuotedFrom(email, sourceStore.versionsOf(email, sourceUid))
+            .filter { (_, quote) -> quote.isNullOrBlank() || wanted.contains(SourceChunker.normalize(quote)) }
+            .map { it.first }.distinct()
+        for (uid in items) structure.touchEvidence(email, 0L, uid)
     }
 
     private sealed interface SourcedPlan {
@@ -309,6 +326,22 @@ class OwnerHorizonService(
     /** A Notion page id is the same page with or without dashes and in any case; other ids are kept as sent. */
     private fun locatorOf(id: String): String =
         id.trim().replace("-", "").takeIf { it.length == 32 && it.all { c -> c.isDigit() || c.lowercaseChar() in 'a'..'f' } }?.lowercase() ?: id.trim()
+
+    /**
+     * The standing Horizon and the refs listing built together: the snapshot is made once the Horizon is assembled, with everything the Horizon shows
+     * included, so a ref printed beside an also-due line or a stale question is the one the listing gives it.
+     */
+    private suspend fun renderStanding(marker: ChangeMarker, changes: List<ChangeMarker.Change>, cycleSeq: Long): Pair<StandingContext.Rendered, String> {
+        var snapshot: ViewSnapshot? = null
+        val rendered = standing.render(marker, changes, "Horizon tool", clock(), cycleSeq, forChannel = true) { outcome ->
+            val shown = (outcome as? AssembleOutcome.Assembled)?.horizon?.let { h ->
+                h.items.mapNotNull { it.sourceRefs.firstOrNull()?.phraseUid } + h.alsoDue.map { it.uid } + h.hidden.map { it.uid }
+            }.orEmpty()
+            snapshot = try { snapshots.build(email, zone, include = shown) } catch (e: Exception) { null }
+            snapshot?.refsByUid().orEmpty()
+        }
+        return rendered to (snapshot?.render() ?: "Refs unavailable: the graph read failed.")
+    }
 
     private suspend fun refs(): String = try {
         snapshots.build(email, zone).render()

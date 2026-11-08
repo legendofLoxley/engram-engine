@@ -189,6 +189,31 @@
                         "verb": {
                             "type": "string",
                             "enum": [
+                                "confirm_item"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of a task, event or question the owner says is still live."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
                                 "correct_item"
                             ]
                         },

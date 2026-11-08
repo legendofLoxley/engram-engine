@@ -79,7 +79,11 @@ object HorizonItemsRenderer {
         horizon: ContextHorizon,
         zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
         alreadyRaised: Set<String> = emptySet(),
-    ): List<HorizonPromptItem> = horizon.items.map { item ->
+        /** Phrase uid to the short ref the owner's tool shows for it; empty where there are no refs (the tick, a conversation). */
+        refs: Map<String, String> = emptyMap(),
+    ): List<HorizonPromptItem> = arrange(horizon, zone, horizon.items.map { it to renderItem(it, horizon, zone, alreadyRaised, refs) }, refs)
+
+    private fun renderItem(item: HorizonItem, horizon: ContextHorizon, zone: java.time.ZoneId, alreadyRaised: Set<String>, refs: Map<String, String>): HorizonPromptItem {
         val surfacing = item.surfacing
         val essential = surfacing is SurfacingReason.ActiveReactivation || surfacing is SurfacingReason.JustAsserted ||
             surfacing is SurfacingReason.Pinned || surfacing is SurfacingReason.Urgent || surfacing is SurfacingReason.CheckIn
@@ -102,6 +106,7 @@ object HorizonItemsRenderer {
             is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone, item.dueKind, item.dueHasTime) +
                 if (item.sourceRefs.firstOrNull()?.phraseUid in alreadyRaised) ALREADY_RAISED_NOTE else ""
             is SurfacingReason.Peripheral -> "reported recently by the environment, independent of this conversation"
+            is SurfacingReason.InProgress -> "they are working on this"
         }
         // A question Alfrd itself is waiting on: say so, so it is asked rather than assumed answered.
         val askNote = if (item.kind == "question" && item.askedBy == "alfrd") " — a question you want to ask them; ask it naturally, and do not assume an answer" else ""
@@ -111,11 +116,60 @@ object HorizonItemsRenderer {
         // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
         // `when (surfacing)` above.
         val provenanceNote = (provenanceAnnotation(item.provenance, item.actorMetadata) ?: sourcedAnnotation(item))?.let { " [$it]" } ?: ""
-        HorizonPromptItem(
-            renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$askNote",
+        val uid = item.sourceRefs.firstOrNull()?.phraseUid
+        val ref = uid?.let { refs[it] }
+        val evidenceDate = item.lastEvidenceAt?.let { java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate() }
+        // An open or active item past its date that nothing has confirmed for a long while: a soft one is asked about instead of announced; a hard one
+        // stays overdue (a promise does not go quiet because nobody looked), with the lack of evidence added.
+        if (item.stale && evidenceDate != null && item.dueAt != null && item.dueKind != "hard") {
+            val state = if (item.state == WorkState.ACTIVE.wire()) " [active]" else ""
+            val due = dueText(item.dueAt, item.dueHasTime, "soft", zone)
+            return HorizonPromptItem(
+                renderedLine = "? \"${item.text.text}\"$state$provenanceNote: due $due, no evidence since $evidenceDate. Still live?${ref?.let { " [$it]" } ?: ""}",
+                essential = true,
+                group = groupHeading(item, horizon),
+            )
+        }
+        val noEvidence = if (item.stale && evidenceDate != null) (if (surfacing is SurfacingReason.Urgent) ", " else "; ") + "no evidence since $evidenceDate" else ""
+        return HorizonPromptItem(
+            renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$noEvidence$askNote",
             essential = essential,
             group = groupHeading(item, horizon),
         )
+    }
+
+    /** "2026-08-19 (soft)": the date as given (with the time when there was one), then whether the deadline is a promise or a hope. */
+    private fun dueText(dueAt: Long, hasTime: Boolean, kind: String, zone: java.time.ZoneId): String {
+        val at = java.time.Instant.ofEpochMilli(dueAt).atZone(zone)
+        return "${at.toLocalDate()}${if (hasTime) " ${"%02d:%02d".format(at.hour, at.minute)}" else ""} ($kind)"
+    }
+
+    /** Where each item is listed. Focused on a project, its items come first, grouped by state (active, open, waiting) and then its hidden ones; zoomed out or focused on a domain, each project gets its count of plain open items. */
+    private fun arrange(horizon: ContextHorizon, zone: java.time.ZoneId, rendered: List<Pair<HorizonItem, HorizonPromptItem>>, refs: Map<String, String>): List<HorizonPromptItem> {
+        val focus = horizon.focus
+        val projectFocus = focus?.takeIf { it.kind == "project" }
+        if (projectFocus != null) {
+            fun rank(item: HorizonItem) = when (item.state) { "active" -> 0; "waiting" -> 2; else -> 1 }
+            fun label(item: HorizonItem) = when (rank(item)) { 0 -> "Active"; 2 -> "Waiting"; else -> "Open" }
+            val inFocus = rendered.filter { (item, _) -> item.container?.uid == projectFocus.uid }
+            val others = rendered.filterNot { (item, _) -> item.container?.uid == projectFocus.uid }
+            val grouped = inFocus.sortedBy { (item, _) -> rank(item) }.map { (item, prompt) -> prompt.copy(group = "${prompt.group} (${label(item)})") }
+            val heading = "In \"${projectFocus.name}\" (project) — what they are focused on (Hidden, suppressed)"
+            val hidden = horizon.hidden.map { h ->
+                HorizonPromptItem("\"${h.text}\" — suppressed at their request; set_attention normal brings it back${refs[h.uid]?.let { " [$it]" } ?: ""}", essential = false, group = heading)
+            }
+            return grouped + others.map { it.second } + hidden
+        }
+        val items = rendered.map { it.second }
+        val domainFocus = focus?.takeIf { it.kind == "domain" }
+        if (focus != null && domainFocus == null) return items // a single item in focus: the item and its neighbourhood, nothing summarised
+        // Zoomed out (or looking at a domain): a project's plain open items are one count, not a list. Active and near-deadline items are listed above it.
+        val counts = horizon.containers.filter { it.kind == "project" && (domainFocus == null || it.parentUid == domainFocus.uid) }.mapNotNull { view ->
+            val shownPlain = rendered.count { (item, _) -> item.container?.uid == view.uid && (item.state == null || item.state == "open") }
+            val remaining = view.openItems - view.activeItems - view.waitingItems - shownPlain
+            if (remaining > 0) HorizonPromptItem("$remaining open", essential = false, group = "In \"${view.name}\" (project)") else null
+        }
+        return items + counts
     }
 
     /**
@@ -170,6 +224,31 @@ object HorizonItemsRenderer {
         horizon: ContextHorizon,
         zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
         alreadyRaised: Set<String> = emptySet(),
+        refs: Map<String, String> = emptyMap(),
+    ): String? {
+        val orientation = composeFrame(horizon, zone, alreadyRaised)
+        val due = composeAlsoDue(horizon, zone, refs)
+        return listOfNotNull(orientation, due).takeIf { it.isNotEmpty() }?.joinToString("\n\n")
+    }
+
+    /**
+     * Deadlines that break through whatever the focus is, labelled hard or soft, each with its ref where there are refs: hard ones close (or
+     * passed), soft ones due today or tomorrow. Null when none. Bounded by the assembler; the count of any left out is stated.
+     */
+    fun composeAlsoDue(horizon: ContextHorizon, zone: java.time.ZoneId, refs: Map<String, String> = emptyMap()): String? {
+        if (horizon.alsoDue.isEmpty()) return null
+        val lines = horizon.alsoDue.map { e ->
+            val words = describeDeadline(SurfacingReason.Urgent(e.dueAt, e.overdue), horizon.asOf, zone, e.dueKind, e.dueHasTime)
+            "- ${refs[e.uid]?.let { "$it " } ?: ""}\"${e.text}\" — $words"
+        }
+        val more = if (horizon.alsoDueMore > 0) "\n(${horizon.alsoDueMore} more due soon, not listed)" else ""
+        return "Also due (these break through whatever you are focused on):\n" + lines.joinToString("\n") + more
+    }
+
+    private fun composeFrame(
+        horizon: ContextHorizon,
+        zone: java.time.ZoneId,
+        alreadyRaised: Set<String>,
     ): String? {
         val focus = horizon.focus
         val others = horizon.containers.filter { it.uid != focus?.uid }.take(MAX_ORIENTATION_CONTAINERS)

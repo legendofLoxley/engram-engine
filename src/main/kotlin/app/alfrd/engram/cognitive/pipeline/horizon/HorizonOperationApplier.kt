@@ -24,6 +24,8 @@ class ViewSnapshotBuilder(
         zone: ZoneId,
         pendingFilingItemUid: String? = null,
         pendingEmotionQuote: String? = null,
+        /** Items the Horizon is showing (an also-due line, a stale question, a focused project's items): each is given a ref, after the pools, so it can be named. */
+        include: Collection<String> = emptyList(),
     ): ViewSnapshot {
         val live = structure.listContainers(userEmail).filter { it.status == "active" }
         // Every domain and project gets a ref, however many there are: the cap is on items only. Domains first, then projects, each oldest
@@ -71,6 +73,12 @@ class ViewSnapshotBuilder(
         structure.listRecentItems(userEmail, OPEN_ITEM_CAP * POOL_OVERFETCH, openOnly = true).filter { live(it) && surfaces(it) }.take(OPEN_ITEM_CAP).forEach { add(it, room) }
         // Recent items fill what is left, so a just-resolved item can still be named to reopen it, and a waiting one to move it on; a suppressed one never is.
         structure.listRecentItems(userEmail, RECENT_ITEM_CAP * POOL_OVERFETCH).filter { it.attention != AttentionDirective.SUPPRESSED && (it.workState?.closed == true || it.workState == WorkState.WAITING || surfaces(it)) }.take(RECENT_ITEM_CAP).forEach { add(it, room) }
+
+        // Whatever the Horizon is showing can be named, however the pools above fell: these come after them, so no earlier ref moves.
+        include.distinct().forEach { uid ->
+            structure.getItem(userEmail, uid)?.takeIf { it.attention != AttentionDirective.SUPPRESSED && it.workState?.closed != true }
+                ?.let { add(it, Int.MAX_VALUE) }
+        }
 
         // The way back from suppression: with a project in focus, its suppressed open items are listed apart under "Hidden (suppressed)", with
         // refs, so set_attention normal can restore one. Outside focus they stay invisible and take no slot. They come last, so other refs do not move.
@@ -227,6 +235,11 @@ class HorizonOperationApplier(
             }
             AppliedOperation(op, done, if (done) "$phrase: $label$nudgeNote$note" else "Could not change the state of $label")
         }
+        is ConfirmItem -> {
+            val label = labelOf(userEmail, op.targetUid)
+            val done = structure.touchEvidence(userEmail, cycleSeq, op.targetUid)
+            AppliedOperation(op, done, if (done) "Confirmed as still live: $label" else "Could not confirm $label")
+        }
         is CorrectItem -> applyCorrection(userEmail, cycleSeq, opKey, op, sourceType, zone)
         is FileItem -> {
             val label = labelOf(userEmail, op.targetUid)
@@ -316,6 +329,8 @@ class HorizonOperationApplier(
         // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
         store.itemForOpKey(userEmail, opKey)?.let { uid ->
             // The same item again is idempotent, but from a channel a different date is said, not silently dropped or applied.
+            // Said again by the source, it is confirmed by it.
+            if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) structure.touchEvidence(userEmail, cycleSeq, uid)
             val have = structure.getItem(userEmail, uid)?.dueAt
             val conflict = if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE && op.dueAt != null && have != null && op.dueAt != have) {
                 "; the source gives a different date (${describeDue(op.dueAt, zone)}, the item has ${describeDue(have, zone)}) — the date was not changed"
@@ -370,6 +385,7 @@ class HorizonOperationApplier(
         val newDue = op.dueAt?.takeIf { it != existing.dueAt }
         // A repeat from a source never moves a date: the item's own date stands and the difference is reported. (What the owner just said wins, as before.)
         val conflict = scopedToSource && newDue != null && existing.dueAt != null
+        if (scopedToSource) structure.touchEvidence(userEmail, cycleSeq, existing.uid)
         val dueSet = newDue != null && !conflict && structure.setDue(userEmail, cycleSeq, existing.uid, newDue, op.dueHasTime)
         val note = when {
             conflict -> "; the source gives a different date (${describeDue(newDue!!, zone)}, the item has ${describeDue(existing.dueAt!!, zone)}) — the date was not changed"

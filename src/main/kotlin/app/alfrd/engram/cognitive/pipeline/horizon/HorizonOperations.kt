@@ -90,6 +90,10 @@ data class SetState(
     val waitingOn: String? = null,
 ) : HorizonOperation { override val verb get() = "set_state" }
 
+/** "Yes, still live": refreshes when the item was last confirmed, and changes nothing else. */
+@Serializable
+data class ConfirmItem(val targetUid: String, override val quote: String) : HorizonOperation { override val verb get() = "confirm_item" }
+
 @Serializable
 data class CorrectItem(
     val targetUid: String,
@@ -187,6 +191,9 @@ data class ViewSnapshot(
     private val byRef: Map<String, String> = (containers.map { it.ref to it.uid } + items.map { it.ref to it.uid }).toMap()
 
     fun uidFor(ref: String?): String? = ref?.trim()?.let { byRef[it] }
+
+    /** Each ref's thing the other way round: phrase or container uid to its ref. */
+    fun refsByUid(): Map<String, String> = byRef.entries.associate { (ref, uid) -> uid to ref }
     fun container(ref: String?): SnapshotContainer? = containers.firstOrNull { it.ref == ref?.trim() }
     fun item(ref: String?): SnapshotItem? = items.firstOrNull { it.ref == ref?.trim() }
     fun containerByUid(uid: String?): SnapshotContainer? = containers.firstOrNull { it.uid == uid }
@@ -428,6 +435,13 @@ object OperationParser {
                         waitingOn = obj.str("waiting_on")?.trim()?.takeIf { it.isNotBlank() },
                     ),
                 )
+            }
+            "confirm_item" -> {
+                val target = snapshot.uidFor(obj.str("item")) ?: return One.Rejected("unknown_ref")
+                val item = snapshot.item(obj.str("item"))
+                if (item == null || item.kind == ItemKind.FACT) return One.Rejected("not_resolvable")
+                if (quote.endsWith("?")) return One.Rejected("question_detected")
+                One.Ok(ConfirmItem(target, quote))
             }
             "correct_item" -> {
                 val ref = obj.str("item")

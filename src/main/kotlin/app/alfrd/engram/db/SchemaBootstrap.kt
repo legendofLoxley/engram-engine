@@ -510,6 +510,7 @@ object SchemaBootstrap {
                 ensureProperty(schema, type, "nudgeAt",        Type.LONG)     // waiting: the date to check in
                 ensureProperty(schema, type, "nudgeHasTime",   Type.BOOLEAN)
                 ensureProperty(schema, type, "waitingOn",      Type.STRING)   // waiting: who or what, short free text
+                ensureProperty(schema, type, "lastEvidenceAt", Type.LONG)     // when anything last confirmed the item; absent reads as updatedAt, else createdAt
                 ensureProperty(schema, type, "stateFromSource", Type.BOOLEAN) // state / due kind is the filing document's claim, not the owner's
             }
             ensureProperty(schema, "Phrase", "happenedAt",      Type.LONG)    // events and facts: when it took place

@@ -168,7 +168,13 @@ data class ItemRecord(
     val waitingOn: String? = null,
     /** True while the state or due kind is still the document's own claim, never the owner's. */
     val stateFromSource: Boolean = false,
+    /** When anything last confirmed the item (see [HorizonStructureStore.touchEvidence]); null when never stamped, in which case [evidenceAt] falls back. */
+    val lastEvidenceAt: Long? = null,
+    val updatedAt: Long = 0L,
 ) {
+    /** When the item was last confirmed: its stamp, else when it was last changed, else when it was made. */
+    val evidenceAt: Long get() = lastEvidenceAt ?: updatedAt.takeIf { it > 0L } ?: createdAt
+
     /** Where the item stands: its own state, else read from [status]. Null for a plain fact. */
     val workState: WorkState? get() = state ?: WorkState.of(null, status)
     val effectiveDueKind: DueKind get() = dueKind ?: DueKind.SOFT
@@ -267,6 +273,12 @@ interface HorizonStructureStore {
      * The coarse `status` follows. A no-op when nothing would change. False for a fact, a container, or a target the user doesn't own.
      */
     suspend fun setState(userEmail: String, cycleSeq: Long, targetUid: String, state: WorkState, nudge: TimeValue? = null, waitingOn: String? = null): Boolean
+
+    /**
+     * Records that the item was confirmed just now ("yes, still live"): sets `lastEvidenceAt` and nothing else. True for a task, event or
+     * question the user owns; false for anything else. Attention changes (pin, suppress) are not evidence and never call this.
+     */
+    suspend fun touchEvidence(userEmail: String, cycleSeq: Long, targetUid: String): Boolean
 
     /**
      * Sets the hard/soft marking of an item's due date, and optionally its check-in date. False for a fact, container, or target the
@@ -485,6 +497,7 @@ class ArcadeHorizonStructureStore(
                     val state = extras.state ?: WorkState.OPEN
                     set("state", state.wire())
                     set("status", state.status)
+                    set("lastEvidenceAt", now)
                     if (state.closed) set("resolvedAt", now)
                     if (extras.dueKind != null && dueAt != null) set("dueKind", extras.dueKind.wire())
                     if (state == WorkState.WAITING || extras.nudge != null) extras.nudge?.let { set("nudgeAt", it.at); if (it.hasTime) set("nudgeHasTime", true) }
@@ -522,6 +535,7 @@ class ArcadeHorizonStructureStore(
             if (existing.any { it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == parentUid }) return@mutate true
             existing.forEach { it.delete() }
             newPartOf(child, parent, cycleSeq, userEmail)
+            if (child.typeName in ITEM_STATE_TYPES) child.modify().apply { set("lastEvidenceAt", System.currentTimeMillis()); save() }
             true
         }
 
@@ -559,6 +573,7 @@ class ArcadeHorizonStructureStore(
             target.modify().apply {
                 if (dueAt == null) { remove(property); remove("dueHasTime"); remove("dueKind") } else { set(property, dueAt); if (hasTime) set("dueHasTime", true) else remove("dueHasTime") }
                 set("updatedAt", System.currentTimeMillis())
+                if (target.typeName in ITEM_STATE_TYPES) set("lastEvidenceAt", System.currentTimeMillis())
                 save()
             }
             true
@@ -599,8 +614,18 @@ class ArcadeHorizonStructureStore(
                 if (dueKind != null) { set("dueKind", dueKind.wire()); remove("stateFromSource") }
                 if (nudge != null) { set("nudgeAt", nudge.at); if (nudge.hasTime) set("nudgeHasTime", true) else remove("nudgeHasTime") }
                 set("updatedAt", System.currentTimeMillis())
+                set("lastEvidenceAt", System.currentTimeMillis())
                 save()
             }
+            true
+        }
+
+    override suspend fun touchEvidence(userEmail: String, cycleSeq: Long, targetUid: String): Boolean =
+        mutate("touchEvidence", false) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
+            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            // Only the stamp moves: updatedAt is left alone so a confirmation is not mistaken for a change.
+            target.modify().apply { set("lastEvidenceAt", System.currentTimeMillis()); save() }
             true
         }
 
@@ -617,6 +642,7 @@ class ArcadeHorizonStructureStore(
         target.modify().apply {
             set("state", state.wire())
             set("status", state.status)
+            set("lastEvidenceAt", now)
             remove("stateFromSource")
             if (state.closed) { if (current?.closed != true) set("resolvedAt", now) } else remove("resolvedAt")
             if (nudge != null) { set("nudgeAt", nudge.at); if (nudge.hasTime) set("nudgeHasTime", true) else remove("nudgeHasTime") }
@@ -634,6 +660,11 @@ class ArcadeHorizonStructureStore(
             if (target.get("attention") as? String == desired) return@mutate true
             target.modify().apply {
                 if (desired == null) remove("attention") else set("attention", desired)
+                // A pin or a suppression is not evidence the item is live. updatedAt moves below, so an item that was never stamped keeps
+                // the time it would have read as (its old updatedAt) rather than inheriting this change.
+                if (target.typeName in ITEM_STATE_TYPES && target.get("lastEvidenceAt") == null) {
+                    set("lastEvidenceAt", (target.get("updatedAt") as? Number)?.toLong() ?: (target.get("createdAt") as? Number)?.toLong() ?: System.currentTimeMillis())
+                }
                 set("updatedAt", System.currentTimeMillis())
                 save()
             }
@@ -1004,6 +1035,8 @@ class ArcadeHorizonStructureStore(
             happenedHasTime = get("happenedHasTime") == true,
             waitingOn = get("waitingOn") as? String,
             stateFromSource = get("stateFromSource") == true,
+            lastEvidenceAt = (get("lastEvidenceAt") as? Number)?.toLong(),
+            updatedAt = (get("updatedAt") as? Number)?.toLong() ?: 0L,
             projectUid = getVertices(Vertex.DIRECTION.OUT, "PART_OF")
                 .firstOrNull { it.typeName == ContainerKind.PROJECT.typeName }?.get("uid") as? String,
             createdAt = (get("createdAt") as? Number)?.toLong() ?: 0L,
