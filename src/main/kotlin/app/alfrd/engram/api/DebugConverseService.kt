@@ -104,14 +104,21 @@ internal object DebugConverseService {
         }
     }
 
+    /** What a purge did: how many users it deleted and which protected ones it left alone (emails only). */
+    data class PurgeOutcome(val deleted: Int, val skippedProtected: List<String>)
+
+    /** [purge] reduced to the number deleted. Protected identities are always skipped (default: the running engine's own set). */
+    fun purgeAllSyntheticUsers(db: Database, protected: ProtectedIdentities = ProtectedIdentities.fromEnvironment()): Int =
+        purge(db, protected).deleted
+
     /**
-     * Deletes all synthetic users (identified by [SYNTHETIC_EMAIL_DOMAIN]) and every
-     * SELECTED, OUTCOME, and UserScaffoldState record linked to them.
+     * Deletes the synthetic users (identified by [SYNTHETIC_EMAIL_DOMAIN]) that are not in [protected], and every
+     * SELECTED, OUTCOME, and UserScaffoldState record linked to them. A protected user and its data are not read past the
+     * email, let alone changed; matching only protected users is a normal outcome (0 deleted), not an error.
      *
-     * @return the number of User vertices deleted.
      * @throws RuntimeException if the initial user lookup fails.
      */
-    fun purgeAllSyntheticUsers(db: Database): Int {
+    fun purge(db: Database, protected: ProtectedIdentities): PurgeOutcome {
         val emails = mutableListOf<String>()
         db.query(
             "sql",
@@ -123,10 +130,11 @@ internal object DebugConverseService {
                 emails.add(email)
             }
         }
-        if (emails.isEmpty()) return 0
+        val (skipped, doomed) = emails.partition { protected.isProtected(it) }
+        if (skipped.isNotEmpty()) logger.info("debug: purge skipped {} protected identit{}: {}", skipped.size, if (skipped.size == 1) "y" else "ies", skipped.sorted())
 
         var deleted = 0
-        for (email in emails) {
+        for (email in doomed) {
             try {
                 db.transaction {
                     db.command("sql", "DELETE FROM SELECTED WHERE userId = :e", mapOf("e" to email)).close()
@@ -143,7 +151,7 @@ internal object DebugConverseService {
                 logger.warn("debug: purge failed for email={}: {}", email, e.message)
             }
         }
-        return deleted
+        return PurgeOutcome(deleted, skipped.sorted())
     }
 
     private const val SYNTHETIC_TIER = -1

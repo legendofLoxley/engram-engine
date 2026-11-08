@@ -3,6 +3,7 @@ package app.alfrd.engram
 import app.alfrd.engram.api.configureCognitiveRoutes
 import app.alfrd.engram.api.configureAuth
 import app.alfrd.engram.api.configureDebugActorEventRoutes
+import app.alfrd.engram.api.ProtectedIdentities
 import app.alfrd.engram.api.configureDebugConverseRoutes
 import app.alfrd.engram.api.configureDebugEnvironmentSignalRoutes
 import app.alfrd.engram.api.configureDebugGraphBackupRoutes
@@ -160,6 +161,10 @@ fun main() {
     val ownerHorizonStartup = bootstrapOwnerHorizon(db, notionStartup, hermesActiveAssignments, directorTickStartup)
     Runtime.getRuntime().addShutdownHook(Thread { tickScope.cancel() })
 
+    // Identities DELETE /debug/converse/purge refuses to touch. Names only.
+    val protectedIdentities = ProtectedIdentities.fromEnvironment()
+    log.info("purge-guard: protected identities (never purged): {}", protectedIdentities.names().joinToString(", "))
+
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
     // Defaults to Ktor's own default (0.0.0.0) so production/container behavior is unchanged;
     // set HOST=127.0.0.1 for a loopback-only local run.
@@ -205,7 +210,7 @@ fun main() {
             val debugSessionManager = SessionManager(factory = {
                 CognitivePipelineFactory.create(db, hermesCompletionStore = hermesCompletionStore, hermesActiveAssignments = hermesActiveAssignments)
             })
-            configureDebugConverseRoutes(debugSessionManager, db)
+            configureDebugConverseRoutes(debugSessionManager, db, protectedIdentities)
             configureDebugEnvironmentSignalRoutes(db)
             configureDebugActorEventRoutes(db)
             configureDebugHermesAssignmentRoutes(hermesCompletionStore, hermesActiveAssignments)
