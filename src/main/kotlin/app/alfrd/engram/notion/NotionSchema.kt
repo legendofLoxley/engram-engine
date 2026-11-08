@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.AttentionDirective
 import app.alfrd.engram.cognitive.pipeline.horizon.ContainerKind
 import app.alfrd.engram.cognitive.pipeline.horizon.FocusZoom
 import app.alfrd.engram.cognitive.pipeline.horizon.ItemKind
+import app.alfrd.engram.cognitive.pipeline.horizon.ItemKinds
 
 /**
  * Property names and select options of the alfrd memory template (schema v0.2 plus the columns the
@@ -89,15 +90,10 @@ object NotionSchema {
 
     fun containerKind(label: String?): ContainerKind? = ContainerKind.entries.firstOrNull { kindLabel(it) == label }
 
-    fun kindLabel(kind: ItemKind): String = when (kind) {
-        ItemKind.FACT -> "Fact"
-        ItemKind.TASK -> "Task"
-        ItemKind.EVENT -> "Event"
-        ItemKind.QUESTION -> "Question"
-    }
+    fun kindLabel(kind: ItemKind): String = ItemKinds.of(kind).horizonLabel
 
     /** Null for `Insight`, or anything else this engine has no use for; such rows are not part of the Horizon. */
-    fun itemKind(label: String?): ItemKind? = ItemKind.entries.firstOrNull { kindLabel(it) == label }
+    fun itemKind(label: String?): ItemKind? = ItemKinds.fromLabel(label)
 
     fun attentionLabel(attention: AttentionDirective?): String? = when (attention) {
         AttentionDirective.PINNED -> OVERRIDE_PINNED

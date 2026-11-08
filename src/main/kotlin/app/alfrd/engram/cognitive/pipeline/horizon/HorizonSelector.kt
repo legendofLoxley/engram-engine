@@ -338,8 +338,9 @@ internal class HorizonSelector(
             }
             if (rows >= policy.urgencyScanLimit) truncated = true
         }
-        scan("Task", "open", policy.taskUrgencyHalfDays, false, "dueAt")
-        scan("Event", "open", policy.eventUrgencyHalfDays, true, "occursAt")
+        for (spec in ItemKinds.inList(KindList.URGENCY_SCAN)) {
+            scan(spec.typeName, "open", if (spec.boundToMoment) policy.eventUrgencyHalfDays else policy.taskUrgencyHalfDays, spec.boundToMoment, spec.dueProperty!!)
+        }
         scan("Project", "active", policy.projectUrgencyHalfDays, false, "dueAt")
         return DatedScan(found.values.toList(), truncated)
     }
@@ -355,7 +356,7 @@ internal class HorizonSelector(
     private fun openUnfiledItems(userEmail: String, fresh: Set<String>): OpenScan {
         val found = LinkedHashMap<String, Long>()
         var truncated = false
-        for (type in listOf("Task", "Question")) {
+        for (type in ItemKinds.typeNames(KindList.OPEN_UNFILED_SCAN)) {
             var rows = 0
             db.query("sql", "SELECT FROM $type WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.urgencyScanLimit}", mapOf("e" to userEmail)).use { rs ->
                 while (rs.hasNext()) {
@@ -385,7 +386,7 @@ internal class HorizonSelector(
         val checkIns = LinkedHashMap<String, Long>()
         val active = LinkedHashSet<String>()
         var truncated = false
-        for (type in listOf("Task", "Event", "Question")) {
+        for (type in ItemKinds.typeNames(KindList.STATE_SCAN)) {
             var rows = 0
             db.query("sql", "SELECT FROM $type WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.urgencyScanLimit}", mapOf("e" to userEmail)).use { rs ->
                 while (rs.hasNext()) {
@@ -444,23 +445,24 @@ internal class HorizonSelector(
         val out = LinkedHashMap<String, ItemState>()
         for (uid in uids) {
             val v = phraseVertex(uid) ?: continue
-            val kind = when (v.typeName) { "Task" -> "task"; "Event" -> "event"; "Question" -> "question"; else -> "fact" }
+            val spec = ItemKinds.of(ItemKinds.kindOf(v.typeName))
+            val kind = spec.word
             val project = v.getVertices(Vertex.DIRECTION.OUT, "PART_OF").firstOrNull { it.typeName == "Project" }
-            val dueAt = (v.get(if (kind == "event") "occursAt" else "dueAt") as? Number)?.toLong()
+            val dueAt = (v.get(spec.dueProperty ?: "dueAt") as? Number)?.toLong()
             val superseded = v.getEdges(Vertex.DIRECTION.IN, "RELATED_TO").any { it.get("relationType") == "supersedes" }
             out[uid] = ItemState(
                 uid = uid,
                 kind = kind,
                 text = v.get("text") as? String ?: "",
-                status = if (kind == "fact") null else v.get("status") as? String,
+                status = if (!spec.carriesState) null else v.get("status") as? String,
                 dueAt = dueAt,
                 attention = attentionOf(v),
-                askedBy = if (kind == "question") v.get("askedBy") as? String else null,
+                askedBy = if (spec.kind == ItemKind.QUESTION) v.get("askedBy") as? String else null,
                 container = project?.let { HorizonContainerRef(it.get("uid") as String, it.labelOf(), "project") },
                 containerStatus = project?.get("status") as? String,
                 containerAttention = project?.let { attentionOf(it) },
                 superseded = superseded,
-                workState = if (kind == "fact") null else WorkState.of(v.get("state") as? String, v.get("status") as? String),
+                workState = if (!spec.carriesState) null else WorkState.of(v.get("state") as? String, v.get("status") as? String),
                 dueKind = DueKind.fromWire(v.get("dueKind") as? String),
                 dueHasTime = v.get("dueHasTime") == true,
                 nudgeAt = (v.get("nudgeAt") as? Number)?.toLong(),
@@ -501,7 +503,7 @@ internal class HorizonSelector(
                 val open = members.filter { it.get("status") == "open" }
                 val activeCount = open.count { it.get("state") == WorkState.ACTIVE.wire() }
                 val waitingCount = open.count { it.get("state") == WorkState.WAITING.wire() }
-                val next = open.filter { StateRules.canBeOverdue(WorkState.of(it.get("state") as? String, it.get("status") as? String)) }.mapNotNull { (it.get(if (it.typeName == "Event") "occursAt" else "dueAt") as? Number)?.toLong() }.minOrNull()
+                val next = open.filter { StateRules.canBeOverdue(WorkState.of(it.get("state") as? String, it.get("status") as? String)) }.mapNotNull { (it.get(ItemKinds.forType(it.typeName)?.dueProperty ?: "dueAt") as? Number)?.toLong() }.minOrNull()
                 val projectDue = (v.get("dueAt") as? Number)?.toLong()
                 HorizonContainerView(
                     uid = uid,

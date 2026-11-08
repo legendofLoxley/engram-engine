@@ -65,7 +65,7 @@ src/main/kotlin/app/alfrd/engram/
 │       ├── memory/
 │       └── scaffold/
 │   └── providers/               # LLM, STT, TTS, cloud clients
-├── db/                          # ArcadeDB and schema bootstrap
+├── db/                          # ArcadeDB and schema bootstrap  # see docs/graph-schema.md: constraints flag, audit, change records, item kind registry
 └── model/
 ```
 

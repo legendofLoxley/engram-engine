@@ -7,6 +7,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import org.slf4j.LoggerFactory
 import java.security.MessageDigest
 import java.util.UUID
@@ -337,6 +338,25 @@ interface HorizonStructureStore {
     /** Deletes this user's nudges set before [olderThanCycle], returning how many — nudges fade to nothing well before then, so this only keeps the graph from accumulating them. Pins are never touched. */
     suspend fun pruneNudges(userEmail: String, olderThanCycle: Long): Int
 
+    /**
+     * The changes recorded for [targetUid] (state, due, due kind, waiting-on, check-in, attention, filing, focus release), oldest first.
+     * Empty for a target the user doesn't own: another owner's records for the same uid are never returned. Read-only; see [ChangeRecords].
+     */
+    suspend fun changesFor(userEmail: String, targetUid: String): List<ChangeRecordView>
+
+    /**
+     * Records that [fromUid] is progress on [toUid] (`from -PROGRESS_OF-> to`: a task done toward a goal, say). Both must be items the user owns
+     * and they must differ; anything else is a rejected, logged no-op returning false. Idempotent per pair: a second call returns true and adds no edge.
+     * [writer] says who recorded it (director, user, hermes). The edge carries no score and no decay. Not exposed through any verb and not shown in the Horizon.
+     */
+    suspend fun addProgress(userEmail: String, cycleSeq: Long, fromUid: String, toUid: String, writer: String): Boolean
+
+    /** The progress links pointing at [toUid] (what has been done toward it), oldest first. Empty unless the user owns [toUid]; a link whose other end the user does not own is left out. */
+    suspend fun progressOn(userEmail: String, toUid: String): List<ProgressLink>
+
+    /** The progress links leaving [fromUid] (what it is progress on), oldest first. Empty unless the user owns [fromUid]. */
+    suspend fun progressBy(userEmail: String, fromUid: String): List<ProgressLink>
+
     /** Records the wall-clock time of the user's latest turn, only ever moving it forward. False for an unknown user. */
     suspend fun touchLastActive(userEmail: String, atMillis: Long): Boolean
 
@@ -383,7 +403,9 @@ interface HorizonStructureStore {
 }
 
 private const val MAX_WAITING_ON = 120
-private val ITEM_STATE_TYPES = setOf("Task", "Event", "Question")
+
+/** One `PROGRESS_OF` edge: [fromUid] is progress on [toUid]. */
+data class ProgressLink(val fromUid: String, val toUid: String, val createdAt: Long, val cycleSeq: Long, val writer: String)
 
 /** An item's identity and words, nothing more — see [HorizonStructureStore.scanItemTexts]. */
 data class ItemText(val uid: String, val text: String)
@@ -394,6 +416,16 @@ class ArcadeHorizonStructureStore(
 ) : HorizonStructureStore {
 
     private val logger = LoggerFactory.getLogger(ArcadeHorizonStructureStore::class.java)
+    private val changeLog = ChangeLog(db)
+
+    /** Who and what is making the change in progress; set by [mutate] on the writing thread, under the Horizon write lock. */
+    private val changeContext = ThreadLocal<ChangeContext?>()
+
+    /** Records one tracked change in the writing transaction (see [ChangeTracking]); nothing is written when [old] and [new] are the same. */
+    private fun recordChange(owner: String, target: Vertex, field: String, old: String?, new: String?) {
+        val ctx = changeContext.get()
+        changeLog.append(owner, target, field, old, new, cause = ctx?.cause ?: "unknown", actor = ctx?.actor ?: owner)
+    }
 
     // ── Writes ───────────────────────────────────────────────────────────────
 
@@ -482,17 +514,12 @@ class ArcadeHorizonStructureStore(
                 set("ownerEmail", userEmail)
                 if (namespacedKey != null) set("opKey", namespacedKey)
                 if (!sourceQuote.isNullOrBlank() && sourceQuote.trim() != text.trim()) set("sourceQuote", sourceQuote.trim())
-                when (kind) {
-                    ItemKind.TASK -> {
-                        if (dueAt != null) { set("dueAt", dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
-                    }
-                    ItemKind.EVENT -> {
-                        if (dueAt != null) { set("occursAt", dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
-                    }
-                    ItemKind.QUESTION -> set("askedBy", askedBy)
-                    ItemKind.FACT -> Unit
+                // The time the kind is bound to goes where the kind keeps it (a task's `dueAt`, an event's `occursAt`); a kind with none ignores [dueAt].
+                ItemKinds.of(kind).dueProperty?.let { property ->
+                    if (dueAt != null) { set(property, dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
                 }
-                if (kind != ItemKind.FACT) {
+                if (kind == ItemKind.QUESTION) set("askedBy", askedBy)
+                if (ItemKinds.of(kind).carriesState) {
                     // The state is the item's own; `status` is its coarse open/resolved projection (indexed, and what older readers use).
                     val state = extras.state ?: WorkState.OPEN
                     set("state", state.wire())
@@ -533,9 +560,12 @@ class ArcadeHorizonStructureStore(
             }
             val existing = child.getEdges(Vertex.DIRECTION.OUT, "PART_OF").toList()
             if (existing.any { it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == parentUid }) return@mutate true
+            // What it was filed under is read before the old edge goes, and recorded once the new filing is in place.
+            val formerParents = existing.mapNotNull { it.getVertex(Vertex.DIRECTION.IN)?.get("uid") as? String }
             existing.forEach { it.delete() }
             newPartOf(child, parent, cycleSeq, userEmail)
-            if (child.typeName in ITEM_STATE_TYPES) child.modify().apply { set("lastEvidenceAt", System.currentTimeMillis()); save() }
+            if (ItemKinds.isStateful(child.typeName)) child.modify().apply { set("lastEvidenceAt", System.currentTimeMillis()); save() }
+            recordChange(userEmail, child, "PART_OF", formerParents.joinToString(",").ifEmpty { null }, parentUid)
             true
         }
 
@@ -563,19 +593,19 @@ class ArcadeHorizonStructureStore(
     override suspend fun setDue(userEmail: String, cycleSeq: Long, targetUid: String, dueAt: Long?, hasTime: Boolean): Boolean =
         mutate("setDue", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
-            val property = when (target.typeName) {
-                "Task", "Project" -> "dueAt"
-                "Event" -> "occursAt"
-                else -> return@mutate false
-            }
+            // A project's deadline is `dueAt`; an item's is whatever its kind is bound to (a task's `dueAt`, an event's `occursAt`), and a kind with none has no due.
+            val property = if (target.typeName == ContainerKind.PROJECT.typeName) "dueAt" else ItemKinds.forType(target.typeName)?.dueProperty ?: return@mutate false
             val current = (target.get(property) as? Number)?.toLong()
             if (current == dueAt && (dueAt == null || (target.get("dueHasTime") == true) == hasTime)) return@mutate true
+            val formerKind = target.get("dueKind") as? String
             target.modify().apply {
                 if (dueAt == null) { remove(property); remove("dueHasTime"); remove("dueKind") } else { set(property, dueAt); if (hasTime) set("dueHasTime", true) else remove("dueHasTime") }
                 set("updatedAt", System.currentTimeMillis())
-                if (target.typeName in ITEM_STATE_TYPES) set("lastEvidenceAt", System.currentTimeMillis())
+                if (ItemKinds.isStateful(target.typeName)) set("lastEvidenceAt", System.currentTimeMillis())
                 save()
             }
+            recordChange(userEmail, target, "dueAt", current?.toString(), dueAt?.toString())
+            if (dueAt == null) recordChange(userEmail, target, "dueKind", formerKind, null)   // clearing the date clears its hard/soft mark too
             true
         }
 
@@ -589,27 +619,29 @@ class ArcadeHorizonStructureStore(
                 target.modify().apply { set("status", desired); set("updatedAt", now); save() }
                 return@mutate true
             }
-            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            if (!ItemKinds.isStateful(target.typeName)) return@mutate false
             // Resolve is set_state done; reopen is set_state open. The item's own state is the only record of it.
-            applyState(target, if (resolved) WorkState.DONE else WorkState.OPEN, null, null)
+            applyState(userEmail, target, if (resolved) WorkState.DONE else WorkState.OPEN, null, null)
             true
         }
 
     override suspend fun setState(userEmail: String, cycleSeq: Long, targetUid: String, state: WorkState, nudge: TimeValue?, waitingOn: String?): Boolean =
         mutate("setState", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
-            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
-            applyState(target, state, nudge, waitingOn)
+            if (!ItemKinds.isStateful(target.typeName)) return@mutate false
+            applyState(userEmail, target, state, nudge, waitingOn)
             true
         }
 
     override suspend fun setTiming(userEmail: String, cycleSeq: Long, targetUid: String, dueKind: DueKind?, nudge: TimeValue?): Boolean =
         mutate("setTiming", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
-            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            if (!ItemKinds.isStateful(target.typeName)) return@mutate false
             val kindSame = dueKind == null || DueKind.fromWire(target.get("dueKind") as? String) == dueKind || (dueKind == DueKind.SOFT && target.get("dueKind") == null)
             val nudgeSame = nudge == null || ((target.get("nudgeAt") as? Number)?.toLong() == nudge.at && (target.get("nudgeHasTime") == true) == nudge.hasTime)
             if (kindSame && nudgeSame) return@mutate true
+            val formerKind = target.get("dueKind") as? String
+            val formerNudge = (target.get("nudgeAt") as? Number)?.toLong()
             target.modify().apply {
                 if (dueKind != null) { set("dueKind", dueKind.wire()); remove("stateFromSource") }
                 if (nudge != null) { set("nudgeAt", nudge.at); if (nudge.hasTime) set("nudgeHasTime", true) else remove("nudgeHasTime") }
@@ -617,20 +649,22 @@ class ArcadeHorizonStructureStore(
                 set("lastEvidenceAt", System.currentTimeMillis())
                 save()
             }
+            if (dueKind != null) recordChange(userEmail, target, "dueKind", formerKind, dueKind.wire())
+            if (nudge != null) recordChange(userEmail, target, "nudgeAt", formerNudge?.toString(), nudge.at.toString())
             true
         }
 
     override suspend fun touchEvidence(userEmail: String, cycleSeq: Long, targetUid: String): Boolean =
         mutate("touchEvidence", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
-            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            if (!ItemKinds.isStateful(target.typeName)) return@mutate false
             // Only the stamp moves: updatedAt is left alone so a confirmation is not mistaken for a change.
             target.modify().apply { set("lastEvidenceAt", System.currentTimeMillis()); save() }
             true
         }
 
     /** Writes [state] and its coarse `status`; see [HorizonStructureStore.setState]. Caller holds the lock. */
-    private fun applyState(target: Vertex, state: WorkState, nudge: TimeValue?, waitingOn: String?) {
+    private fun applyState(owner: String, target: Vertex, state: WorkState, nudge: TimeValue?, waitingOn: String?) {
         val current = WorkState.of(target.get("state") as? String, target.get("status") as? String)
         val currentNudge = (target.get("nudgeAt") as? Number)?.toLong()
         val newWaitingOn = waitingOn?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_WAITING_ON)
@@ -639,6 +673,9 @@ class ArcadeHorizonStructureStore(
         val waitingUnchanged = if (newWaitingOn != null) target.get("waitingOn") == newWaitingOn else (!leavingWaiting || target.get("waitingOn") == null)
         if (current == state && target.get("state") == state.wire() && nudgeUnchanged && waitingUnchanged) return
         val now = System.currentTimeMillis()
+        val formerWaitingOn = target.get("waitingOn") as? String
+        val newNudgeAt: Long? = if (nudge != null) nudge.at else if (leavingWaiting) null else currentNudge
+        val resultingWaitingOn: String? = if (newWaitingOn != null) newWaitingOn else if (leavingWaiting) null else formerWaitingOn
         target.modify().apply {
             set("state", state.wire())
             set("status", state.status)
@@ -651,23 +688,28 @@ class ArcadeHorizonStructureStore(
             set("updatedAt", now)
             save()
         }
+        recordChange(owner, target, "state", current?.wire(), state.wire())
+        recordChange(owner, target, "nudgeAt", currentNudge?.toString(), newNudgeAt?.toString())
+        recordChange(owner, target, "waitingOn", formerWaitingOn, resultingWaitingOn)
     }
 
     override suspend fun setAttention(userEmail: String, cycleSeq: Long, targetUid: String, attention: AttentionDirective?): Boolean =
         mutate("setAttention", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
             val desired = attention?.name?.lowercase()
-            if (target.get("attention") as? String == desired) return@mutate true
+            val formerAttention = target.get("attention") as? String
+            if (formerAttention == desired) return@mutate true
             target.modify().apply {
                 if (desired == null) remove("attention") else set("attention", desired)
                 // A pin or a suppression is not evidence the item is live. updatedAt moves below, so an item that was never stamped keeps
                 // the time it would have read as (its old updatedAt) rather than inheriting this change.
-                if (target.typeName in ITEM_STATE_TYPES && target.get("lastEvidenceAt") == null) {
+                if (ItemKinds.isStateful(target.typeName) && target.get("lastEvidenceAt") == null) {
                     set("lastEvidenceAt", (target.get("updatedAt") as? Number)?.toLong() ?: (target.get("createdAt") as? Number)?.toLong() ?: System.currentTimeMillis())
                 }
                 set("updatedAt", System.currentTimeMillis())
                 save()
             }
+            recordChange(userEmail, target, "attention", formerAttention, desired)
             true
         }
 
@@ -688,7 +730,7 @@ class ArcadeHorizonStructureStore(
 
         if (mode == FocusMode.PINNED) {
             // At most one pinned focus: every other pinned edge goes.
-            edges.filter { it.identity != existing?.identity && it.get("mode") == FocusMode.PINNED.wire() }.forEach { it.delete() }
+            edges.filter { it.identity != existing?.identity && it.get("mode") == FocusMode.PINNED.wire() }.forEach { releaseFocusEdge(userEmail, it) }
         } else if (existing != null && existing.get("mode") == FocusMode.PINNED.wire()) {
             // A casual mention of the thing already pinned never weakens the pin.
             return@mutate true
@@ -738,8 +780,67 @@ class ArcadeHorizonStructureStore(
                     edge.get("mode") == FocusMode.PINNED.wire() || includeNudges
                 }
             }
-            doomed.forEach { it.delete() }
+            doomed.forEach { releaseFocusEdge(userEmail, it) }
             doomed.size
+        }
+
+    /** Records the focus being released (what it was, on what), then deletes the edge: the edge is gone afterwards, the record is not. */
+    private fun releaseFocusEdge(userEmail: String, edge: com.arcadedb.graph.Edge) {
+        edge.getVertex(Vertex.DIRECTION.IN)?.let { target ->
+            recordChange(userEmail, target, "FOCUSES_ON", "${edge.get("mode") ?: "nudge"}/${edge.get("zoom") ?: "overview"}", null)
+        }
+        edge.delete()
+    }
+
+    override suspend fun addProgress(userEmail: String, cycleSeq: Long, fromUid: String, toUid: String, writer: String): Boolean {
+        if (fromUid == toUid || writer.isBlank()) return false
+        return mutate("addProgress", false) {
+            val from = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, fromUid) ?: run {
+                logger.warn("addProgress: fromUid=$fromUid is not an item owned by userEmail=$userEmail — rejecting"); return@mutate false
+            }
+            val to = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, toUid) ?: run {
+                logger.warn("addProgress: toUid=$toUid is not an item owned by userEmail=$userEmail — rejecting"); return@mutate false
+            }
+            if (from.getEdges(Vertex.DIRECTION.OUT, "PROGRESS_OF").any { it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == toUid }) return@mutate true
+            from.modify().newEdge("PROGRESS_OF", to, false).apply {
+                set("createdAt", System.currentTimeMillis())
+                set("ownerEmail", userEmail)
+                set("cycleSeq", cycleSeq)
+                set("writer", writer.trim())
+                save()
+            }
+            true
+        }
+    }
+
+    override suspend fun progressOn(userEmail: String, toUid: String): List<ProgressLink> = read("progressOn", emptyList()) {
+        HorizonOwnership.findPhraseOwnedByUser(db, userEmail, toUid) ?: return@read emptyList()
+        progressLinks("@in.uid = :u", userEmail, toUid, otherEnd = "@out.uid")
+    }
+
+    override suspend fun progressBy(userEmail: String, fromUid: String): List<ProgressLink> = read("progressBy", emptyList()) {
+        HorizonOwnership.findPhraseOwnedByUser(db, userEmail, fromUid) ?: return@read emptyList()
+        progressLinks("@out.uid = :u", userEmail, fromUid, otherEnd = "@in.uid")
+    }
+
+    /** SQL on `@in`/`@out`, not vertex traversal: `PROGRESS_OF` is created with `bidirectional=false` (see [HorizonOwnership]). Each link's other end is re-checked as owned. */
+    private fun progressLinks(where: String, userEmail: String, uid: String, otherEnd: String): List<ProgressLink> =
+        db.query(
+            "sql",
+            "SELECT @out.uid AS fromUid, @in.uid AS toUid, createdAt, cycleSeq, writer, $otherEnd AS other FROM PROGRESS_OF WHERE ownerEmail = :e AND $where",
+            mapOf("e" to userEmail, "u" to uid),
+        ).use { rs ->
+            val out = mutableListOf<ProgressLink>()
+            while (rs.hasNext()) {
+                val row = rs.next().toMap()
+                val other = row["other"] as? String ?: continue
+                if (HorizonOwnership.findPhraseOwnedByUser(db, userEmail, other) == null) continue
+                out += ProgressLink(
+                    fromUid = row["fromUid"] as? String ?: continue, toUid = row["toUid"] as? String ?: continue,
+                    createdAt = (row["createdAt"] as? Number)?.toLong() ?: 0L, cycleSeq = (row["cycleSeq"] as? Number)?.toLong() ?: 0L, writer = row["writer"] as? String ?: "",
+                )
+            }
+            out.sortedBy { it.createdAt }
         }
 
     override suspend fun touchLastActive(userEmail: String, atMillis: Long): Boolean =
@@ -753,6 +854,12 @@ class ArcadeHorizonStructureStore(
         }
 
     // ── Reads ────────────────────────────────────────────────────────────────
+
+    override suspend fun changesFor(userEmail: String, targetUid: String): List<ChangeRecordView> = read("changesFor", emptyList()) {
+        // The target must be the caller's own before anything about it is shown; the records are also scoped by their own ownerEmail.
+        resolveOwnedVertex(userEmail, targetUid) ?: return@read emptyList()
+        changeLog.forTarget(userEmail, targetUid)
+    }
 
     override suspend fun lastActiveAt(userEmail: String): Long? = read("lastActiveAt", null) {
         (HorizonOwnership.findUserVertex(db, userEmail)?.get("lastActiveAt") as? Number)?.toLong()
@@ -855,7 +962,7 @@ class ArcadeHorizonStructureStore(
             if (sourceUids.isEmpty()) return@read emptyList()
             val sql = if (openOnly) {
                 // Open means the item's own coarse status, not a copy on the assertion.
-                "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids AND @in.@type IN ['Task', 'Question'] AND @in.status = 'open' ORDER BY timestamp DESC LIMIT :limit"
+"SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids AND @in.@type IN ${ItemKinds.sqlTypeList(KindList.OPEN_ONLY_LISTING)} AND @in.status = 'open' ORDER BY timestamp DESC LIMIT :limit"
             } else {
                 "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids ORDER BY timestamp DESC LIMIT :limit"
             }
@@ -901,11 +1008,21 @@ class ArcadeHorizonStructureStore(
 
 
     /** Runs [body] in one transaction holding the Horizon write lock; [failure] if the lock can't be had or anything throws. */
-    private suspend fun <T> mutate(op: String, failure: T, body: () -> T): T = withContext(Dispatchers.IO) {
+    private suspend fun <T> mutate(op: String, failure: T, body: () -> T): T {
+        // The caller's ChangeContext (the verb being applied), else this operation's own name, becomes the cause of any change recorded in body.
+        val caller = coroutineContext[ChangeContext]
+        val context = ChangeContext(caller?.cause ?: op.replace(Regex("([A-Z])")) { "_" + it.value.lowercase() }, caller?.actor)
+        return mutateIn(context, op, failure, body)
+    }
+
+    private suspend fun <T> mutateIn(context: ChangeContext, op: String, failure: T, body: () -> T): T = withContext(Dispatchers.IO) {
         try {
             withHorizonWriteLock(db, lockTimeoutMs) {
                 var result: T = failure
-                db.transaction { result = body() }
+                db.transaction {
+                    changeContext.set(context)
+                    try { result = body() } finally { changeContext.remove() }
+                }
                 result
             } ?: run {
                 logger.warn("$op: could not acquire the Horizon write lock within ${lockTimeoutMs}ms — rejecting")
@@ -1017,14 +1134,15 @@ class ArcadeHorizonStructureStore(
     }
 
     private fun Vertex.toItemRecord(): ItemRecord {
-        val kind = ItemKind.entries.firstOrNull { it.typeName == typeName } ?: ItemKind.FACT
+        val kind = ItemKinds.kindOf(typeName)
+        val spec = ItemKinds.of(kind)
         return ItemRecord(
             uid = get("uid") as String,
             kind = kind,
             text = get("text") as? String ?: "",
-            status = if (kind == ItemKind.FACT) null else get("status") as? String,
-            dueAt = (get(if (kind == ItemKind.EVENT) "occursAt" else "dueAt") as? Number)?.toLong(),
-            state = if (kind == ItemKind.FACT) null else WorkState.fromWire(get("state") as? String),
+            status = if (!spec.carriesState) null else get("status") as? String,
+            dueAt = (get(spec.dueProperty ?: "dueAt") as? Number)?.toLong(),
+            state = if (!spec.carriesState) null else WorkState.fromWire(get("state") as? String),
             dueKind = DueKind.fromWire(get("dueKind") as? String),
             dueHasTime = get("dueHasTime") == true,
             startsAt = (get("startsAt") as? Number)?.toLong(),

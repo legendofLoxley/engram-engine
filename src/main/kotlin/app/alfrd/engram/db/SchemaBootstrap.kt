@@ -6,7 +6,18 @@ import com.arcadedb.schema.Type
 
 object SchemaBootstrap {
 
-    fun bootstrap(db: Database) {
+    /**
+     * Creates every type, property and index the engine needs, adding only what is missing: safe to run on every start against the live graph.
+     *
+     * [enforceConstraints] (env `SCHEMA_ENFORCE_CONSTRAINTS`, default off) additionally applies the database-level constraints in
+     * [SchemaConstraints], each only if no existing row breaks it. With it off the schema is exactly what it was before constraints existed.
+     */
+    fun bootstrap(db: Database, enforceConstraints: Boolean = SchemaConstraints.enabled()) {
+        bootstrapSchema(db)
+        if (enforceConstraints) SchemaConstraints.apply(db)
+    }
+
+    private fun bootstrapSchema(db: Database) {
         db.transaction {
             val schema = db.schema
 
@@ -163,20 +174,20 @@ object SchemaBootstrap {
             ensureVertex(schema, "Task") { vt ->
                 vt.addSuperType("Phrase")
                 vt.createProperty("dueAt", Type.LONG)           // nullable, epoch millis
-                vt.createProperty("status", Type.STRING)        // open | resolved
+                vt.createProperty("status", Type.STRING)        // coarse projection of `state`: open (open, active, waiting) | resolved (done, dropped); `state` below is the truth
                 vt.createProperty("resolvedAt", Type.LONG)      // nullable
             }
 
             ensureVertex(schema, "Event") { vt ->
                 vt.addSuperType("Phrase")
                 vt.createProperty("occursAt", Type.LONG)        // nullable, epoch millis
-                vt.createProperty("status", Type.STRING)        // open | resolved (past or cancelled)
+                vt.createProperty("status", Type.STRING)        // coarse projection of `state`: open | resolved (done or dropped: past or cancelled)
                 vt.createProperty("resolvedAt", Type.LONG)      // nullable
             }
 
             ensureVertex(schema, "Question") { vt ->
                 vt.addSuperType("Phrase")
-                vt.createProperty("status", Type.STRING)        // open | resolved
+                vt.createProperty("status", Type.STRING)        // coarse projection of `state`: open | resolved (done or dropped)
                 vt.createProperty("askedBy", Type.STRING)       // alfrd | user
                 vt.createProperty("resolvedAt", Type.LONG)      // nullable
             }
@@ -322,6 +333,19 @@ object SchemaBootstrap {
                 et.createProperty("updatedAt", Type.LONG)
             }
 
+            // Item -PROGRESS_OF-> Item: one item records progress on another (a task toward a goal). A plain fact about the pair: when, whose, in
+            // which cycle and which writer said so. No score, no strength and no decay, on purpose. Written and read only through
+            // HorizonStructureStore.addProgress / progressOf; no verb creates one and the Horizon does not show them yet.
+            ensureEdge(schema, "PROGRESS_OF") { et ->
+                et.createProperty("createdAt", Type.LONG)
+                et.createProperty("ownerEmail", Type.STRING)
+                et.createProperty("cycleSeq", Type.LONG)
+                et.createProperty("writer", Type.STRING)
+            }
+
+            // The append-only log of changes to the things the Horizon keeps state on (ChangeRecord, linked by HAS_CHANGE). See ChangeRecords.
+            app.alfrd.engram.cognitive.pipeline.horizon.ChangeRecords.ensureSchema(schema)
+
             // ── Additive migrations — safe to run on pre-existing types ──
             ensureProperty(schema, "User",    "email",               Type.STRING)
             ensureProperty(schema, "User",    "updatedAt",           Type.LONG)
@@ -338,7 +362,7 @@ object SchemaBootstrap {
             // Where an utterance arrived from (`claude` for the owner's Horizon tool); null means the ordinary conversation.
             ensureProperty(schema, "Utterance", "channel",           Type.STRING)
             // The user's explicit "keep this in front of me" / "stop bringing this up" — pinned |
-            // suppressed, absent = normal. Persisted here; the selector (not built yet) is what acts on it.
+            // suppressed, absent = normal. Persisted here; HorizonSelector acts on it (pinned items are held in view, suppressed ones are left out).
             ensureProperty(schema, "Phrase",  "attention",           Type.STRING)
             // The user's own words, kept when `text` is a short label the interpretation model wrote for a
             // task or event ("Order the soil" for "I never got around to ordering the soil"). Absent when
@@ -584,6 +608,7 @@ object SchemaBootstrap {
             // "Everything this user pinned/suppressed": rare rows, found without scanning their items.
             ensureCompositeIndex(schema, "Phrase",  "attention", "ownerEmail")
             ensureIndex(schema, "ABOUT",       "ownerEmail")
+            ensureIndex(schema, "PROGRESS_OF", "ownerEmail")
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Concept",     "conceptKey")
@@ -682,8 +707,12 @@ object SchemaBootstrap {
         }
     }
 
+    /** True when the type already has an index on exactly these properties, unique or not (a unique one replaces the plain one under SchemaConstraints). */
+    private fun hasIndexOn(schema: Schema, typeName: String, vararg properties: String): Boolean =
+        schema.getType(typeName).getAllIndexes(false).any { it.propertyNames == properties.toList() }
+
     private fun ensureIndex(schema: Schema, typeName: String, property: String) {
-        if (schema.existsType(typeName)) {
+        if (schema.existsType(typeName) && !hasIndexOn(schema, typeName, property)) {
             schema.getType(typeName).getOrCreateTypeIndex(
                 Schema.INDEX_TYPE.LSM_TREE,
                 false,
@@ -693,7 +722,7 @@ object SchemaBootstrap {
     }
 
     private fun ensureCompositeIndex(schema: Schema, typeName: String, vararg properties: String) {
-        if (schema.existsType(typeName)) {
+        if (schema.existsType(typeName) && !hasIndexOn(schema, typeName, *properties)) {
             schema.getType(typeName).getOrCreateTypeIndex(
                 Schema.INDEX_TYPE.LSM_TREE,
                 false,
