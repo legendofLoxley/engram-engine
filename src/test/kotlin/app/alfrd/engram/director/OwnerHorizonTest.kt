@@ -172,6 +172,20 @@ class OwnerHorizonTest {
     }
 
     @Test
+    fun `the horizon response is a channel rendering - no alfrd identity or Director or Actor role, but situation, marker, Horizon and refs`() = app { c ->
+        val j = json(c.horizon(null).bodyAsText())
+        val h = j["horizon"]!!.jsonPrimitive.content
+        assertTrue(h.startsWith(DirectorPromptRenderer.CHANNEL_PREAMBLE), h.take(300))
+        for (forbidden in listOf("You are alfrd", "conversational Director", "Director", "Actor", "This is your standing context", "no one is speaking to you")) {
+            assertTrue(forbidden !in h, "channel response must not contain \"$forbidden\"")
+        }
+        assertTrue("Your situation:" in h)
+        assertTrue("Memory marker:" in h)
+        assertTrue("Contextual awareness" in h)
+        assertTrue(j["refs"]!!.jsonPrimitive.content.isNotBlank(), "the refs snapshot is still returned")
+    }
+
+    @Test
     fun `a message lands in the ledger as a user utterance on channel claude and allocates a cycle`() = app { c ->
         val before = ChangeMarkerReader(manager.getDatabase()).read(email)!!.lastCycleSeq
         val j = c.send("Remember that the quarterly review is on my mind.", "[]")

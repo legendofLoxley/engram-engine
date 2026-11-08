@@ -12,6 +12,8 @@ import java.time.ZoneId
  * and renders both with [DirectorPromptRenderer]. The one place that does it, so the tick and the owner's Horizon tool
  * ([app.alfrd.engram.api.configureOwnerHorizonRoutes]) cannot drift: what the tool returns is what the tick would have written.
  *
+ * [render] with `forChannel` swaps only the opening (a neutral preamble for a channel such as Claude, not the Director's policy).
+ *
  * Reads only; it writes nothing and allocates no cycle. Which cycle the Horizon is assembled at is the caller's to say.
  */
 class StandingContext(
@@ -27,7 +29,7 @@ class StandingContext(
 ) {
     data class Rendered(val text: String, val outcome: AssembleOutcome, val state: SelfState)
 
-    suspend fun render(marker: ChangeMarker, changes: List<ChangeMarker.Change>, reason: String, now: Instant, cycleSeq: Long): Rendered {
+    suspend fun render(marker: ChangeMarker, changes: List<ChangeMarker.Change>, reason: String, now: Instant, cycleSeq: Long, forChannel: Boolean = false): Rendered {
         val outcome = assembler.assemble(email, cycleSeq)
         val state = SelfState(
             tickEnabled = tickEnabled,
@@ -42,6 +44,8 @@ class StandingContext(
             marker = marker,
             changes = changes,
         )
-        return Rendered(DirectorPromptRenderer.render(state, outcome, zone, now), outcome, state)
+        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now)
+        else DirectorPromptRenderer.render(state, outcome, zone, now)
+        return Rendered(text, outcome, state)
     }
 }

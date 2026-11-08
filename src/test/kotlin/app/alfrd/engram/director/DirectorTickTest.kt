@@ -6,6 +6,7 @@ import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
+import app.alfrd.engram.cognitive.pipeline.Actor
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.ContainerKind
 import app.alfrd.engram.cognitive.pipeline.horizon.FocusMode
@@ -171,6 +172,27 @@ class DirectorTickTest {
         assertTrue("up to 10 tasks per cycle (hard ceiling 25); plan call timeout 600 s, at most 12000 tokens (as configured)" in text, text)
         assertTrue("Changed since the last tick: Source 2 -> 3." in text, text)
         assertTrue("Tick: enabled, every 300 s; this one at 2026-11-07 12:00:00 Z (marker changed)" in text, text)
+    }
+
+    @Test
+    fun `the Director's own prompt is unchanged - its policy, its standing-context line, then the same situation and Horizon the channel gets`() {
+        val marker = ChangeMarkerReader(db).read(email)!!
+        val state = SelfState(true, 300, "2026-11-07T12:00:00Z", "marker changed", FakeProbe(setOf(8081)).servers(), MemoryUse(), NotionState(false), emptyMap(),
+            BudgetDefaults(10, 25, 600, 12_000, false), marker, marker.changesSince(null))
+        val outcome = AssembleOutcome.BudgetExceeded("test")
+        val now = Instant.parse("2026-11-07T12:00:00Z")
+        val situation = DirectorPromptRenderer.situation(state, ZoneOffset.UTC)
+        val horizon = "Contextual awareness: unavailable this tick (test)."
+        val director = DirectorPromptRenderer.render(state, outcome, ZoneOffset.UTC, now)
+        assertEquals(
+            Actor.STANDING_CONTEXT_POLICY +
+                "\n\nThis is your standing context, built without a message from the user: no one is speaking to you, and nothing here was just said.\n\n" +
+                situation + "\n\n" + horizon + "\n",
+            director,
+        )
+        val channel = DirectorPromptRenderer.renderForChannel(state, outcome, ZoneOffset.UTC, now)
+        assertEquals(DirectorPromptRenderer.CHANNEL_PREAMBLE + "\n\n" + situation + "\n\n" + horizon + "\n", channel)
+        assertTrue("You are alfrd" in director && "You are alfrd" !in channel)
     }
 
     @Test

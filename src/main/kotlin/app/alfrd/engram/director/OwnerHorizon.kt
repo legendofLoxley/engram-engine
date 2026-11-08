@@ -85,7 +85,7 @@ class OwnerHorizonService(
 
     private suspend fun read(): OwnerHorizonResponse {
         val marker = markerOrThrow()
-        val rendered = standing.render(marker, emptyList(), "Horizon tool", clock(), marker.lastCycleSeq + 1)
+        val rendered = standing.render(marker, emptyList(), "Horizon tool", clock(), marker.lastCycleSeq + 1, forChannel = true)
         return OwnerHorizonResponse(rendered.text, refs(), null, emptyList())
     }
 
@@ -127,7 +127,7 @@ class OwnerHorizonService(
         }
 
         val after = markerOrThrow()
-        val rendered = standing.render(after, after.changesSince(before), "Horizon tool", clock(), cycleSeq)
+        val rendered = standing.render(after, after.changesSince(before), "Horizon tool", clock(), cycleSeq, forChannel = true)
         logger.info("owner-horizon: cycle={} message={} operations={} applied={}", cycleSeq, text != null, reports.size, reports.count { it.applied })
         return OwnerHorizonResponse(rendered.text, refs(), cycleSeq, reports)
     }
