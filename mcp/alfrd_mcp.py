@@ -2,8 +2,8 @@
 
 The tool calls the engine's owner route (POST /owner/horizon on loopback) with the owner token and returns the response as text:
 the Director's standing prompt (self-state, change marker, Horizon), the refs the operation verbs may name, and what happened to each
-operation sent. The operation verbs documented in the tool's input schema are read from ops.schema.json, which the engine's test suite
-checks against the Kotlin definition (Interpreter.OWNER_OPS_SCHEMA), so they are the code's, not a paraphrase.
+operation sent. The operation verbs and the `sources` field documented in the tool's input schema are read from ops.schema.json, which the
+engine's test suite checks against the Kotlin definition (Interpreter.OWNER_TOOL_SCHEMA), so they are the code's, not a paraphrase.
 
 The token is read from ~/.config/engram/owner-token (refused if group or others can read it) on every call and is never printed or logged.
 Nothing is written to stdout except the MCP protocol: stdout is the transport.
@@ -26,7 +26,9 @@ ENGINE_URL = os.environ.get("ALFRD_ENGINE_URL", "http://127.0.0.1:8082").rstrip(
 TOKEN_FILE = Path(os.environ.get("ALFRD_OWNER_TOKEN_FILE", str(Path.home() / ".config" / "engram" / "owner-token")))
 TIMEOUT_SECONDS = float(os.environ.get("ALFRD_HORIZON_TIMEOUT_S", "60"))
 
-OPS_SCHEMA: dict[str, Any] = json.loads((HERE / "ops.schema.json").read_text())
+_SCHEMA: dict[str, Any] = json.loads((HERE / "ops.schema.json").read_text())
+OPS_SCHEMA: dict[str, Any] = _SCHEMA["operations"]
+SOURCES_SCHEMA: dict[str, Any] = _SCHEMA["sources"]
 
 DESCRIPTION = """\
 Look at the owner's Horizon, and optionally write to it. Every call returns the refreshed Horizon: alfrd's standing context (its situation,
@@ -42,6 +44,11 @@ without a message are refused for that reason.
 
 Refer to existing things only by the refs in the "Snapshot" section of the last response (c1, i2 ...). Refs are positional: take them from
 the most recent response, not an earlier one. A refused operation reports the guard's reason and writes nothing. At most 8 operations per call.
+
+Sourced writes are for documents (a Notion page first): send the page in `sources` (a stable `id`, `title`, `kind` notion_page, and its `text` or
+`chunks`; re-sending unchanged text adds nothing, changed text supersedes the earlier text), then file an item with a record_item that cites it:
+`source` is that id and `quote` is a verbatim passage of the source's text. The item is shown as coming from the document, never as the owner's
+statement; the owner's own statements still use the message.
 """
 
 mcp = FastMCP("alfrd", instructions="alfrd's memory Horizon. One tool: horizon.")
@@ -71,7 +78,13 @@ def _format(body: dict[str, Any]) -> str:
         for i, op in enumerate(ops, 1):
             status = "applied" if op.get("applied") else "REFUSED"
             quote = f' (quote: "{op["quote"]}")' if op.get("quote") else ""
-            parts.append(f"  {i}. {op.get('verb', '?')}: {status} - {op.get('detail', '')}{quote}")
+            where = f' [source: "{op["source"]}", {op.get("location", "")}]' if op.get("source") else ""
+            parts.append(f"  {i}. {op.get('verb', '?')}: {status} - {op.get('detail', '')}{quote}{where}")
+    sources = body.get("sources") or []
+    if sources:
+        parts.append("Sources:")
+        for i, src in enumerate(sources, 1):
+            parts.append(f"  {i}. {src.get('id', '?')} ({src.get('title', '')}): {'stored' if src.get('stored') else 'REFUSED'} - {src.get('detail', '')}")
     return "\n".join(parts).strip() + "\n"
 
 
@@ -85,12 +98,18 @@ def horizon(
         list[dict[str, Any]] | None,
         Field(description="Writes to apply, validated by the engine's guards. Each entry is one of the verbs below.", json_schema_extra=OPS_SCHEMA),
     ] = None,
+    sources: Annotated[
+        list[dict[str, Any]] | None,
+        Field(description="Documents you supply so operations can cite them (see the description). Stored by content hash; sending them is a write.", json_schema_extra=SOURCES_SCHEMA),
+    ] = None,
 ) -> str:
     payload: dict[str, Any] = {}
     if message is not None:
         payload["message"] = message
     if operations:
         payload["operations"] = operations
+    if sources:
+        payload["sources"] = sources
     try:
         response = httpx.post(
             f"{ENGINE_URL}/owner/horizon",

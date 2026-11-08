@@ -91,7 +91,7 @@ object HorizonItemsRenderer {
             // the wording that could imply shared authorship changed here.
             is SurfacingReason.ActiveReactivation ->
                 "an automatic relevance link surfaced this again, separate from: \"${surfacing.info.triggeringPhraseText.text}\" — the link alone does not mean they share a source or confirm each other"
-            is SurfacingReason.JustAsserted -> "just noted"
+            is SurfacingReason.JustAsserted -> if (item.provenance == ProvenanceKind.CHANNEL_SOURCED) "just filed from a document" else "just noted"
             is SurfacingReason.RecentActorEvidence -> "reported recently, independent of this conversation"
             is SurfacingReason.DormantOpen -> "noted earlier, still open"
             is SurfacingReason.Pinned -> "they asked you to keep this in front of them"
@@ -108,7 +108,7 @@ object HorizonItemsRenderer {
         // observation/interpretation/tool-result distinction must survive regardless of which
         // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
         // `when (surfacing)` above.
-        val provenanceNote = provenanceAnnotation(item.provenance, item.actorMetadata)?.let { " [$it]" } ?: ""
+        val provenanceNote = (provenanceAnnotation(item.provenance, item.actorMetadata) ?: sourcedAnnotation(item))?.let { " [$it]" } ?: ""
         HorizonPromptItem(
             renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$askNote",
             essential = essential,
@@ -124,6 +124,7 @@ object HorizonItemsRenderer {
         }
         val fromOutside = item.category == HorizonItemCategory.ENVIRONMENT_EVENT || item.actorMetadata != null ||
             item.surfacing is SurfacingReason.Peripheral || item.surfacing is SurfacingReason.RecentActorEvidence
+        if (item.provenance == ProvenanceKind.CHANNEL_SOURCED) return "From documents supplied by a channel"
         return if (fromOutside) "Reported from outside this conversation" else "Not filed under any project"
     }
 
@@ -230,7 +231,23 @@ object HorizonItemsRenderer {
             }
             "tool result, $outcomeWord — self-reported, not independently verified"
         }
+        ProvenanceKind.CHANNEL_SOURCED -> null // needs the document's name; see [sourcedAnnotation]
         ProvenanceKind.EXPLICIT_USER_STATEMENT, ProvenanceKind.ENVIRONMENT_SIGNAL, ProvenanceKind.MODEL_INFERENCE -> null
+    }
+
+    /**
+     * An item a channel filed from a document it supplied: said to be from that document (title and place), plainly not the owner's own
+     * statement or commitment, and not read by the Director. It becomes the owner's only when they adopt it in a message.
+     */
+    private fun sourcedAnnotation(item: HorizonItem): String? {
+        if (item.provenance != ProvenanceKind.CHANNEL_SOURCED) return null
+        val doc = item.documentSource
+        val from = if (doc == null) "a document supplied by a channel" else buildString {
+            append("\"${doc.title}\"")
+            if (doc.location.isNotBlank()) append(", ${doc.location}")
+            if (doc.superseded) append("; the document has since changed")
+        }
+        return "from $from — not the owner's own statement or commitment unless they adopt it; text supplied by a channel, not read by the Director"
     }
 
     /**

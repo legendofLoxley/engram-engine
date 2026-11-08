@@ -51,6 +51,13 @@ data class SourceInput(
     val unreadPages: Int? = null,
     /** Set when the file was fetched from Google Drive. */
     val drive: DriveFacts? = null,
+    /**
+     * Set when the text was supplied by a channel rather than read by alfrd: who supplied it (the `Utterance.channel` value, e.g. `claude`).
+     * The Source then records `readByDirector = false`, and [url] / [lastEditedAt] are what the channel said about the page.
+     */
+    val suppliedBy: String? = null,
+    val url: String? = null,
+    val lastEditedAt: String? = null,
 )
 
 data class SourceRecord(
@@ -60,6 +67,13 @@ data class SourceRecord(
     val drive: DriveFacts? = null,
     /** Who issued the document ("Portland Public Schools"): the parent a school it names takes unless the page names another. Set by a person, never read off the page. */
     val issuer: String? = null,
+    /** For text a channel supplied: the channel, and whether the Director read it (it did not). Null for everything alfrd read itself. */
+    val suppliedBy: String? = null,
+    val readByDirector: Boolean? = null,
+    val url: String? = null,
+    val lastEditedAt: String? = null,
+    /** The uid of the later Source that replaced this one (same locator, other text) — set only for channel-supplied text. */
+    val supersededBy: String? = null,
 )
 
 data class ChunkRecord(
@@ -130,6 +144,9 @@ class SourceStore(private val db: Database) {
                     set("readMode", input.readMode)
                     set("ownerEmail", userEmail)
                     input.threadId?.let { set("threadId", it) }
+                    input.suppliedBy?.let { set("suppliedBy", it); set("readByDirector", false) }
+                    input.url?.let { set("url", it) }
+                    input.lastEditedAt?.let { set("lastEditedAt", it) }
                     input.fileSha256?.let { set("fileSha256", it) }
                     input.pageCount?.let { set("pageCount", it) }
                     input.ocrPages?.let { set("ocrPages", it) }
@@ -204,6 +221,35 @@ class SourceStore(private val db: Database) {
     fun sources(userEmail: String): List<SourceRecord> =
         db.query("sql", "SELECT FROM Source WHERE ownerEmail = :o AND contentHash IS NOT NULL ORDER BY readAt", mapOf("o" to userEmail))
             .use { rs -> val out = ArrayList<SourceRecord>(); while (rs.hasNext()) out += rs.next().toElement().asVertex().toRecord(); out }
+
+    /** The Source for [locator] that is not superseded (the newest text a channel supplied), or null. */
+    fun currentByLocator(userEmail: String, type: String, locator: String): SourceRecord? =
+        db.query("sql", "SELECT FROM Source WHERE ownerEmail = :o AND type = :t AND locator = :l AND contentHash IS NOT NULL ORDER BY readAt DESC", mapOf("o" to userEmail, "t" to type, "l" to locator))
+            .use { rs ->
+                var found: SourceRecord? = null
+                while (found == null && rs.hasNext()) rs.next().toElement().asVertex().takeIf { it.get("supersededBy") == null }?.let { found = it.toRecord() }
+                found
+            }
+
+    /**
+     * Makes [uid] the current text for its locator: every other Source of that owner, type and locator is marked `supersededBy = uid`, and [uid]
+     * itself is cleared (a document returned to earlier text becomes current again). Nothing is deleted. Returns how many Sources changed, so a
+     * re-send of unchanged text, which finds the current Source already current, writes nothing and returns 0.
+     */
+    fun markCurrent(userEmail: String, uid: String): Int = synchronized(LOCK) {
+        val target = db.query("sql", "SELECT FROM Source WHERE uid = :u AND ownerEmail = :o", mapOf("u" to uid, "o" to userEmail))
+            .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null } ?: return 0
+        val others = db.query(
+            "sql", "SELECT FROM Source WHERE ownerEmail = :o AND type = :t AND locator = :l AND uid <> :u AND contentHash IS NOT NULL",
+            mapOf("o" to userEmail, "t" to (target.get("type") as? String ?: ""), "l" to (target.get("locator") as? String ?: ""), "u" to uid),
+        ).use { rs -> val out = ArrayList<Vertex>(); while (rs.hasNext()) out += rs.next().toElement().asVertex(); out }
+        var changed = 0
+        db.transaction {
+            if (target.get("supersededBy") != null) { target.modify().set("supersededBy", null).save(); changed++ }
+            others.filter { it.get("supersededBy") != uid }.forEach { it.modify().set("supersededBy", uid).save(); changed++ }
+        }
+        changed
+    }
 
     /** Records who issued a Source. False when the owner has no such Source. A blank issuer clears it. */
     fun setIssuer(userEmail: String, uid: String, issuer: String?): Boolean {
@@ -323,6 +369,8 @@ class SourceStore(private val db: Database) {
         fileSha256 = get("fileSha256") as? String, pageCount = (get("pageCount") as? Number)?.toInt(),
         ocrPages = (get("ocrPages") as? Number)?.toInt(), unreadPages = (get("unreadPages") as? Number)?.toInt(),
         issuer = get("issuer") as? String,
+        suppliedBy = get("suppliedBy") as? String, readByDirector = get("readByDirector") as? Boolean,
+        url = get("url") as? String, lastEditedAt = get("lastEditedAt") as? String, supersededBy = get("supersededBy") as? String,
         drive = (get("driveFileId") as? String)?.let { id ->
             DriveFacts(
                 fileId = id, fileName = get("driveFileName") as? String, webViewLink = get("driveWebViewLink") as? String,

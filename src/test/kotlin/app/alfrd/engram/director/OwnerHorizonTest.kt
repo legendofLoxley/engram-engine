@@ -165,7 +165,7 @@ class OwnerHorizonTest {
             val j = json(r.bodyAsText())
             assertNull(j["cycleSeq"]?.takeIf { it !is kotlinx.serialization.json.JsonNull })
             assertEquals(0, j["operations"]!!.jsonArray.size)
-            assertTrue(j["horizon"]!!.jsonPrimitive.content.contains("Your situation:"))
+            assertTrue(j["horizon"]!!.jsonPrimitive.content.contains("alfrd's situation:"))
             assertTrue(j["horizon"]!!.jsonPrimitive.content.contains("Contextual awareness"))
         }
         assertEquals(before, fingerprint())
@@ -179,7 +179,9 @@ class OwnerHorizonTest {
         for (forbidden in listOf("You are alfrd", "conversational Director", "Director", "Actor", "This is your standing context", "no one is speaking to you")) {
             assertTrue(forbidden !in h, "channel response must not contain \"$forbidden\"")
         }
-        assertTrue("Your situation:" in h)
+        assertTrue("alfrd's situation:" in h)
+        assertTrue("Your situation:" !in h && "your durable memory" !in h)
+        assertTrue("from alfrd's memory of the owner:" in h)
         assertTrue("Memory marker:" in h)
         assertTrue("Contextual awareness" in h)
         assertTrue(j["refs"]!!.jsonPrimitive.content.isNotBlank(), "the refs snapshot is still returned")
@@ -295,7 +297,7 @@ class OwnerHorizonTest {
 
     @Test
     fun `mcp ops schema file is exactly what the interpreter's verbs define`() {
-        val generated = Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), Interpreter.OWNER_OPS_SCHEMA as JsonObject) + "\n"
+        val generated = Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), Interpreter.OWNER_TOOL_SCHEMA) + "\n"
         val file = Path.of("mcp", "ops.schema.json")
         if (System.getenv("UPDATE_OPS_SCHEMA") == "1") Files.writeString(file, generated)
         assertEquals(generated, Files.readString(file), "mcp/ops.schema.json is stale: run the tests with UPDATE_OPS_SCHEMA=1")

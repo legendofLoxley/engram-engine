@@ -21,7 +21,7 @@ import java.security.MessageDigest
  * `owner-jacob` identity, which the identity named by `OWNER_IDENTITY` fixes (a caller cannot name one). The guards on the debug routes are untouched.
  *
  * Order of refusal: not loopback → 403; route not serving → 503; missing or wrong bearer token → 401; bad body → 400.
- * Body (all optional): `{"message": string, "operations": [...]}`. An empty body is a pure read. Any other field, `goals` included, is a 400:
+ * Body (all optional): `{"message": string, "operations": [...], "sources": [...]}`. An empty body is a pure read. Any other field, `goals` included, is a 400:
  * a field that is quietly ignored reads as accepted.
  */
 fun Application.configureOwnerHorizonRoutes(
@@ -44,7 +44,7 @@ fun Application.configureOwnerHorizonRoutes(
             val body = if (raw.isBlank()) JsonObject(emptyMap()) else try {
                 Json.parseToJsonElement(raw) as? JsonObject
             } catch (_: Exception) { null } ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "body must be a JSON object"))
-            body.keys.firstOrNull { it != "message" && it != "operations" }?.let {
+            body.keys.firstOrNull { it != "message" && it != "operations" && it != "sources" }?.let {
                 return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "unknown field: $it"))
             }
             val message = when (val m = body["message"]) {
@@ -57,8 +57,13 @@ fun Application.configureOwnerHorizonRoutes(
                 is JsonArray -> o
                 else -> return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "operations must be an array"))
             }
+            val sources = when (val o = body["sources"]) {
+                null, JsonNull -> null
+                is JsonArray -> o
+                else -> return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "sources must be an array"))
+            }
             try {
-                call.respond(HttpStatusCode.OK, running.service.handle(message, ops))
+                call.respond(HttpStatusCode.OK, running.service.handle(message, ops, sources))
             } catch (e: OwnerHorizonUnavailable) {
                 call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to (e.message ?: "unavailable")))
             }

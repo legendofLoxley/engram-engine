@@ -750,6 +750,7 @@ class ArcadeHorizonAssembler(
             dueAt = state?.dueAt,
             askedBy = state?.askedBy,
             container = state?.container,
+            documentSource = if (c.sourceType == CHANNEL_SOURCED_SOURCE_TYPE) documentNote(c.phraseUid) else null,
         )
         // Ties keep the order the pools always gave them: by the cycle the thing that surfaced it happened in.
         val tie = when (surfacing) {
@@ -789,7 +790,29 @@ class ArcadeHorizonAssembler(
         else -> HorizonItemCategory.FACT
     }
 
+    /** The document and passage a channel-sourced item quotes (item -QUOTES-> chunk <-CONTAINS- source), bounded; null when the link cannot be read. */
+    private fun documentNote(phraseUid: String): DocumentSourceNote? = try {
+        db.query(
+            "sql", "SELECT @in.location AS location, @in.sourceUid AS sourceUid FROM QUOTES WHERE @out.uid = :u ORDER BY createdAt LIMIT 1", mapOf("u" to phraseUid),
+        ).use { rs ->
+            if (!rs.hasNext()) return@use null
+            val row = rs.next().toMap()
+            val sourceUid = row["sourceUid"] as? String ?: return@use null
+            val source = db.query("sql", "SELECT name, supersededBy FROM Source WHERE uid = :u", mapOf("u" to sourceUid)).use { r -> if (r.hasNext()) r.next().toMap() else null }
+                ?: return@use null
+            DocumentSourceNote(
+                title = (source["name"] as? String ?: "").take(HorizonLimits.MAX_CONTAINER_NAME_LENGTH),
+                location = (row["location"] as? String ?: "").take(HorizonLimits.MAX_CONTAINER_NAME_LENGTH),
+                superseded = !(source["supersededBy"] as? String).isNullOrBlank(),
+            )
+        }
+    } catch (e: Exception) {
+        logger.warn("documentNote: could not read the document link: {}", e::class.java.simpleName)
+        null
+    }
+
     private fun provenanceFor(sourceType: String): ProvenanceKind = when (sourceType) {
+        CHANNEL_SOURCED_SOURCE_TYPE -> ProvenanceKind.CHANNEL_SOURCED
         ENVIRONMENT_SOURCE_TYPE -> ProvenanceKind.ENVIRONMENT_SIGNAL
         ACTOR_OBSERVATION_SOURCE_TYPE -> ProvenanceKind.ACTOR_OBSERVATION
         ACTOR_INTERPRETATION_SOURCE_TYPE -> ProvenanceKind.ACTOR_INTERPRETATION
