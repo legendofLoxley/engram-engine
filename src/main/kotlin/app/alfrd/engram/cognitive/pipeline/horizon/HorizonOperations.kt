@@ -58,6 +58,19 @@ data class RecordItem(
     val itemKey: String? = null,
     /** The extraction run that found this item at its chunk, when it is a claim. Only meaningful with [chunkUid]. */
     val runId: String? = null,
+    /** Where the item stands when recorded; null means open. From a source this is the source's claim, never the owner's. */
+    val state: WorkState? = null,
+    /** Whether [dueAt] is a promise or a hope; null reads as soft. */
+    val dueKind: DueKind? = null,
+    /** True when [dueAt] was given with a time of day (the precision is kept). */
+    val dueHasTime: Boolean = false,
+    val startsAt: Long? = null,
+    val startsHasTime: Boolean = false,
+    val nudgeAt: Long? = null,
+    val nudgeHasTime: Boolean = false,
+    val happenedAt: Long? = null,
+    val happenedHasTime: Boolean = false,
+    val waitingOn: String? = null,
 ) : HorizonOperation { override val verb get() = "record_item" }
 
 @Serializable
@@ -66,8 +79,28 @@ data class ResolveItem(val targetUid: String, override val quote: String) : Hori
 @Serializable
 data class ReopenItem(val targetUid: String, override val quote: String) : HorizonOperation { override val verb get() = "reopen_item" }
 
+/** Moves an item to a state. [nudgeAt] is the date to check in on a waiting item; [waitingOn] who or what it waits on. `resolve_item` and `reopen_item` are this with done and open. */
 @Serializable
-data class CorrectItem(val targetUid: String, override val quote: String, val dueAt: Long? = null, val title: String? = null) : HorizonOperation { override val verb get() = "correct_item" }
+data class SetState(
+    val targetUid: String,
+    val state: WorkState,
+    override val quote: String,
+    val nudgeAt: Long? = null,
+    val nudgeHasTime: Boolean = false,
+    val waitingOn: String? = null,
+) : HorizonOperation { override val verb get() = "set_state" }
+
+@Serializable
+data class CorrectItem(
+    val targetUid: String,
+    override val quote: String,
+    val dueAt: Long? = null,
+    val title: String? = null,
+    val dueHasTime: Boolean = false,
+    val dueKind: DueKind? = null,
+    val nudgeAt: Long? = null,
+    val nudgeHasTime: Boolean = false,
+) : HorizonOperation { override val verb get() = "correct_item" }
 
 @Serializable
 data class FileItem(val targetUid: String, val intoUid: String, override val quote: String = "") : HorizonOperation { override val verb get() = "file_item" }
@@ -125,6 +158,13 @@ data class SnapshotItem(
     val attention: AttentionDirective?,
     /** A suppressed item of the focused project, listed apart under "Hidden (suppressed)" so it can be restored by ref. */
     val hidden: Boolean = false,
+    val state: WorkState? = null,
+    val dueKind: DueKind? = null,
+    val dueHasTime: Boolean = false,
+    val nudgeAt: Long? = null,
+    val waitingOn: String? = null,
+    /** True for an item a channel filed from a document whose state is the document's claim, not the owner's. */
+    val stateFromSource: Boolean = false,
 )
 
 /**
@@ -153,6 +193,11 @@ data class ViewSnapshot(
     fun itemByUid(uid: String?): SnapshotItem? = items.firstOrNull { it.uid == uid }
     fun isEmpty(): Boolean = containers.isEmpty() && items.isEmpty()
 
+    private fun describeMoment(at: Long, hasTime: Boolean): String {
+        val moment = java.time.Instant.ofEpochMilli(at).atZone(zone)
+        return if (hasTime) "${moment.toLocalDate()} ${"%02d:%02d".format(moment.hour, moment.minute)}" else moment.toLocalDate().toString()
+    }
+
     /** The exact text placed in the model's prompt. */
     fun render(): String = buildString {
         // Qualified: a bare isEmpty() here resolves to the StringBuilder's (true while it is still empty).
@@ -174,8 +219,20 @@ data class ViewSnapshot(
         fun line(i: SnapshotItem) {
             append("  ${i.ref} ${i.kind.name.lowercase()} \"${i.text.replace('"', '\'').take(ITEM_TEXT_CAP)}\"")
             i.projectRef?.let { append(" [in $it]") }
-            i.dueAt?.let { append(" due ${java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate()}") }
-            if (i.status == "resolved") append(" (resolved)")
+            i.dueAt?.let { append(" due ${describeMoment(it, i.dueHasTime)} ${(i.dueKind ?: DueKind.SOFT).wire()}") }
+            when (i.state) {
+                WorkState.DONE -> append(" (resolved)")
+                WorkState.DROPPED -> append(" (dropped)")
+                WorkState.ACTIVE -> append(" (active${if (i.stateFromSource) ", per the source" else ""})")
+                WorkState.WAITING -> {
+                    append(" (waiting")
+                    i.waitingOn?.let { append(" on $it") }
+                    i.nudgeAt?.let { append(", check in ${java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate()}") }
+                    if (i.stateFromSource) append(", per the source")
+                    append(")")
+                }
+                else -> if (i.status == "resolved") append(" (resolved)")
+            }
             if (i.about.isNotEmpty()) append(" (about: ${i.about.joinToString(", ")})")
             i.attention?.let { append(" (${it.name.lowercase()})") }
             append('\n')
@@ -311,6 +368,10 @@ object OperationParser {
                         // A project reference that resolves to nothing is dropped, not fatal: the item is still worth saving, unfiled.
                     }
                 }
+                val state = obj.str("state")?.let { WorkState.fromWire(it) ?: return One.Rejected("unknown_state") }
+                val dueKind = obj.str("due_kind")?.let { DueKind.fromWire(it) ?: return One.Rejected("unknown_due_kind") }
+                // The state and time fields belong to tasks, events and questions; a fact has only the moment it happened.
+                if (kind == ItemKind.FACT && (state != null || dueKind != null || obj.str("waiting_on") != null || obj.str("nudge") != null || obj.str("starts") != null)) return One.Rejected("not_for_a_fact")
                 One.Ok(
                     RecordItem(
                         kind = kind,
@@ -319,6 +380,16 @@ object OperationParser {
                         projectUid = projectUid,
                         projectName = projectName,
                         dueAt = parseWhen(obj.str("due"), zone, endOfDayForDateOnly = kind != ItemKind.EVENT),
+                        dueHasTime = obj.str("due")?.contains('T') == true,
+                        state = state,
+                        dueKind = dueKind,
+                        startsAt = parseWhen(obj.str("starts"), zone, endOfDayForDateOnly = false),
+                        startsHasTime = obj.str("starts")?.contains('T') == true,
+                        nudgeAt = parseWhen(obj.str("nudge"), zone, endOfDayForDateOnly = false),
+                        nudgeHasTime = obj.str("nudge")?.contains('T') == true,
+                        happenedAt = parseWhen(obj.str("happened"), zone, endOfDayForDateOnly = false),
+                        happenedHasTime = obj.str("happened")?.contains('T') == true,
+                        waitingOn = obj.str("waiting_on")?.trim()?.takeIf { it.isNotBlank() },
                         about = obj.strList("about").map { it.trim() }.filter { it.isNotBlank() && it.length <= 40 }.distinct().take(MAX_ABOUT),
                         askWhichProject = obj.bool("ask_which_project") == true && projectUid == null && projectName == null,
                     ),
@@ -336,12 +407,43 @@ object OperationParser {
                     One.Ok(ReopenItem(target, quote))
                 }
             }
+            "set_state" -> {
+                val target = snapshot.uidFor(obj.str("item")) ?: return One.Rejected("unknown_ref")
+                val item = snapshot.item(obj.str("item"))
+                // Only a task, event or question has a state (a plain fact or a project does not).
+                if (item == null || item.kind == ItemKind.FACT) return One.Rejected("not_resolvable")
+                val state = WorkState.fromWire(obj.str("state")) ?: return One.Rejected("unknown_state")
+                if (quote.endsWith("?")) return One.Rejected("question_detected")
+                if (state == WorkState.DONE) {
+                    // Finishing something is held to the same guard as resolve_item: a negated clause never closes real work.
+                    val clause = clauseContaining(utterance, quote)
+                    if (NEGATION_REGEX.containsMatchIn(clause)) return One.Rejected("negation_marker_detected")
+                    if (clause.trim().endsWith("?")) return One.Rejected("question_detected")
+                }
+                One.Ok(
+                    SetState(
+                        target, state, quote,
+                        nudgeAt = parseWhen(obj.str("nudge"), zone, endOfDayForDateOnly = false),
+                        nudgeHasTime = obj.str("nudge")?.contains('T') == true,
+                        waitingOn = obj.str("waiting_on")?.trim()?.takeIf { it.isNotBlank() },
+                    ),
+                )
+            }
             "correct_item" -> {
                 val ref = obj.str("item")
                 val item = snapshot.item(ref) ?: return One.Rejected("unknown_or_unsupported_ref")
                 if (quote.endsWith("?")) return One.Rejected("question_detected")
                 val title = if (item.kind == ItemKind.TASK || item.kind == ItemKind.EVENT) acceptableTitle(obj.str("title"), quote, item.text) else null
-                One.Ok(CorrectItem(item.uid, quote, parseWhen(obj.str("due"), zone, endOfDayForDateOnly = item.kind != ItemKind.EVENT), title))
+                val dueKind = obj.str("due_kind")?.let { DueKind.fromWire(it) ?: return One.Rejected("unknown_due_kind") }
+                One.Ok(
+                    CorrectItem(
+                        item.uid, quote, parseWhen(obj.str("due"), zone, endOfDayForDateOnly = item.kind != ItemKind.EVENT), title,
+                        dueHasTime = obj.str("due")?.contains('T') == true,
+                        dueKind = dueKind,
+                        nudgeAt = parseWhen(obj.str("nudge"), zone, endOfDayForDateOnly = false),
+                        nudgeHasTime = obj.str("nudge")?.contains('T') == true,
+                    ),
+                )
             }
             "file_item" -> {
                 val childRef = obj.str("item")

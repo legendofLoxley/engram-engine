@@ -9,6 +9,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.HorizonItemCategory
 import app.alfrd.engram.cognitive.pipeline.horizon.ProvenanceKind
 import app.alfrd.engram.cognitive.pipeline.horizon.PropagationOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.SurfacingReason
+import app.alfrd.engram.cognitive.pipeline.horizon.WorkState
 import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
@@ -81,7 +82,7 @@ object HorizonItemsRenderer {
     ): List<HorizonPromptItem> = horizon.items.map { item ->
         val surfacing = item.surfacing
         val essential = surfacing is SurfacingReason.ActiveReactivation || surfacing is SurfacingReason.JustAsserted ||
-            surfacing is SurfacingReason.Pinned || surfacing is SurfacingReason.Urgent
+            surfacing is SurfacingReason.Pinned || surfacing is SurfacingReason.Urgent || surfacing is SurfacingReason.CheckIn
         val framing = when (surfacing) {
             // Deliberately does NOT say "new evidence just made this relevant again": a live check
             // showed that phrasing let a reactivation triggered by a Hermes tool-result phrase read
@@ -97,13 +98,14 @@ object HorizonItemsRenderer {
             is SurfacingReason.Pinned -> "they asked you to keep this in front of them"
             is SurfacingReason.InFocus -> "part of what they are focused on"
             is SurfacingReason.Activated -> "connected to what they have been talking about (${surfacing.via})"
-            is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone) +
+            is SurfacingReason.CheckIn -> "the date to check in on this has arrived — ask how it stands, or whether it is still waiting"
+            is SurfacingReason.Urgent -> describeDeadline(surfacing, horizon.asOf, zone, item.dueKind, item.dueHasTime) +
                 if (item.sourceRefs.firstOrNull()?.phraseUid in alreadyRaised) ALREADY_RAISED_NOTE else ""
             is SurfacingReason.Peripheral -> "reported recently by the environment, independent of this conversation"
         }
         // A question Alfrd itself is waiting on: say so, so it is asked rather than assumed answered.
         val askNote = if (item.kind == "question" && item.askedBy == "alfrd") " — a question you want to ask them; ask it naturally, and do not assume an answer" else ""
-        val statusNote = item.status?.let { " [${it.name.lowercase()}]" } ?: ""
+        val statusNote = stateNote(item)
         // Provenance is orthogonal to WHY an item surfaced this cycle (framing, above) — an
         // observation/interpretation/tool-result distinction must survive regardless of which
         // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
@@ -114,6 +116,19 @@ object HorizonItemsRenderer {
             essential = essential,
             group = groupHeading(item, horizon),
         )
+    }
+
+    /**
+     * Where the item stands, in brackets: its own state when it has one (a task or question always says so, as it always has; an event
+     * only when it is not plain open), else the older open/resolved status. Waiting says on whom; a state a document claimed says so.
+     */
+    private fun stateNote(item: HorizonItem): String {
+        val state = item.state?.let { WorkState.fromWire(it) }
+        if (state == null) return item.status?.let { " [${it.name.lowercase()}]" } ?: ""
+        if (state == WorkState.OPEN && item.kind != "task" && item.kind != "question") return ""
+        val on = if (state == WorkState.WAITING) item.waitingOn?.let { " on $it" } ?: "" else ""
+        val per = if (item.stateFromSource && state != WorkState.OPEN) " per the source" else ""
+        return " [${state.wire()}$on$per]"
     }
 
     /** The heading an item is listed under: its project (marking the one they are focused on), else where it came from. */
@@ -136,7 +151,7 @@ object HorizonItemsRenderer {
         horizon.items.mapNotNull { item ->
             val reason = item.surfacing as? SurfacingReason.Urgent ?: return@mapNotNull null
             val uid = item.sourceRefs.firstOrNull()?.phraseUid ?: return@mapNotNull null
-            UrgentDeadline(uid, item.text.text, describeDeadline(reason, horizon.asOf, zone))
+            UrgentDeadline(uid, item.text.text, describeDeadline(reason, horizon.asOf, zone, item.dueKind, item.dueHasTime))
         }
 
     private const val ALREADY_RAISED_NOTE =
@@ -196,16 +211,19 @@ object HorizonItemsRenderer {
      * (the user's), not in 24-hour blocks: on the 20th at 3am, something due at midnight on the 22nd is
      * two days away, not "tomorrow".
      */
-    private fun describeDeadline(reason: SurfacingReason.Urgent, asOf: Long, zone: java.time.ZoneId): String {
+    private fun describeDeadline(reason: SurfacingReason.Urgent, asOf: Long, zone: java.time.ZoneId, dueKind: String? = null, hasTime: Boolean = false): String {
         val today = java.time.Instant.ofEpochMilli(asOf).atZone(zone).toLocalDate()
-        val due = java.time.Instant.ofEpochMilli(reason.dueAt).atZone(zone).toLocalDate()
+        val dueAt = java.time.Instant.ofEpochMilli(reason.dueAt).atZone(zone)
+        val due = dueAt.toLocalDate()
         val days = java.time.temporal.ChronoUnit.DAYS.between(today, due)
+        // The date as given (with the time if one was), then soft or hard when the item has a due date of its own to mark.
+        val whenText = (if (hasTime) "$due ${"%02d:%02d".format(dueAt.hour, dueAt.minute)}" else "$due") + (dueKind?.let { ", $it" } ?: "")
         return when {
-            reason.overdue && days < 0 -> "overdue by ${-days} day${if (days == -1L) "" else "s"} ($due)"
-            reason.overdue -> "overdue"
-            days <= 0 -> "due today ($due)"
-            days == 1L -> "due tomorrow ($due)"
-            else -> "due in $days days ($due)"
+            reason.overdue && days < 0 -> "overdue by ${-days} day${if (days == -1L) "" else "s"} ($whenText)"
+            reason.overdue -> "overdue" + (dueKind?.let { " ($it)" } ?: "")
+            days <= 0 -> "due today ($whenText)"
+            days == 1L -> "due tomorrow ($whenText)"
+            else -> "due in $days days ($whenText)"
         }
     }
 

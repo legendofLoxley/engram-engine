@@ -49,6 +49,15 @@ Sourced writes are for documents (a Notion page first): send the page in `source
 `chunks`; re-sending unchanged text adds nothing, changed text supersedes the earlier text), then file an item with a record_item that cites it:
 `source` is that id and `quote` is a verbatim passage of the source's text. The item is shown as coming from the document, never as the owner's
 statement; the owner's own statements still use the message.
+
+Items have a state: open, active, waiting, done or dropped (record_item takes an optional `state`; `set_state` moves an existing item, with an
+optional `nudge` date to check in and `waiting_on`, who or what it waits on; waiting is accepted without waiting_on, and the result says so).
+`resolve_item` is set_state done and `reopen_item` is set_state open. A due date can be marked `due_kind` hard or soft (soft when not said);
+record_item also takes `starts` (scheduled start) and `happened`, and correct_item may change `due`, `due_kind` and `nudge`. Dates keep the
+precision you give (a date, or a date and time). Done and dropped items never show in the Horizon; a waiting item shows only when its project is
+in focus or its nudge date has arrived; overdue applies only to open and active items. From a document, a record_item may set `state` and
+`due_kind`, which then read as the document's claim, not the owner's. When a Notion status maps: Not Reviewed and Approved = open, In Progress =
+active, External = waiting, Completed = done, Cancelled = dropped.
 """
 
 mcp = FastMCP("alfrd", instructions="alfrd's memory Horizon. One tool: horizon.")

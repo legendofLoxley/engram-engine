@@ -8,7 +8,9 @@ import app.alfrd.engram.cognitive.providers.LlmClient
 import app.alfrd.engram.cognitive.providers.LlmModel
 import app.alfrd.engram.cognitive.providers.LlmRequest
 import app.alfrd.engram.cognitive.providers.ToolDefinition
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -332,6 +334,47 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             },
         )
 
+        private val STATE_VALUES = arrayOf("open", "active", "waiting", "done", "dropped")
+
+        /** The state and time fields the owner's Horizon tool adds to `record_item` (the conversational model is not offered them). */
+        private fun stateAndTimeFields(): Map<String, JsonObject> = mapOf(
+            "state" to enumOf(*STATE_VALUES),
+            "due_kind" to enumOf("hard", "soft"),
+            "starts" to str("When it is scheduled to start (an event, a block of work): ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+            "nudge" to str("For a waiting item: the date to check in on it, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+            "waiting_on" to str("For a waiting item: who or what it waits on, in a few words."),
+            "happened" to str("When an event or fact took place, if known: ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+        )
+
+        private fun verbOf(variant: JsonObject): String? =
+            (((variant["properties"] as? JsonObject)?.get("verb") as? JsonObject)?.get("enum") as? JsonArray)?.firstOrNull()?.let { (it as? JsonPrimitive)?.content }
+
+        /** `record_item` for the owner's Horizon tool: the conversational fields plus state, hard/soft, start, check-in, waiting-on and happened. */
+        private val OWNER_RECORD_VARIANT: JsonObject = extend(OPERATION_VARIANTS.first { verbOf(it) == "record_item" }, stateAndTimeFields())
+
+        /** `correct_item` for the owner's Horizon tool: a correction may also change hard/soft and the check-in date. */
+        private val OWNER_CORRECT_VARIANT: JsonObject = extend(
+            OPERATION_VARIANTS.first { verbOf(it) == "correct_item" },
+            mapOf("due_kind" to enumOf("hard", "soft"), "nudge" to str("New check-in date for a waiting item, ISO date or date and time.")),
+        )
+
+        /** `set_state`: move an item to open, active, waiting, done or dropped. `resolve_item` and `reopen_item` are this with done and open. */
+        private val SET_STATE_VARIANT: JsonObject = variant("set_state", listOf("item", "state", "quote")) {
+            mapOf(
+                "item" to str("Ref of a task, event or question."),
+                "state" to enumOf(*STATE_VALUES),
+                "nudge" to str("For waiting: the date to check in, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+                "waiting_on" to str("For waiting: who or what it waits on, in a few words. Waiting is accepted without it."),
+                "quote" to QUOTE,
+            )
+        }
+
+        private fun extend(base: JsonObject, extra: Map<String, JsonObject>): JsonObject = buildJsonObject {
+            base.forEach { (k, v) ->
+                if (k == "properties") putJsonObject("properties") { (v as JsonObject).forEach { (pk, pv) -> put(pk, pv) }; extra.forEach { (pk, pv) -> put(pk, pv) } } else put(k, v)
+            }
+        }
+
         /**
          * `record_item` as the owner's Horizon tool accepts it when it cites a document a channel supplied instead of the message: the quote
          * must be verbatim in the cited source's text. Recorded as coming from that source, never as the owner's statement.
@@ -350,6 +393,8 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                     put("description", "Short names of the people/things this concerns.")
                 },
                 "author" to str("Optional. Who wrote the passage, if you know. Left out, the author is recorded as unknown."),
+                "state" to enumOf(*STATE_VALUES),
+                "due_kind" to enumOf("hard", "soft"),
             )
         }
 
@@ -362,7 +407,14 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             put("type", "array")
             putJsonObject("items") {
                 putJsonArray("anyOf") {
-                    OPERATION_VARIANTS.filterNot { v -> (v["properties"] as JsonObject)["verb"]?.toString()?.contains("hold_for_choice") == true }.forEach { add(it) }
+                    OPERATION_VARIANTS.filterNot { v -> verbOf(v) == "hold_for_choice" }.forEach { v ->
+                        when (verbOf(v)) {
+                            "record_item" -> add(OWNER_RECORD_VARIANT)
+                            "correct_item" -> add(OWNER_CORRECT_VARIANT)
+                            "reopen_item" -> { add(v); add(SET_STATE_VARIANT) }
+                            else -> add(v)
+                        }
+                    }
                     add(SOURCED_RECORD_VARIANT)
                 }
             }

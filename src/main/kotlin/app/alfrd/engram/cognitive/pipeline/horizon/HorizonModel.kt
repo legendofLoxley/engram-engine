@@ -275,12 +275,16 @@ sealed interface SurfacingReason {
     @Serializable
     data class Urgent(val dueAt: Long, val overdue: Boolean) : SurfacingReason
 
+    /** A waiting item whose check-in date ([nudgeAt]) has arrived: shown whatever the focus, so it can be asked about. */
+    @Serializable
+    data class CheckIn(val nudgeAt: Long) : SurfacingReason
+
     /** Something the environment reported recently, outside anything the user said — allowed into view from outside the focus, in a capped number of slots. */
     @Serializable
     data class Peripheral(val assertedCycleSeq: Long) : SurfacingReason
 }
 
-/** One thing that added to an item's score, so "why is this in view" has a concrete answer. [kind] is `focus`, `nudge`, `spread`, `urgency`, `pinned`, `justAsserted`, `reactivation`, `peripheral` or `baseline`. */
+/** One thing that added to an item's score, so "why is this in view" has a concrete answer. [kind] is `focus`, `nudge`, `spread`, `urgency`, `pinned`, `justAsserted`, `reactivation`, `checkin`, `peripheral` or `baseline`. */
 @Serializable
 data class ScoreComponent(val kind: String, val value: Double, val detail: String? = null)
 
@@ -331,6 +335,17 @@ data class HorizonItem(
     val container: HorizonContainerRef? = null,
     /** Non-null exactly when [provenance] is [ProvenanceKind.CHANNEL_SOURCED] and the quoted chunk could be found. */
     val documentSource: DocumentSourceNote? = null,
+    /** The item's work state (`open`, `active`, `waiting`, `done`, `dropped`); null for anything that has none. */
+    val state: String? = null,
+    /** `hard` or `soft`, set only when the item has a due date. */
+    val dueKind: String? = null,
+    /** True when [dueAt] was given with a time of day. */
+    val dueHasTime: Boolean = false,
+    /** For a waiting item: who or what, and the date to check in. */
+    val waitingOn: String? = null,
+    val nudgeAt: Long? = null,
+    /** True while [state] / [dueKind] is the filing document's claim, not the owner's. */
+    val stateFromSource: Boolean = false,
 )
 
 /** A candidate excluded from `items` by the budget. Reference-only — no inlined text, nothing to truncate. */

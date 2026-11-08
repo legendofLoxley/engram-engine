@@ -284,7 +284,11 @@ class OwnerHorizonService(
             .digest("${op.kind.name}|${ItemWords.normalize(op.title ?: op.quote)}|${chunk.ordinal}".toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }.take(24)
         return SourcedPlan.Ready(
-            op.copy(chunkUid = chunk.uid, claimant = claimant, writer = CLAUDE_SESSION_SOURCE_TYPE, itemKey = "chsrc:${source.uid}:$digest"),
+            // A document may claim a state and a hard or soft deadline; the other time fields are not accepted from a source.
+            op.copy(
+                chunkUid = chunk.uid, claimant = claimant, writer = CLAUDE_SESSION_SOURCE_TYPE, itemKey = "chsrc:${source.uid}:$digest",
+                startsAt = null, startsHasTime = false, nudgeAt = null, nudgeHasTime = false, happenedAt = null, happenedHasTime = false, waitingOn = null,
+            ),
             source.title, chunk.location,
         )
     }

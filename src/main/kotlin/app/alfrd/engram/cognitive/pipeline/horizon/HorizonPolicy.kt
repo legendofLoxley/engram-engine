@@ -58,6 +58,8 @@ data class HorizonPolicy(
     val unfiledOpenActivation: Double = 0.4,
     /** How many of the most recently changed open, unfiled items get that baseline; the rest are not lost, they just are not put forward until something else draws them in. */
     val openBaselineItems: Int = 24,
+    /** A waiting item whose check-in date has arrived: it comes into view whatever the focus, to be asked about. */
+    val checkInActivation: Double = 0.7,
     /** Recent evidence reported by Hermes or the environment, outside anything the user said. */
     val peripheralActivation: Double = 0.6,
 

@@ -22,6 +22,74 @@ enum class ItemKind(val typeName: String) {
     QUESTION("Question"),
 }
 
+/**
+ * Where an item stands. Stored on the item as `state`; the older `status` (`open`/`resolved`) is kept as the coarse, indexed
+ * projection of it ([status]) so existing readers and rollback keep working. An item with no stored `state` reads from `status`:
+ * `open` is [OPEN], `resolved` is [DONE]. A source's or the owner's claim; retracted is a separate error marker, not a state here.
+ */
+enum class WorkState(val status: String) {
+    OPEN("open"), ACTIVE("open"), WAITING("open"), DONE("resolved"), DROPPED("resolved");
+
+    fun wire(): String = name.lowercase()
+
+    /** Done or dropped: finished one way or the other. Never shown in the Horizon. */
+    val closed: Boolean get() = this == DONE || this == DROPPED
+
+    companion object {
+        fun fromWire(value: String?): WorkState? = entries.firstOrNull { it.name.equals(value?.trim(), ignoreCase = true) }
+
+        /** The state of a stored item: its own `state`, else read from the coarse `status`. Null for anything with neither. */
+        fun of(state: String?, status: String?): WorkState? = fromWire(state) ?: when (status) {
+            "open" -> OPEN
+            "resolved" -> DONE
+            else -> null
+        }
+    }
+}
+
+/** Whether a due date is a promise (hard) or a hope (soft). Soft is the default when nothing is said. */
+enum class DueKind {
+    HARD, SOFT;
+
+    fun wire(): String = name.lowercase()
+
+    companion object {
+        fun fromWire(value: String?): DueKind? = entries.firstOrNull { it.name.equals(value?.trim(), ignoreCase = true) }
+    }
+}
+
+/**
+ * What state does to visibility and urgency, in one place: done and dropped never show; a waiting item shows only inside a focused
+ * project or once its check-in date has arrived; overdue applies to open and active items only. An item with no state reads as open.
+ */
+object StateRules {
+    fun visible(state: WorkState?, nudgeAt: Long?, inFocusedProject: Boolean, now: Long): Boolean = when (state) {
+        WorkState.DONE, WorkState.DROPPED -> false
+        WorkState.WAITING -> inFocusedProject || (nudgeAt != null && nudgeAt <= now)
+        else -> true
+    }
+
+    /** Open and active items can be overdue; waiting, done and dropped never are. */
+    fun canBeOverdue(state: WorkState?): Boolean = state == null || state == WorkState.OPEN || state == WorkState.ACTIVE
+}
+
+/** A moment, with the precision it was given: [hasTime] false means only the date was given (the time is the day's boundary). */
+data class TimeValue(val at: Long, val hasTime: Boolean = false)
+
+/** Everything an item can carry beyond its words, state and one date. All optional; an unset field is simply absent on the item. */
+data class ItemExtras(
+    val state: WorkState? = null,
+    val dueKind: DueKind? = null,
+    /** Precision of the `dueAt` passed to [HorizonStructureStore.createItem]. */
+    val dueHasTime: Boolean = false,
+    val starts: TimeValue? = null,
+    val nudge: TimeValue? = null,
+    val happened: TimeValue? = null,
+    val waitingOn: String? = null,
+    /** True when [state] or [dueKind] is a claim made by the document the item was filed from (until anyone changes it). */
+    val fromSource: Boolean = false,
+)
+
 /** Zoom levels a focus can carry: broad, one container, one item's neighborhood. */
 enum class FocusZoom {
     OVERVIEW, BINOCULARS, TELESCOPE;
@@ -83,7 +151,28 @@ data class ItemRecord(
     val askedBy: String? = null,
     /** True when a channel filed this from a document it supplied ([CHANNEL_SOURCED_SOURCE_TYPE]): not something the owner said. */
     val channelSourced: Boolean = false,
-)
+    /** The stored `state`; null when the item has none yet (read [workState], which falls back to [status]). */
+    val state: WorkState? = null,
+    /** As stored; null reads as soft (see [effectiveDueKind]). */
+    val dueKind: DueKind? = null,
+    /** True when [dueAt] carries a time of day as given; false when only a date was given. */
+    val dueHasTime: Boolean = false,
+    val startsAt: Long? = null,
+    val startsHasTime: Boolean = false,
+    /** For a waiting item: the date to check in. */
+    val nudgeAt: Long? = null,
+    val nudgeHasTime: Boolean = false,
+    val happenedAt: Long? = null,
+    val happenedHasTime: Boolean = false,
+    /** For a waiting item: who or what it waits on, in a few words. */
+    val waitingOn: String? = null,
+    /** True while the state or due kind is still the document's own claim, never the owner's. */
+    val stateFromSource: Boolean = false,
+) {
+    /** Where the item stands: its own state, else read from [status]. Null for a plain fact. */
+    val workState: WorkState? get() = state ?: WorkState.of(null, status)
+    val effectiveDueKind: DueKind get() = dueKind ?: DueKind.SOFT
+}
 
 data class FocusRecord(
     val targetUid: String,
@@ -169,7 +258,21 @@ interface HorizonStructureStore {
         opKey: String? = null,
         sourceQuote: String? = null,
         sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
+        extras: ItemExtras = ItemExtras(),
     ): ItemRecord?
+
+    /**
+     * Moves a task, event or question to [state]. [nudge] (the date to check in) and [waitingOn] are set when given; leaving
+     * a waiting state clears whichever of them is not given. Reaching a closed state records `resolvedAt`; leaving one clears it.
+     * The coarse `status` follows. A no-op when nothing would change. False for a fact, a container, or a target the user doesn't own.
+     */
+    suspend fun setState(userEmail: String, cycleSeq: Long, targetUid: String, state: WorkState, nudge: TimeValue? = null, waitingOn: String? = null): Boolean
+
+    /**
+     * Sets the hard/soft marking of an item's due date, and optionally its check-in date. False for a fact, container, or target the
+     * user doesn't own. Idempotent.
+     */
+    suspend fun setTiming(userEmail: String, cycleSeq: Long, targetUid: String, dueKind: DueKind? = null, nudge: TimeValue? = null): Boolean
 
     /**
      * Files [childUid] under [parentUid]: an item under a project, or a project under a domain —
@@ -186,7 +289,7 @@ interface HorizonStructureStore {
      * event's `occursAt`. False for a target with no such time (a fact, question or domain) or one
      * the user doesn't own.
      */
-    suspend fun setDue(userEmail: String, cycleSeq: Long, targetUid: String, dueAt: Long?): Boolean
+    suspend fun setDue(userEmail: String, cycleSeq: Long, targetUid: String, dueAt: Long?, hasTime: Boolean = false): Boolean
 
     /**
      * Marks a task, event or question `resolved` (or `open` again when [resolved] is false), or a
@@ -267,6 +370,9 @@ interface HorizonStructureStore {
     suspend fun scanItemTexts(userEmail: String, limit: Int): List<ItemText>
 }
 
+private const val MAX_WAITING_ON = 120
+private val ITEM_STATE_TYPES = setOf("Task", "Event", "Question")
+
 /** An item's identity and words, nothing more — see [HorizonStructureStore.scanItemTexts]. */
 data class ItemText(val uid: String, val text: String)
 
@@ -328,6 +434,7 @@ class ArcadeHorizonStructureStore(
         opKey: String?,
         sourceQuote: String?,
         sourceType: String,
+        extras: ItemExtras,
     ): ItemRecord? {
         if (userEmail.isBlank() || text.isBlank()) return null
         return mutate("createItem", null) {
@@ -365,19 +472,28 @@ class ArcadeHorizonStructureStore(
                 if (!sourceQuote.isNullOrBlank() && sourceQuote.trim() != text.trim()) set("sourceQuote", sourceQuote.trim())
                 when (kind) {
                     ItemKind.TASK -> {
-                        set("status", "open")
-                        if (dueAt != null) set("dueAt", dueAt)
+                        if (dueAt != null) { set("dueAt", dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
                     }
                     ItemKind.EVENT -> {
-                        set("status", "open")
-                        if (dueAt != null) set("occursAt", dueAt)
+                        if (dueAt != null) { set("occursAt", dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
                     }
-                    ItemKind.QUESTION -> {
-                        set("status", "open")
-                        set("askedBy", askedBy)
-                    }
+                    ItemKind.QUESTION -> set("askedBy", askedBy)
                     ItemKind.FACT -> Unit
                 }
+                if (kind != ItemKind.FACT) {
+                    // The state is the item's own; `status` is its coarse open/resolved projection (indexed, and what older readers use).
+                    val state = extras.state ?: WorkState.OPEN
+                    set("state", state.wire())
+                    set("status", state.status)
+                    if (state.closed) set("resolvedAt", now)
+                    if (extras.dueKind != null && dueAt != null) set("dueKind", extras.dueKind.wire())
+                    if (state == WorkState.WAITING || extras.nudge != null) extras.nudge?.let { set("nudgeAt", it.at); if (it.hasTime) set("nudgeHasTime", true) }
+                    extras.waitingOn?.trim()?.takeIf { it.isNotBlank() }?.let { set("waitingOn", it.take(MAX_WAITING_ON)) }
+                    extras.starts?.let { set("startsAt", it.at); if (it.hasTime) set("startsHasTime", true) }
+                    if (extras.fromSource && (extras.state != null || extras.dueKind != null)) set("stateFromSource", true)
+                }
+                // Facts happened too: the time something took place, when it is known.
+                extras.happened?.let { set("happenedAt", it.at); if (it.hasTime) set("happenedHasTime", true) }
                 save()
             }
             source.newEdge("ASSERTS", vertex, false).apply {
@@ -386,10 +502,6 @@ class ArcadeHorizonStructureStore(
                 // A document's words filed by a channel carry no trust from the owner: only their own adoption would.
                 set("scores", if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) "[]" else """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
-                // Kept in step with the vertex's own `status`: selection reads the vertex, but propagation
-                // (which items a new report may be linked to) and how an item's status is worded in the
-                // reply's prompt still read the edge. Once those read the vertex, this copy can go.
-                if (kind == ItemKind.TASK || kind == ItemKind.QUESTION) applyLegacyStatus(this, "open", cycleSeq, now)
                 save()
             }
             if (project != null) newPartOf(vertex, project, cycleSeq, userEmail)
@@ -434,7 +546,7 @@ class ArcadeHorizonStructureStore(
         }
     }
 
-    override suspend fun setDue(userEmail: String, cycleSeq: Long, targetUid: String, dueAt: Long?): Boolean =
+    override suspend fun setDue(userEmail: String, cycleSeq: Long, targetUid: String, dueAt: Long?, hasTime: Boolean): Boolean =
         mutate("setDue", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
             val property = when (target.typeName) {
@@ -443,9 +555,9 @@ class ArcadeHorizonStructureStore(
                 else -> return@mutate false
             }
             val current = (target.get(property) as? Number)?.toLong()
-            if (current == dueAt) return@mutate true
+            if (current == dueAt && (dueAt == null || (target.get("dueHasTime") == true) == hasTime)) return@mutate true
             target.modify().apply {
-                if (dueAt == null) remove(property) else set(property, dueAt)
+                if (dueAt == null) { remove(property); remove("dueHasTime"); remove("dueKind") } else { set(property, dueAt); if (hasTime) set("dueHasTime", true) else remove("dueHasTime") }
                 set("updatedAt", System.currentTimeMillis())
                 save()
             }
@@ -455,32 +567,65 @@ class ArcadeHorizonStructureStore(
     override suspend fun resolve(userEmail: String, cycleSeq: Long, targetUid: String, resolved: Boolean): Boolean =
         mutate("resolve", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
-            val (doneValue, undoneValue) = when (target.typeName) {
-                "Task", "Event", "Question" -> "resolved" to "open"
-                "Project" -> "done" to "active"
-                else -> return@mutate false
+            if (target.typeName == "Project") {
+                val desired = if (resolved) "done" else "active"
+                if (target.get("status") == desired) return@mutate true
+                val now = System.currentTimeMillis()
+                target.modify().apply { set("status", desired); set("updatedAt", now); save() }
+                return@mutate true
             }
-            val desired = if (resolved) doneValue else undoneValue
-            if (target.get("status") == desired) return@mutate true
-            val now = System.currentTimeMillis()
+            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            // Resolve is set_state done; reopen is set_state open. The item's own state is the only record of it.
+            applyState(target, if (resolved) WorkState.DONE else WorkState.OPEN, null, null)
+            true
+        }
+
+    override suspend fun setState(userEmail: String, cycleSeq: Long, targetUid: String, state: WorkState, nudge: TimeValue?, waitingOn: String?): Boolean =
+        mutate("setState", false) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
+            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            applyState(target, state, nudge, waitingOn)
+            true
+        }
+
+    override suspend fun setTiming(userEmail: String, cycleSeq: Long, targetUid: String, dueKind: DueKind?, nudge: TimeValue?): Boolean =
+        mutate("setTiming", false) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
+            if (target.typeName !in ITEM_STATE_TYPES) return@mutate false
+            val kindSame = dueKind == null || DueKind.fromWire(target.get("dueKind") as? String) == dueKind || (dueKind == DueKind.SOFT && target.get("dueKind") == null)
+            val nudgeSame = nudge == null || ((target.get("nudgeAt") as? Number)?.toLong() == nudge.at && (target.get("nudgeHasTime") == true) == nudge.hasTime)
+            if (kindSame && nudgeSame) return@mutate true
             target.modify().apply {
-                set("status", desired)
-                if (target.typeName != "Project") {
-                    if (resolved) set("resolvedAt", now) else remove("resolvedAt")
-                }
-                set("updatedAt", now)
+                if (dueKind != null) { set("dueKind", dueKind.wire()); remove("stateFromSource") }
+                if (nudge != null) { set("nudgeAt", nudge.at); if (nudge.hasTime) set("nudgeHasTime", true) else remove("nudgeHasTime") }
+                set("updatedAt", System.currentTimeMillis())
                 save()
-            }
-            if (target.typeName == "Task" || target.typeName == "Question") {
-                // Keep the ASSERTS.status copy in step — see createItem.
-                HorizonOwnership.ownedAssertsEdges(db, userEmail, targetUid).forEach { edge ->
-                    val mutable = edge.modify()
-                    applyLegacyStatus(mutable, if (resolved) "resolved" else "open", cycleSeq, now)
-                    mutable.save()
-                }
             }
             true
         }
+
+    /** Writes [state] and its coarse `status`; see [HorizonStructureStore.setState]. Caller holds the lock. */
+    private fun applyState(target: Vertex, state: WorkState, nudge: TimeValue?, waitingOn: String?) {
+        val current = WorkState.of(target.get("state") as? String, target.get("status") as? String)
+        val currentNudge = (target.get("nudgeAt") as? Number)?.toLong()
+        val newWaitingOn = waitingOn?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_WAITING_ON)
+        val leavingWaiting = state != WorkState.WAITING
+        val nudgeUnchanged = if (nudge != null) currentNudge == nudge.at && (target.get("nudgeHasTime") == true) == nudge.hasTime else (!leavingWaiting || currentNudge == null)
+        val waitingUnchanged = if (newWaitingOn != null) target.get("waitingOn") == newWaitingOn else (!leavingWaiting || target.get("waitingOn") == null)
+        if (current == state && target.get("state") == state.wire() && nudgeUnchanged && waitingUnchanged) return
+        val now = System.currentTimeMillis()
+        target.modify().apply {
+            set("state", state.wire())
+            set("status", state.status)
+            remove("stateFromSource")
+            if (state.closed) { if (current?.closed != true) set("resolvedAt", now) } else remove("resolvedAt")
+            if (nudge != null) { set("nudgeAt", nudge.at); if (nudge.hasTime) set("nudgeHasTime", true) else remove("nudgeHasTime") }
+            else if (leavingWaiting) { remove("nudgeAt"); remove("nudgeHasTime") }
+            if (newWaitingOn != null) set("waitingOn", newWaitingOn) else if (leavingWaiting) remove("waitingOn")
+            set("updatedAt", now)
+            save()
+        }
+    }
 
     override suspend fun setAttention(userEmail: String, cycleSeq: Long, targetUid: String, attention: AttentionDirective?): Boolean =
         mutate("setAttention", false) {
@@ -678,7 +823,8 @@ class ArcadeHorizonStructureStore(
                 .mapNotNull { it.get("uid") as? String }
             if (sourceUids.isEmpty()) return@read emptyList()
             val sql = if (openOnly) {
-                "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids AND status = 'open' ORDER BY timestamp DESC LIMIT :limit"
+                // Open means the item's own coarse status, not a copy on the assertion.
+                "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids AND @in.@type IN ['Task', 'Question'] AND @in.status = 'open' ORDER BY timestamp DESC LIMIT :limit"
             } else {
                 "SELECT @in.uid AS uid FROM ASSERTS WHERE @out.uid IN :sourceUids ORDER BY timestamp DESC LIMIT :limit"
             }
@@ -722,25 +868,6 @@ class ArcadeHorizonStructureStore(
 
     // ── Plumbing ─────────────────────────────────────────────────────────────
 
-    /**
-     * Sets `status`/`statusHistory`/`statusCycleSeq` on an ASSERTS edge — the exact shape
-     * [ArcadeHorizonGraphStore.markAssertionStatus] writes — so what still reads open/resolved from the edge
-     * (propagation's candidates, the status shown with an item) sees a task or question as it always saw an intention.
-     */
-    private fun applyLegacyStatus(edge: com.arcadedb.graph.MutableEdge, state: String, cycleSeq: Long, now: Long) {
-        val history = legacyHistory(edge.get("statusHistory") as? String) + StatusHistoryEntry(state, now)
-        edge.set("status", state)
-        edge.set("statusHistory", legacyJson.encodeToString(history))
-        edge.set("statusCycleSeq", cycleSeq)
-    }
-
-    private val legacyJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-
-    private fun legacyHistory(raw: String?): List<StatusHistoryEntry> = try {
-        if (raw.isNullOrBlank()) emptyList() else legacyJson.decodeFromString(raw)
-    } catch (_: Exception) {
-        emptyList()
-    }
 
     /** Runs [body] in one transaction holding the Horizon write lock; [failure] if the lock can't be had or anything throws. */
     private suspend fun <T> mutate(op: String, failure: T, body: () -> T): T = withContext(Dispatchers.IO) {
@@ -866,6 +993,17 @@ class ArcadeHorizonStructureStore(
             text = get("text") as? String ?: "",
             status = if (kind == ItemKind.FACT) null else get("status") as? String,
             dueAt = (get(if (kind == ItemKind.EVENT) "occursAt" else "dueAt") as? Number)?.toLong(),
+            state = if (kind == ItemKind.FACT) null else WorkState.fromWire(get("state") as? String),
+            dueKind = DueKind.fromWire(get("dueKind") as? String),
+            dueHasTime = get("dueHasTime") == true,
+            startsAt = (get("startsAt") as? Number)?.toLong(),
+            startsHasTime = get("startsHasTime") == true,
+            nudgeAt = (get("nudgeAt") as? Number)?.toLong(),
+            nudgeHasTime = get("nudgeHasTime") == true,
+            happenedAt = (get("happenedAt") as? Number)?.toLong(),
+            happenedHasTime = get("happenedHasTime") == true,
+            waitingOn = get("waitingOn") as? String,
+            stateFromSource = get("stateFromSource") == true,
             projectUid = getVertices(Vertex.DIRECTION.OUT, "PART_OF")
                 .firstOrNull { it.typeName == ContainerKind.PROJECT.typeName }?.get("uid") as? String,
             createdAt = (get("createdAt") as? Number)?.toLong() ?: 0L,
