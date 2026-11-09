@@ -98,6 +98,8 @@ class DirectorTick(
     private val zone: ZoneId = ZoneId.systemDefault(),
     private val keep: Int = KEEP,
     private val renderEvery: Duration = Duration.ofHours(1),
+    /** Optional daily schema audit. Read-only, writes only its own `integrity.md`, and changes nothing about the tick (prompt, latest.md, marker, counters). */
+    private val integrity: IntegrityCheck? = null,
 ) {
     init {
         require(!interval.isNegative && !interval.isZero) { "interval must be positive" }
@@ -126,6 +128,13 @@ class DirectorTick(
 
     /** One tick. Never throws except to propagate cancellation. */
     suspend fun tickOnce(): TickReport {
+        val report = tick()
+        // After the tick has finished and recorded itself: the audit cannot alter what the tick rendered or wrote.
+        integrity?.let { check -> withContext(Dispatchers.IO) { check.runIfDue(clock()) } }
+        return report
+    }
+
+    private suspend fun tick(): TickReport {
         val now = clock()
         val t0 = System.nanoTime()
         val marker = try {
@@ -269,6 +278,7 @@ fun bootstrapDirectorTick(
         notion = { notionState(notionStartup) },
         hermes = { hermesActive.activeByKind() },
         budgets = { budgetDefaults(notionStartup) },
+        integrity = if (env[IntegrityCheck.ENV_DISABLE]?.trim()?.lowercase() in setOf("off", "false", "0")) null else IntegrityCheck(db, dir.resolve(IntegrityCheck.FILE_NAME)),
     )
     if (start) tick.start(scope)
     bootLog.info("director-tick: running identity={} interval={}s dir={}", raw, seconds, dir)

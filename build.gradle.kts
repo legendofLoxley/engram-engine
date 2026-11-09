@@ -139,3 +139,24 @@ tasks.register<JavaExec>("voiceCacheSeed") {
         "-Dpolyglot.engine.WarnInterpreterOnly=false"
     )
 }
+
+// ── Schema audit ──────────────────────────────────────────────────────────────
+// Read-only audit of a graph's structural rules (see db/SchemaAudit.kt). Point it at a scratch restore, never at a directory the engine has open:
+//   ./gradlew schemaAudit -PauditDb=/path/to/restored/engram-db [-PauditExamples=5] -q
+tasks.register<JavaExec>("schemaAudit") {
+    group       = "scripts"
+    description = "Read-only audit of a graph directory (-PauditDb=<dir>)"
+    mainClass.set("app.alfrd.engram.db.SchemaAuditCli")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs(
+        "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+        "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED",
+        "--add-opens", "java.base/java.nio.channels.spi=ALL-UNNAMED",
+        "-Dpolyglot.engine.WarnInterpreterOnly=false"
+    )
+    val db = providers.gradleProperty("auditDb").orNull
+    val n = providers.gradleProperty("auditExamples").orElse("5").get()
+    if (db != null) args(db, n)
+}

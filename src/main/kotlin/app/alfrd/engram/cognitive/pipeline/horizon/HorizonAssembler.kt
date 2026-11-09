@@ -116,6 +116,9 @@ interface HorizonAssembler {
     suspend fun listOpenCandidatesWithText(userEmail: String, limit: Int = 200): List<PropagationCandidate>
 }
 
+/** The SQL list of the kinds whose `status` lives on the item itself (see [KindList.STATUS_ON_ITEM]). */
+private val statusOnItem: String = ItemKinds.sqlTypeList(KindList.STATUS_ON_ITEM)
+
 class ArcadeHorizonAssembler(
     private val db: Database,
     private val lockTimeoutMs: Long = HorizonConsistencyLock.DEFAULT_TIMEOUT_MS,
@@ -419,8 +422,9 @@ class ArcadeHorizonAssembler(
         val hardEnd = endOfDay(today.plusDays(policy.alsoDueHardDays))
         val softEnd = endOfDay(today.plusDays(policy.alsoDueSoftDays))
         val found = LinkedHashMap<String, AlsoDueEntry>()
-        for (type in listOf("Task", "Event")) {
-            val property = if (type == "Event") "occursAt" else "dueAt"
+        for (spec in ItemKinds.inList(KindList.ALSO_DUE_SCAN)) {
+            val type = spec.typeName
+            val property = spec.dueProperty!!
             db.query("sql", "SELECT FROM $type WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.urgencyScanLimit}", mapOf("e" to userEmail)).use { rs ->
                 while (rs.hasNext()) {
                     val v = rs.next().toElement().asVertex()
@@ -429,7 +433,7 @@ class ArcadeHorizonAssembler(
                     val raw = (v.get(property) as? Number)?.toLong() ?: continue
                     val hasTime = v.get("dueHasTime") == true
                     // A date-only event is stored at the start of its day; it is happening today until the day is over.
-                    val dueAt = if (type == "Event" && !hasTime) endOfDay(java.time.Instant.ofEpochMilli(raw).atZone(zone).toLocalDate()) - 1 else raw
+                    val dueAt = if (spec.boundToMoment && !hasTime) endOfDay(java.time.Instant.ofEpochMilli(raw).atZone(zone).toLocalDate()) - 1 else raw
                     val state = WorkState.of(v.get("state") as? String, v.get("status") as? String)
                     val nudgeAt = (v.get("nudgeAt") as? Number)?.toLong()
                     if (!StateRules.visible(state, nudgeAt, inFocusedProject = false, now = now)) continue
@@ -438,7 +442,7 @@ class ArcadeHorizonAssembler(
                     if (project != null && (project.get("status") != "active" || project.get("attention") == AttentionDirective.SUPPRESSED.name.lowercase())) continue
                     val hard = DueKind.fromWire(v.get("dueKind") as? String) == DueKind.HARD
                     val overdue = dueAt < now
-                    val qualifies = if (hard) dueAt < hardEnd && (type == "Task" || !overdue) else !overdue && dueAt < softEnd
+                    val qualifies = if (hard) dueAt < hardEnd && (!spec.boundToMoment || !overdue) else !overdue && dueAt < softEnd
                     if (!qualifies) continue
                     found[uid] = AlsoDueEntry(uid, (v.get("text") as? String ?: "").take(HorizonLimits.MAX_CONTAINER_NAME_LENGTH * 2), dueAt, if (hard) "hard" else "soft", hasTime, overdue)
                 }
@@ -479,7 +483,7 @@ class ArcadeHorizonAssembler(
             val params = mutableMapOf<String, Any>("sourceUids" to sourceUids, "offset" to offset, "limit" to limit)
             if (status != null) {
                 // The item's own status; the assertion's older copy still answers for a plain phrase that has none.
-                conditions += "((@in.@type IN ['Task', 'Question'] AND @in.status = :status) OR (@in.@type NOT IN ['Task', 'Question'] AND status = :status))"
+                conditions += "((@in.@type IN ${statusOnItem} AND @in.status = :status) OR (@in.@type NOT IN ${statusOnItem} AND status = :status))"
                 params["status"] = status.name.lowercase()
             }
             // Category is a secondary axis derived from source type + status presence (see
@@ -507,7 +511,7 @@ class ArcadeHorizonAssembler(
                     val row = rs.next().toMap()
                     rawCount++
                     val sourceType = row["sourceType"] as? String ?: ""
-                    val rowStatus = if (row["itemType"] == "Task" || row["itemType"] == "Question") row["itemStatus"] as? String else row["status"] as? String
+                    val rowStatus = if (row["itemType"] in ItemKinds.typeNames(KindList.STATUS_ON_ITEM)) row["itemStatus"] as? String else row["status"] as? String
                     if (category != null && categoryFor(sourceType, rowStatus) != category) continue
                     out += SourceRef(
                         phraseUid = row["phraseUid"] as? String ?: continue,
@@ -535,7 +539,7 @@ class ArcadeHorizonAssembler(
             val sql = """
                 SELECT @in.uid as phraseUid, @in.text as phraseText, cycleSeq
                 FROM ASSERTS
-                WHERE @out.uid IN :sourceUids AND ((@in.@type IN ['Task', 'Question'] AND @in.status = 'open') OR (@in.@type NOT IN ['Task', 'Question'] AND status = 'open'))
+                WHERE @out.uid IN :sourceUids AND ((@in.@type IN ${statusOnItem} AND @in.status = 'open') OR (@in.@type NOT IN ${statusOnItem} AND status = 'open'))
                 ORDER BY timestamp DESC
                 LIMIT :limit
             """.trimIndent()

@@ -185,7 +185,10 @@ class HorizonOperationApplier(
         val createdContainerUids = mutableMapOf<String, String>()
         return operations.mapIndexed { index, op ->
             try {
-                applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone, sourceType, chunkSourceType)
+                // The verb is the cause of any change this operation records (see ChangeRecords).
+                kotlinx.coroutines.withContext(ChangeContext(op.verb)) {
+                    applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone, sourceType, chunkSourceType)
+                }
             } catch (e: Exception) {
                 logger.warn("apply ${op.verb} failed for userEmail=$userEmail: ${e.message}")
                 AppliedOperation(op, applied = false, summary = "Could not apply ${op.verb}")

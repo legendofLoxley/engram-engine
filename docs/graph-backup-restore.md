@@ -84,6 +84,11 @@ as `owner-jacob`; that rule in `CLAUDE.md` still stands, and a snapshot is still
 - **Backups are unencrypted** and contain all of Jacob's graph (mode 600 in a mode 700 folder).
 - **No automatic snapshot before risky operations**; it is the manual step above.
 
+## Audit a restore
+
+`./gradlew schemaAudit -PauditDb=<restored engram-db directory> -q` reads a restored copy (never the live directory) and prints the integrity
+findings; see `graph-schema.md`. The Director tick writes the same report daily to `~/alfrd/director-tick/integrity.md`.
+
 ## Cold copy
 
 When the engine has to be stopped anyway (a deploy), copy the directory while it is stopped:
