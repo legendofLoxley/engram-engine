@@ -267,6 +267,7 @@ class ArcadeHorizonGraphStore(
                         set("uid", uid)
                         set("text", text)
                         set("hash", sha256(text))
+                        set("ownerEmail", userEmail)   // the owning user, as every item store stamps it; ownership checks still use the TRUSTS→ASSERTS chain
                         set("visibility", "private")
                         set("createdAt", now)
                         set("updatedAt", now)
@@ -413,6 +414,7 @@ class ArcadeHorizonGraphStore(
                         set("uid", uid)
                         set("text", text)
                         set("hash", sha256(text))
+                        set("ownerEmail", userEmail)   // the owning user, as every item store stamps it; ownership checks still use the TRUSTS→ASSERTS chain
                         set("visibility", "private")
                         set("createdAt", now)
                         set("updatedAt", now)

@@ -112,6 +112,7 @@ class DatabaseEngramClient(
                         set("uid", uid)
                         set("text", candidate.content)
                         set("hash", sha256(candidate.content))
+                        set("ownerEmail", userEmail)   // the owning user, as every item store stamps it; ownership checks still use the TRUSTS→ASSERTS chain
                         set("visibility", "private")
                         set("createdAt", now)
                         set("updatedAt", now)

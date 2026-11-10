@@ -253,4 +253,78 @@ class ChangeRecordsTest {
         assertTrue(db.schema.existsType("HAS_CHANGE"))
         assertFalse("Event" == "ChangeRecord", "named so as not to collide with the world-event item type")
     }
+
+    // ── effectiveAt: optional, written only when given ──
+
+    private fun recordProps(uid: String): Map<String, Any?> =
+        db.query("sql", "SELECT FROM ChangeRecord WHERE uid = :u", mapOf("u" to uid)).use { it.next().toElement().asVertex().propertyNames.associateWith { n -> null } }
+
+    private fun appendDirect(me: String, t: ItemRecord, effectiveAt: Long?): String {
+        var uid = ""
+        db.transaction {
+            val v = db.query("sql", "SELECT FROM Task WHERE uid = :u", mapOf("u" to t.uid)).use { it.next().toElement().asVertex() }
+            ChangeLog(db).append(me, v, "state", "open", "done", cause = "test", actor = me, effectiveAt = effectiveAt)
+        }
+        uid = db.query("sql", "SELECT FROM ChangeRecord WHERE targetUid = :u ORDER BY changedAt DESC LIMIT 1", mapOf("u" to t.uid)).use { it.next().getProperty<String>("uid") }
+        return uid
+    }
+
+    @Test
+    fun `a record written without effectiveAt has no such property`() {
+        val me = newUser(); val t = task(me)
+        val uid = appendDirect(me, t, null)
+        assertFalse("effectiveAt" in recordProps(uid).keys)
+        assertNull(changes(me, t.uid).single().effectiveAt)
+    }
+
+    @Test
+    fun `a record written with effectiveAt keeps it and changedAt is separate`() {
+        val me = newUser(); val t = task(me)
+        val uid = appendDirect(me, t, 1_700_000_000_000L)
+        assertTrue("effectiveAt" in recordProps(uid).keys)
+        val view = changes(me, t.uid).single()
+        assertEquals(1_700_000_000_000L, view.effectiveAt)
+        assertTrue(view.changedAt > view.effectiveAt!!)
+    }
+
+    @Test
+    fun `an ordinary verb never sets effectiveAt`() = runBlocking<Unit> {
+        val me = newUser(); val t = task(me)
+        store.setState(me, 2, t.uid, WorkState.ACTIVE)
+        assertNull(changes(me, t.uid).single().effectiveAt)
+    }
+
+    @Test
+    fun `bootstrap adds effectiveAt to a database that already holds ChangeRecord rows and leaves them alone`() = runBlocking<Unit> {
+        // A database as deployed before effectiveAt existed: the type has rows and no such property.
+        val path = "./data/test-change-records-old-${System.currentTimeMillis()}"
+        val m = DatabaseManager(path)
+        try {
+            val d = m.getDatabase()
+            SchemaBootstrap.bootstrap(d)
+            d.schema.getType("ChangeRecord").dropProperty("effectiveAt")
+            val s = ArcadeHorizonStructureStore(d)
+            val me = "old-${UUID.randomUUID()}@example.test"
+            d.transaction { d.newVertex("User").set("uid", UUID.randomUUID().toString()).set("username", "u").set("email", me).set("tier", -1).set("createdAt", 1L).save() }
+            val t = s.createItem(me, 1, ItemKind.TASK, "Old row")!!
+            s.setState(me, 2, t.uid, WorkState.ACTIVE)
+            fun snapshot() = d.query("sql", "SELECT FROM ChangeRecord").use { rs -> buildList { while (rs.hasNext()) add(rs.next().toElement().asVertex().toJSON().toString()) } }
+            val before = snapshot()
+            assertEquals(1, before.size)
+            assertFalse(d.schema.getType("ChangeRecord").existsProperty("effectiveAt"))
+
+            SchemaBootstrap.bootstrap(d)
+            SchemaBootstrap.bootstrap(d)   // idempotent
+
+            val prop = d.schema.getType("ChangeRecord").getProperty("effectiveAt")
+            assertTrue(prop != null && prop.type == com.arcadedb.schema.Type.LONG && prop.isReadonly && !prop.isMandatory)
+            assertEquals(before, snapshot(), "existing rows are untouched")
+            // and new records can carry it
+            val v = d.query("sql", "SELECT FROM Task WHERE uid = :u", mapOf("u" to t.uid)).use { it.next().toElement().asVertex() }
+            d.transaction { ChangeLog(d).append(me, v, "state", "active", "done", cause = "t", actor = me, effectiveAt = 5L) }
+            assertEquals(5L, s.changesFor(me, t.uid).last().effectiveAt)
+        } finally {
+            m.close(); File(path).deleteRecursively()
+        }
+    }
 }

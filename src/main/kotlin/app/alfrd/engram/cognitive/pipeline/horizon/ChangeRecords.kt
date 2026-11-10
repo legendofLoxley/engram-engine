@@ -53,6 +53,8 @@ data class ChangeRecordView(
     val oldValue: String?,
     val newValue: String?,
     val changedAt: Long,
+    /** When the change became true in the world, if that differs from [changedAt]. Null means the same moment as [changedAt]. Nothing sets it yet. */
+    val effectiveAt: Long?,
     val cause: String,
     val actor: String,
     val reason: String?,
@@ -85,6 +87,7 @@ internal class ChangeLog(private val db: Database) {
         changedAt: Long = System.currentTimeMillis(),
         family: String = ChangeTracking.FAMILY_CHANGE,
         reason: String? = null,
+        effectiveAt: Long? = null,
     ): Boolean {
         require(ChangeTracking.tracked(field)) { "'$field' is not a tracked field; add it to ChangeTracking.FIELDS first" }
         require(family in ChangeTracking.FAMILIES) { "unknown change family '$family'" }
@@ -103,6 +106,7 @@ internal class ChangeLog(private val db: Database) {
             if (old != null) set("oldValue", old)
             if (new != null) set("newValue", new)
             set("changedAt", changedAt)
+            if (effectiveAt != null) set("effectiveAt", effectiveAt)   // written only when given; absent reads as "same as changedAt"
             set("cause", cause)
             set("actor", actor)
             if (!reason.isNullOrBlank()) set("reason", reason)
@@ -133,6 +137,7 @@ internal class ChangeLog(private val db: Database) {
                     oldValue = v.get("oldValue") as? String,
                     newValue = v.get("newValue") as? String,
                     changedAt = (v.get("changedAt") as Number).toLong(),
+                    effectiveAt = (v.get("effectiveAt") as? Number)?.toLong(),
                     cause = v.get("cause") as String,
                     actor = v.get("actor") as String,
                     reason = v.get("reason") as? String,
@@ -145,7 +150,7 @@ internal class ChangeLog(private val db: Database) {
 object ChangeRecords {
     private val required = listOf("uid" to Type.STRING, "ownerEmail" to Type.STRING, "targetUid" to Type.STRING, "targetType" to Type.STRING,
         "family" to Type.STRING, "field" to Type.STRING, "changedAt" to Type.LONG, "cause" to Type.STRING, "actor" to Type.STRING)
-    private val optional = listOf("oldValue" to Type.STRING, "newValue" to Type.STRING, "reason" to Type.STRING)
+    private val optional = listOf("oldValue" to Type.STRING, "newValue" to Type.STRING, "reason" to Type.STRING, "effectiveAt" to Type.LONG)
 
     /**
      * The `ChangeRecord` vertex type and the `HAS_CHANGE` edge, additive and idempotent.
@@ -155,6 +160,9 @@ object ChangeRecords {
      * - **`HAS_CHANGE`, target to record**: the thing that changed owns its history (`item -HAS_CHANGE-> record`), the same direction as the other
      *   "has" edges that hang detail off an item (`ABOUT`, `QUOTES`), it reads as what it is, and it does not collide with `FOLLOWS`/`RELATED_TO`
      *   (which carry supersession) or `CONTAINS`. It is created `bidirectional=false`; read it outward, or with SQL on `targetUid`.
+     * - **`effectiveAt`** is optional: when a change became true in the world, if that differs from `changedAt` (when it was recorded). Absent
+     *   means the same moment. It was added after the type first shipped, so `ensureSchema` adds it to a database that already holds records,
+     *   without touching them. No verb sets it yet.
      * - **Append-only at the database level**: every property is mandatory (where required) and read-only, so a written record cannot be edited, and
      *   `uid` is unique. Deleting or updating a record is vetoed by a listener registered at every start (listeners are not persisted).
      *   Neither mechanism stops someone replacing the database files; they stop the engine, its SQL and its code from rewriting history.
@@ -172,6 +180,23 @@ object ChangeRecords {
         // One listener object, so registering at every start never stacks copies.
         type.events.unregisterListener(AppendOnly as BeforeRecordDeleteListener).unregisterListener(AppendOnly as BeforeRecordUpdateListener)
         type.events.registerListener(AppendOnly as BeforeRecordDeleteListener).registerListener(AppendOnly as BeforeRecordUpdateListener)
+    }
+
+    /**
+     * Runs [body] with the in-process delete veto lifted from `ChangeRecord`, then puts it back. This is the narrowest bypass there is, and it
+     * exists for one caller: the offline fixture-purge tool ([app.alfrd.engram.db.FixturePurge]), which removes a fixture user's own records
+     * and checks each record's owner before it deletes it. It is `internal`, it lifts only the delete veto (the update veto stays), it works on
+     * the one `Database` handed in, and the veto is a listener registered per process, so nothing outside this call and this process is affected.
+     */
+    internal fun <T> withDeleteVetoLifted(schema: Schema, body: () -> T): T {
+        if (!schema.existsType(ChangeTracking.TYPE)) return body()
+        val events = schema.getType(ChangeTracking.TYPE).events
+        events.unregisterListener(AppendOnly as BeforeRecordDeleteListener)
+        try {
+            return body()
+        } finally {
+            events.registerListener(AppendOnly as BeforeRecordDeleteListener)
+        }
     }
 
     private object AppendOnly : BeforeRecordDeleteListener, BeforeRecordUpdateListener {

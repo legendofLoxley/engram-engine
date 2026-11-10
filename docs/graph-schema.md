@@ -103,11 +103,11 @@ Every `newVertex`, `newEdge`, `CREATE`, `INSERT`, `.save()` or `DELETE` in `src/
 | `cognitive/UserGraphService.kt:88, 212` | User, `VERIFIED` User→Jacob | Creates the owner; n/a |
 | `api/DebugConverseService.kt:48, 90, 140–145` | synthetic User, UserScaffoldState; purge deletes SELECTED/OUTCOME/UserScaffoldState/User | Debug fixture; purge guard exempts protected identities |
 | `api/ScaffoldRoutes.kt:183–194` | UserScaffoldState | Keyed by the caller's `userId`; no `ownerEmail` |
-| `cognitive/pipeline/memory/DatabaseEngramClient.kt:93–120` | Source, `TRUSTS`, Phrase, `ASSERTS` (conversational ingest) | Via the user's own Source; **no `ownerEmail` on the Phrase** |
+| `cognitive/pipeline/memory/DatabaseEngramClient.kt:93–120` | Source, `TRUSTS`, Phrase, `ASSERTS` (conversational ingest) | Via the user's own Source; Phrase stamped with the owner's `ownerEmail` (since schema-cleanup phase 1) |
 | `…/DatabaseEngramClient.kt:155` (`amendPhrase`) | rewrites `Phrase.text`, `hash`, `updatedAt` by uid | **No ownership check at all** (uid only), and no history |
 | `…/DatabaseEngramClient.kt:217–223, 255–281, 355` | `CONFIDENT_IN`, Utterance + `FOLLOWS`, Concept | User by email / `userId` stamp; Concept is global |
 | `cognitive/pipeline/horizon/RequestLedger.kt:131–149` | ProcessedRequest (+ bounded delete) | Scoped by `userEmail` property |
-| `cognitive/pipeline/horizon/HorizonGraphStore.kt:266–275, 412–423` | Phrase + `ASSERTS` (environment signal, actor event) | Via the user's own Source; **no `ownerEmail` on the Phrase** |
+| `cognitive/pipeline/horizon/HorizonGraphStore.kt:266–275, 412–423` | Phrase + `ASSERTS` (environment signal, actor event) | Via the user's own Source; Phrase stamped with the owner's `ownerEmail` (since schema-cleanup phase 1) |
 | `…/HorizonGraphStore.kt:526, 656, 698–705` | `ASSERTS` status history; Source + `TRUSTS` | Yes: `ownedAssertsEdges` before the edge is touched; sources found through the user's `TRUSTS` |
 | `…/RelatedToEdges.kt:26, 42` | `RELATED_TO` (`relevant_to`, `supersedes`) | Stamped with `ownerEmail`; callers check both ends (`findPhraseOwnedByUser`) |
 | `cognitive/pipeline/selection/ResponseSelectionService.kt:337, 387` | `OUTCOME`, `SELECTED` User→ResponsePhrase | By `userId`; the phrase is global seed content |
@@ -125,3 +125,20 @@ Every `newVertex`, `newEdge`, `CREATE`, `INSERT`, `.save()` or `DELETE` in `src/
 `AgentWorkSchema.kt` (`GoalStatus`) carries two Goal Status vocabularies: the live workspace (Draft, Queued, Active, Met, Abandoned, Expired) and the converged design (Draft, Active, Done, Stopped).
 Item `state` is a third (`open, active, waiting, done, dropped`). `Active`, `Done` and `Dropped`/`Stopped`/`Abandoned` mean nearly the same thing in different places. The goal kind should
 pick one before it is built.
+
+## Item lines in the Horizon prompt: the deadline wording
+
+An item's line is `"<text>" [state] — <why it is here>[; <deadline>][; no evidence since <date>]`. *Why it is here* is the surfacing reason, which is the
+highest score component (ties go to the more specific one: a mention or activation ahead of urgency). The **deadline wording does not depend on that
+reason**: an open or active item with a due date that is overdue, due today, or inside its also-due window (hard: `alsoDueHardDays`, soft:
+`alsoDueSoftDays`; the same `HORIZON_ALSO_DUE_*` settings the also-due block uses) carries the same text an `Urgent` item has (`overdue by 78 days
+(2026-08-23, soft)`, `due today (...)`), after the reason. An `Urgent` item is not given it twice, an item with no due date, a closed item and an event that
+has already started are unchanged, and the soft/hard label always shows. Scores, the tie-break and which items are selected are untouched. Before this, a
+mentioned overdue task read only "connected to what they have been talking about (mentioned)". (Code: `Actor.kt`, `deadlineNote`.)
+
+## Ownerless rows that remain
+
+The conversational, environment-signal and actor-event ingest paths stamp `ownerEmail` on the Phrase they create. Existing rows are not backfilled (the
+live audit still reports them as A3). `OnboardingService.seedBatch` still writes Phrases with no `ownerEmail`: the per-user "personal" seed Phrases, and the
+shared public seed Phrases (ownerless on purpose: shared content, audit A3i). `ChangeMarker`'s `Phrase` count is by `ownerEmail`, so new conversational facts now
+also move it (they already moved `Asserted`).

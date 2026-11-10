@@ -131,11 +131,38 @@ object HorizonItemsRenderer {
             )
         }
         val noEvidence = if (item.stale && evidenceDate != null) (if (surfacing is SurfacingReason.Urgent) ", " else "; ") + "no evidence since $evidenceDate" else ""
+        val deadline = deadlineNote(item, surfacing, horizon.asOf, zone)
         return HorizonPromptItem(
-            renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$noEvidence$askNote",
+            renderedLine = "\"${item.text.text}\"$statusNote$provenanceNote — $framing$deadline$noEvidence$askNote",
             essential = essential,
             group = groupHeading(item, horizon),
         )
+    }
+
+    /** The also-due windows, read from the environment the same way the assembler's are, so the two never disagree about what "soon" is. */
+    private val alsoDueWindows by lazy { app.alfrd.engram.cognitive.pipeline.horizon.HorizonPolicy.fromEnvironment() }
+
+    /**
+     * The deadline wording for an open or active item that has a due date and is overdue, or due today or inside its also-due window (hard: the
+     * hard window, soft: the soft one), whichever surfacing reason won. The reason is the highest score component and a mention or an
+     * activation can tie or beat an overdue task's urgency, so without this a mentioned overdue task read as only "connected to what they have
+     * been talking about". Empty for an [SurfacingReason.Urgent] item (its reason already is this wording), for an item with no due date or no
+     * open/active state, and for an event that has already started (it is over, not overdue). Same wording and soft/hard label as an Urgent line.
+     */
+    private fun deadlineNote(item: HorizonItem, surfacing: SurfacingReason, asOf: Long, zone: java.time.ZoneId): String {
+        if (surfacing is SurfacingReason.Urgent) return ""
+        val dueAt = item.dueAt ?: return ""
+        if (item.state != WorkState.OPEN.wire() && item.state != WorkState.ACTIVE.wire()) return ""
+        val overdue = dueAt < asOf
+        if (overdue && item.kind == "event") return ""
+        if (!overdue) {
+            val days = java.time.temporal.ChronoUnit.DAYS.between(
+                java.time.Instant.ofEpochMilli(asOf).atZone(zone).toLocalDate(), java.time.Instant.ofEpochMilli(dueAt).atZone(zone).toLocalDate(),
+            )
+            val window = if (item.dueKind == "hard") alsoDueWindows.alsoDueHardDays else alsoDueWindows.alsoDueSoftDays
+            if (days > window) return ""
+        }
+        return "; " + describeDeadline(SurfacingReason.Urgent(dueAt, overdue), asOf, zone, item.dueKind, item.dueHasTime)
     }
 
     /** "2026-08-19 (soft)": the date as given (with the time when there was one), then whether the deadline is a promise or a hope. */
