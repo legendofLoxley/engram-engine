@@ -58,10 +58,9 @@ object FixturePurge {
     class Refusal(val problems: List<String>) : RuntimeException("refused: " + problems.joinToString("; "))
 
     /** Columns of the per-user table, in delete order. Edges are counted under `edge:<Type>`. */
-    val COLUMNS: List<String> = listOf(
-        "ChangeRecord", "Phrase", "Task", "Event", "Question", "Chunk", "Source", "Utterance", "ProcessedRequest",
-        "EntityAlias", "ExtractionRun", "ClaimDisagreement", "Project", "Domain", "UserScaffoldState", "User",
-    )
+    val COLUMNS: List<String> = listOf("ChangeRecord") +
+        app.alfrd.engram.cognitive.pipeline.horizon.ItemKinds.all.map { it.typeName } +   // Phrase, Task, Event, Question, from the registry
+        listOf("Chunk", "Source", "Utterance", "ProcessedRequest", "EntityAlias", "ExtractionRun", "ClaimDisagreement", "Project", "Domain", "UserScaffoldState", "User")
     private val HANDLED_VERTEX_TYPES = COLUMNS.toSet()
     private val OWNERLESS_TYPES = setOf("Concept", "ResponsePhrase", "ScoreType", "Scope")
 
