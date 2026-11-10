@@ -14,7 +14,8 @@ import kotlinx.serialization.Serializable
  * - `Chunk`, `Project`, `Domain`, `ExtractionRun`: vertices whose `ownerEmail` is the identity.
  * - `Phrase`: Phrase vertices with that `ownerEmail`. Polymorphic, so it includes Tasks, Questions and Events.
  * - `Task`, `Question`, `Event`: the typed items with that `ownerEmail`.
- * - `Asserted`: `ASSERTS` edges out of the Sources the identity trusts. A conversational fact has no `ownerEmail`, so this is what shows one arriving.
+ * - `Asserted`: `ASSERTS` edges out of the Sources the identity trusts. (Facts written before the ingest paths stamped `ownerEmail` have none, so this is what shows
+ *   one of those arriving; newer ones also move the `Phrase` count.)
  *
  * The timestamps: Source has no `createdAt`, so [newestSourceReadAt] is the largest `readAt` among its Sources, and ExtractionRun has
  * none either, so [newestRunStartedAt] and [newestRunFinishedAt] are the largest `startedAt` and `finishedAt` (a finishing run is a change
