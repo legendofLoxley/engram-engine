@@ -182,6 +182,23 @@ object ChangeRecords {
         type.events.registerListener(AppendOnly as BeforeRecordDeleteListener).registerListener(AppendOnly as BeforeRecordUpdateListener)
     }
 
+    /**
+     * Runs [body] with the in-process delete veto lifted from `ChangeRecord`, then puts it back. This is the narrowest bypass there is, and it
+     * exists for one caller: the offline fixture-purge tool ([app.alfrd.engram.db.FixturePurge]), which removes a fixture user's own records
+     * and checks each record's owner before it deletes it. It is `internal`, it lifts only the delete veto (the update veto stays), it works on
+     * the one `Database` handed in, and the veto is a listener registered per process, so nothing outside this call and this process is affected.
+     */
+    internal fun <T> withDeleteVetoLifted(schema: Schema, body: () -> T): T {
+        if (!schema.existsType(ChangeTracking.TYPE)) return body()
+        val events = schema.getType(ChangeTracking.TYPE).events
+        events.unregisterListener(AppendOnly as BeforeRecordDeleteListener)
+        try {
+            return body()
+        } finally {
+            events.registerListener(AppendOnly as BeforeRecordDeleteListener)
+        }
+    }
+
     private object AppendOnly : BeforeRecordDeleteListener, BeforeRecordUpdateListener {
         override fun onBeforeDelete(record: com.arcadedb.database.Record): Boolean = false
         override fun onBeforeUpdate(record: com.arcadedb.database.Record): Boolean = false

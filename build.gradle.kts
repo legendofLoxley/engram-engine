@@ -160,3 +160,26 @@ tasks.register<JavaExec>("schemaAudit") {
     val n = providers.gradleProperty("auditExamples").orElse("5").get()
     if (db != null) args(db, n)
 }
+
+// ── Fixture purge (offline) ───────────────────────────────────────────────────
+// Removes an explicit list of fixture users and their data from a graph directory the engine does NOT have open (see db/FixturePurge.kt).
+// Default is a read-only plan; -PpurgeApply=true deletes. Point it at a scratch restore, or at the live directory only with engram-dev stopped:
+//   ./gradlew purgeFixtureUsers -PpurgeDb=/path/to/engram-db -PpurgeList=/path/to/list.txt [-PpurgeApply=true] -q
+tasks.register<JavaExec>("purgeFixtureUsers") {
+    group       = "scripts"
+    description = "Plan (default) or apply (-PpurgeApply=true) the removal of listed fixture users from a graph directory (-PpurgeDb, -PpurgeList)"
+    mainClass.set("app.alfrd.engram.db.FixturePurgeCli")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs(
+        "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+        "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED",
+        "--add-opens", "java.base/java.nio.channels.spi=ALL-UNNAMED",
+        "-Dpolyglot.engine.WarnInterpreterOnly=false"
+    )
+    val db = providers.gradleProperty("purgeDb").orNull
+    val list = providers.gradleProperty("purgeList").orNull
+    val apply = providers.gradleProperty("purgeApply").orNull == "true"
+    if (db != null && list != null) args(listOfNotNull(db, list, "--apply".takeIf { apply }))
+}
