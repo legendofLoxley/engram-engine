@@ -13,5 +13,11 @@ Your situation:
 - Changed since the last tick: nothing.
 
 Contextual awareness — background orientation from your durable memory of this user:
-Not filed under any project:
-- "Order the soil" [open] — noted earlier, still open
+Board as of 2026-11-07 12:00: 1 project in 1 area, 3 open items.
+Needs attention:
+- c2 Garden [Home]: 2 open, !1
+  ! i1 "Order the soil": overdue 2d (hard)
+Everything else (quiet): not filed under a project: 1 open.
+Since the last day (no earlier read on record):
+- nothing changed.
+Legend: cN project or area, iN item; open either with set_focus on its ref. !n overdue or due soon, ~n waiting past check-in, *n changed since you last read, ?n maybe stale (ask "still live?"; confirm_item keeps it, set_state done or dropped closes it), ^ pinned. Quiet: nothing due, changed or waiting. Code-built, no model opinion.

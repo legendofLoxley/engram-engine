@@ -227,7 +227,8 @@ class ChangeRecordsTest {
         runCatching { db.transaction { db.command("sql", "DELETE FROM ChangeRecord WHERE targetUid = :u", mapOf("u" to t.uid)).close() } }   // vetoed: refused or skipped, never done
         assertEquals("active", changes(me, t.uid).single().newValue, "the record is still there, unchanged")
         val publicMethods = ChangeLog::class.java.declaredMethods.filter { java.lang.reflect.Modifier.isPublic(it.modifiers) && !it.isSynthetic }.map { it.name }.toSet()
-        assertEquals(setOf("append", "forTarget"), publicMethods)
+        // Reads are allowed to grow (forTarget, and since for the zoomed-out board's "changed since last read"); there is still no update or delete.
+        assertEquals(setOf("append", "forTarget", "since"), publicMethods)
         assertTrue(ArcadeHorizonStructureStore::class.java.methods.none { it.name.contains("deleteChange", true) || it.name.contains("updateChange", true) })
     }
 

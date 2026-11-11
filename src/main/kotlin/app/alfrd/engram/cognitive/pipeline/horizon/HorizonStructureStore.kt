@@ -72,6 +72,25 @@ object StateRules {
 
     /** Open and active items can be overdue; waiting, done and dropped never are. */
     fun canBeOverdue(state: WorkState?): Boolean = state == null || state == WorkState.OPEN || state == WorkState.ACTIVE
+
+    /**
+     * The staleness rule, in one place: an open or active item whose due date has passed and that nothing has confirmed for more than [staleDays]
+     * days. A soft one is asked about ("still live?"), a hard one keeps its alarm. The assembler and the zoomed-out board both use this, so they cannot disagree.
+     */
+    fun stale(state: WorkState?, dueAt: Long?, evidenceAt: Long, now: Long, staleDays: Long): Boolean =
+        canBeOverdue(state) && dueAt != null && dueAt < now && evidenceAt > 0L && now - evidenceAt > staleDays * 86_400_000L
+}
+
+/** The "also due" windows, in one place: used by the assembler's breakthrough block and by the zoomed-out board's "due soon" signal. */
+object DueWindows {
+    /**
+     * Whether an item due at [dueAt] breaks through: a hard one inside the hard window (a hard event that has already started is over, not due), a soft
+     * one not yet overdue and inside the soft window. [hardEnd] and [softEnd] are the end of the last day of each window.
+     */
+    fun alsoDue(dueAt: Long, hard: Boolean, boundToMoment: Boolean, now: Long, hardEnd: Long, softEnd: Long): Boolean {
+        val overdue = dueAt < now
+        return if (hard) dueAt < hardEnd && (!boundToMoment || !overdue) else !overdue && dueAt < softEnd
+    }
 }
 
 /** A moment, with the precision it was given: [hasTime] false means only the date was given (the time is the day's boundary). */

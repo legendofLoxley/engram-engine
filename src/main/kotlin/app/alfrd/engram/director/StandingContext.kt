@@ -1,6 +1,10 @@
 package app.alfrd.engram.director
 
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
+import app.alfrd.engram.cognitive.pipeline.horizon.BoardComposer
+import app.alfrd.engram.cognitive.pipeline.horizon.BoardPlan
+import app.alfrd.engram.cognitive.pipeline.horizon.BoardSource
+import app.alfrd.engram.cognitive.pipeline.horizon.RenderedBoard
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -14,6 +18,9 @@ import java.time.ZoneId
  *
  * [render] with `forChannel` swaps only the opening (a neutral preamble for a channel such as Claude, not the Director's policy).
  *
+ * Zoomed out (no focus), the Horizon is the board: a fixed-budget status view built by [BoardComposer] from [BoardSource], the same for the tick and the
+ * tool. "Since last time" is per [channel]; each channel's marker moves only when that channel is shown a board.
+ *
  * Reads only; it writes nothing and allocates no cycle. Which cycle the Horizon is assembled at is the caller's to say.
  */
 class StandingContext(
@@ -26,8 +33,10 @@ class StandingContext(
     private val hermes: () -> Map<String, Int>,
     private val budgets: () -> BudgetDefaults,
     private val zone: ZoneId = ZoneId.systemDefault(),
+    /** Where the zoomed-out board gets its facts. Null only where no board is wanted (a test); the tick and the owner's tool both pass one. */
+    private val board: BoardSource? = null,
 ) {
-    data class Rendered(val text: String, val outcome: AssembleOutcome, val state: SelfState)
+    data class Rendered(val text: String, val outcome: AssembleOutcome, val state: SelfState, val board: RenderedBoard? = null)
 
     /**
      * [refsFor], when given, is shown the assembled Horizon and returns the short ref of each phrase uid it will let the reader name (the owner's tool
@@ -35,10 +44,22 @@ class StandingContext(
      */
     suspend fun render(
         marker: ChangeMarker, changes: List<ChangeMarker.Change>, reason: String, now: Instant, cycleSeq: Long, forChannel: Boolean = false,
-        refsFor: suspend (AssembleOutcome) -> Map<String, String> = { emptyMap() },
+        channel: String = DEFAULT_CHANNEL,
+        refsFor: suspend (AssembleOutcome, BoardPlan?) -> Map<String, String> = { _, _ -> emptyMap() },
     ): Rendered {
         val outcome = assembler.assemble(email, cycleSeq)
-        val refs = refsFor(outcome)
+        // The board is for the zoomed-out view only; a focused view keeps its own listing.
+        val zoomedOut = (outcome as? AssembleOutcome.Assembled)?.horizon?.focus == null && outcome is AssembleOutcome.Assembled
+        val source = board.takeIf { zoomedOut }
+        val data = source?.read(email, channel)
+        val plan = data?.let { BoardComposer(source.policy, source.zone).plan(it) }
+        val refs = refsFor(outcome, plan)
+        val shownBoard: RenderedBoard? = when {
+            plan != null -> plan.render(refs)
+            source != null -> RenderedBoard("Board unavailable this time: the graph read failed.", 0, source.policy.boardTokenBudget, 0, 0, emptyList())
+            else -> null
+        }
+        if (plan != null) source?.markRead(channel, now.toEpochMilli())
         val state = SelfState(
             tickEnabled = tickEnabled,
             intervalSeconds = intervalSeconds,
@@ -52,8 +73,13 @@ class StandingContext(
             marker = marker,
             changes = changes,
         )
-        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs)
-        else DirectorPromptRenderer.render(state, outcome, zone, now, refs)
-        return Rendered(text, outcome, state)
+        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs, shownBoard)
+        else DirectorPromptRenderer.render(state, outcome, zone, now, refs, shownBoard)
+        return Rendered(text, outcome, state, shownBoard)
+    }
+
+    companion object {
+        /** The channel name the Director tick reads the board under; the owner's tool uses its own. */
+        const val DEFAULT_CHANNEL = "director-tick"
     }
 }

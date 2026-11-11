@@ -124,27 +124,40 @@ internal class ChangeLog(private val db: Database) {
     /** The changes recorded for [targetUid] that belong to [ownerEmail], oldest first. Other owners' records for the same uid are never returned. */
     fun forTarget(ownerEmail: String, targetUid: String): List<ChangeRecordView> =
         db.query("sql", "SELECT FROM ${ChangeTracking.TYPE} WHERE ownerEmail = :e AND targetUid = :t", mapOf("e" to ownerEmail, "t" to targetUid)).use { rs ->
-            val out = mutableListOf<ChangeRecordView>()
-            while (rs.hasNext()) {
-                val v = rs.next().toElement().asVertex()
-                out += ChangeRecordView(
-                    uid = v.get("uid") as String,
-                    ownerEmail = v.get("ownerEmail") as String,
-                    targetUid = v.get("targetUid") as String,
-                    targetType = v.get("targetType") as String,
-                    family = v.get("family") as String,
-                    field = v.get("field") as String,
-                    oldValue = v.get("oldValue") as? String,
-                    newValue = v.get("newValue") as? String,
-                    changedAt = (v.get("changedAt") as Number).toLong(),
-                    effectiveAt = (v.get("effectiveAt") as? Number)?.toLong(),
-                    cause = v.get("cause") as String,
-                    actor = v.get("actor") as String,
-                    reason = v.get("reason") as? String,
-                )
-            }
-            out.sortedBy { it.changedAt }
+            readAll(rs).sortedBy { it.changedAt }
         }
+
+    /**
+     * The changes recorded for [ownerEmail] after [afterMillis] (exclusive), oldest first, at most [limit] of them (the newest, if there are more). Read only.
+     * The zoomed-out board uses this for "changed since last read".
+     */
+    fun since(ownerEmail: String, afterMillis: Long, limit: Int): List<ChangeRecordView> =
+        db.query("sql", "SELECT FROM ${ChangeTracking.TYPE} WHERE ownerEmail = :e AND changedAt > :t", mapOf("e" to ownerEmail, "t" to afterMillis)).use { rs ->
+            readAll(rs).sortedBy { it.changedAt }.takeLast(limit)
+        }
+
+    private fun readAll(rs: com.arcadedb.query.sql.executor.ResultSet): List<ChangeRecordView> {
+        val out = mutableListOf<ChangeRecordView>()
+        while (rs.hasNext()) {
+            val v = rs.next().toElement().asVertex()
+            out += ChangeRecordView(
+                uid = v.get("uid") as String,
+                ownerEmail = v.get("ownerEmail") as String,
+                targetUid = v.get("targetUid") as String,
+                targetType = v.get("targetType") as String,
+                family = v.get("family") as String,
+                field = v.get("field") as String,
+                oldValue = v.get("oldValue") as? String,
+                newValue = v.get("newValue") as? String,
+                changedAt = (v.get("changedAt") as Number).toLong(),
+                effectiveAt = (v.get("effectiveAt") as? Number)?.toLong(),
+                cause = v.get("cause") as String,
+                actor = v.get("actor") as String,
+                reason = v.get("reason") as? String,
+            )
+        }
+        return out
+    }
 }
 
 object ChangeRecords {

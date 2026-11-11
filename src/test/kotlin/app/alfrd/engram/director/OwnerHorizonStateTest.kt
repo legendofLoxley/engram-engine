@@ -137,12 +137,13 @@ class OwnerHorizonStateTest {
 
         val read = c.send(null, "[]")
         val h = read.horizon()
+        // The board asks about it as one question under its project line, with the ref the listing gives it, and lists the hard deadline due tomorrow.
         val question = h.lines().first { it.contains("\"File the zoning form\"") }
-        assertTrue(question.startsWith("- ? \"File the zoning form\": due 2020-02-01 (soft), no evidence since "), question)
+        assertTrue(question.trim().startsWith("? \"File the zoning form\": due 2020-02-01 (soft), no evidence since "), question)
         assertTrue(question.endsWith("Still live?" + " [" + refOf(read.refs(), "File the zoning form") + "]"), question)
-        val alsoDue = h.substringAfter("Also due").lines().first { it.contains("Book the inspector") }
         val ref = refOf(read.refs(), "Book the inspector")
-        assertTrue(alsoDue.startsWith("- $ref \"Book the inspector\" — due tomorrow ($tomorrow, hard)"), alsoDue)
+        val dueSoon = h.lines().first { it.contains("Book the inspector") }
+        assertTrue(dueSoon.trim() == "! $ref \"Book the inspector\": due tomorrow (hard)", dueSoon)
 
         // "Yes, still live": evidence only, the quote guard as ever.
         val bad = c.send(msg, """[{"verb":"confirm_item","item":"${refOf(read.refs(), "File the zoning form")}","quote":"it is still live"}]""")

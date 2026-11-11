@@ -127,6 +127,39 @@ data class HorizonPolicy(
     val visibilityFloor: Double = 0.1,
     /** Most containers shown in the overview. */
     val maxContainersInView: Int = 12,
+
+    // ── The zoomed-out board ─────────────────────────────────────────────────
+    // A fixed-size status view of the whole graph, built by code on every read. Budgets are measured on the rendered text, not on item counts.
+    /** Tokens the zoomed-out board may use, however many projects there are. A starting guess, to be tuned against the real graph. */
+    val boardTokenBudget: Int = 800,
+    /** Tokens each focused (binoculars or telescope) view may use. A setting for now: the focused views are still bounded by [focusItemCap]. */
+    val zoomTokenBudget: Int = 1000,
+    /** How a rendered size becomes tokens: characters divided by this. 3.5 is a little pessimistic for English with refs and digits, so a board errs small. */
+    val charsPerToken: Double = 3.5,
+    // Pressure: each signal is 0 to 1, scaled by its weight, and the node's pressure combines them as the selector does (each adds, none passes 1).
+    val boardWeightOverdue: Double = 0.9,
+    val boardWeightDueSoon: Double = 0.7,
+    val boardWeightWaitingDue: Double = 0.6,
+    val boardWeightChanged: Double = 0.5,
+    val boardWeightStale: Double = 0.5,
+    val boardWeightFocused: Double = 0.8,
+    /** A pinned node always keeps a line; this only orders it among the rest. */
+    val boardWeightPinned: Double = 1.0,
+    /** Below this pressure a node is quiet and rolls up into its parent. */
+    val boardQuietBelow: Double = 0.15,
+    /** Pinned nodes are admitted to the board first and count against its budget; at most this many keep a line, the rest are counted. */
+    val boardPinnedCap: Int = 8,
+    /** At most this many items listed under one project line. */
+    val boardItemsPerNode: Int = 2,
+    /** At most this many lines in the "since last time" section. */
+    val boardSinceLines: Int = 4,
+    /** At most this many quiet-area lines before the rest are counted in one. */
+    val boardRollupLines: Int = 3,
+    /** With no earlier read of a channel on record (a restart forgets), "since last time" looks back this many hours. */
+    val boardFirstReadLookbackHours: Long = 24,
+    /** Bounds on what one board read scans: open items, and change records. */
+    val boardScanLimit: Int = 5000,
+    val boardChangeScanLimit: Int = 2000,
 ) {
 
     fun hopsFor(zoom: FocusZoom): Int = when (zoom) {
@@ -174,7 +207,7 @@ data class HorizonPolicy(
 
         /**
          * The defaults with the staleness and "also due" windows overridden from the environment (`HORIZON_STALE_DAYS`,
-         * `HORIZON_ALSO_DUE_HARD_DAYS`, `HORIZON_ALSO_DUE_SOFT_DAYS`, `HORIZON_ALSO_DUE_MAX_LINES`). A value that is not a
+         * `HORIZON_ALSO_DUE_HARD_DAYS`, `HORIZON_ALSO_DUE_SOFT_DAYS`, `HORIZON_ALSO_DUE_MAX_LINES`) and the board budgets (`HORIZON_BOARD_TOKENS`, `HORIZON_ZOOM_TOKENS`). A value that is not a
          * non-negative whole number is ignored.
          */
         fun fromEnvironment(env: Map<String, String> = System.getenv()): HorizonPolicy {
@@ -185,6 +218,8 @@ data class HorizonPolicy(
                 alsoDueHardDays = days("HORIZON_ALSO_DUE_HARD_DAYS") ?: base.alsoDueHardDays,
                 alsoDueSoftDays = days("HORIZON_ALSO_DUE_SOFT_DAYS") ?: base.alsoDueSoftDays,
                 alsoDueMaxLines = days("HORIZON_ALSO_DUE_MAX_LINES")?.toInt()?.takeIf { it > 0 } ?: base.alsoDueMaxLines,
+                boardTokenBudget = days("HORIZON_BOARD_TOKENS")?.toInt()?.takeIf { it > 0 } ?: base.boardTokenBudget,
+                zoomTokenBudget = days("HORIZON_ZOOM_TOKENS")?.toInt()?.takeIf { it > 0 } ?: base.zoomTokenBudget,
             )
         }
 

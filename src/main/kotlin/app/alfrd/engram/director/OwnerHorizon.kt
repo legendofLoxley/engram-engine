@@ -5,7 +5,9 @@ import app.alfrd.engram.cognitive.pipeline.agentwork.NotionCycleStartup
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.horizon.AppliedOperation
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeBoardSource
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPolicy
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
@@ -333,8 +335,9 @@ class OwnerHorizonService(
      */
     private suspend fun renderStanding(marker: ChangeMarker, changes: List<ChangeMarker.Change>, cycleSeq: Long): Pair<StandingContext.Rendered, String> {
         var snapshot: ViewSnapshot? = null
-        val rendered = standing.render(marker, changes, "Horizon tool", clock(), cycleSeq, forChannel = true) { outcome ->
-            val shown = (outcome as? AssembleOutcome.Assembled)?.horizon?.let { h ->
+        val rendered = standing.render(marker, changes, "Horizon tool", clock(), cycleSeq, forChannel = true, channel = CHANNEL) { outcome, board ->
+            // Zoomed out, the text names the board's items; focused, it names what the Horizon lists.
+            val shown = board?.itemUids ?: (outcome as? AssembleOutcome.Assembled)?.horizon?.let { h ->
                 h.items.mapNotNull { it.sourceRefs.firstOrNull()?.phraseUid } + h.alsoDue.map { it.uid } + h.hidden.map { it.uid }
             }.orEmpty()
             snapshot = try { snapshots.build(email, zone, include = shown) } catch (e: Exception) { null }
@@ -470,6 +473,7 @@ fun bootstrapOwnerHorizon(
             notion = { notionState(notionStartup) },
             hermes = { hermesActive.activeByKind() },
             budgets = { budgetDefaults(notionStartup) },
+            board = ArcadeBoardSource(db, HorizonPolicy.fromEnvironment()),
         ),
         sequencer = ArcadeCycleSequencer(db),
         applier = HorizonOperationApplier(structure, graph, sourceStore),

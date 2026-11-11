@@ -112,6 +112,17 @@ class OwnerHorizonSourcedTest {
     private fun JsonObject.applied(i: Int) = op(i)["applied"]!!.jsonPrimitive.boolean
     private fun JsonObject.detail(i: Int) = op(i)["detail"]!!.jsonPrimitive.content
     private fun JsonObject.horizon() = this["horizon"]!!.jsonPrimitive.content
+
+    /**
+     * The zoomed-out board lists what needs attention and rolls the rest up; an item's own provenance wording (whose words it is, what the
+     * document claims) is in the focused view, so these tests look at the item there and then put the focus back.
+     */
+    private suspend fun HttpClient.focusedOn(fragment: String): String {
+        val ref = refOf(send(null).refs(), fragment)
+        val focused = send("Let's look at that one.", """[{"verb":"set_focus","target":"$ref","quote":"look at that one"}]""").horizon()
+        send("Back to everything.", """[{"verb":"release_focus","quote":"Back to everything"}]""")
+        return focused
+    }
     private fun JsonObject.src(i: Int) = this["sources"]!!.jsonArray[i].jsonObject
 
     private fun count(sql: String): Long = manager.getDatabase().query("sql", sql).use { it.next().getProperty<Number>("n").toLong() }
@@ -134,8 +145,8 @@ class OwnerHorizonSourcedTest {
         assertEquals(utterancesBefore, utterances(), "no utterance: the owner said nothing")
 
         // The standing Horizon reads the item as the document's: title, location, and not the owner's commitment.
-        val h = c.send(null, "[]").horizon()
-        val line = h.lines().first { it.contains("Book the venue") }
+        val h = c.focusedOn("Book the venue")
+        val line = h.lines().first { it.startsWith("- ") && it.contains("Book the venue") }
         assertTrue(line.contains("from \"Offsite plan\""), line)
         assertTrue(line.contains("not the owner's own statement or commitment unless they adopt it"), line)
         assertTrue(line.contains("not read by the Director"), line)
@@ -204,7 +215,7 @@ class OwnerHorizonSourcedTest {
         val now = c.send(null, """[{"verb":"record_item","source":"$id2","kind":"task","quote":"Pack the tent and the stove before Saturday"}]""")
         assertTrue(now.applied(0), now.toString())
         // The item the old text produced is still there and now says the document has changed.
-        assertTrue(c.send(null, "[]").horizon().lines().first { it.contains("Pack the tent before") }.contains("the document has since changed"))
+        assertTrue(c.focusedOn("Pack the tent before").lines().first { it.startsWith("- ") && it.contains("Pack the tent before") }.contains("the document has since changed"))
 
         // Going back to the earlier text makes it current again, without a new Source.
         val back = c.send(null, "[]", source(text1, id2, "Trip"))
@@ -245,8 +256,8 @@ class OwnerHorizonSourcedTest {
         val r = c.send(null, "[$sourceOp]", source("# Admin\n\nRenew the storage contract by the 30th.", id, "Admin notes"))
         assertTrue(r.applied(0), r.toString())
         assertFalse(r.detail(0).contains("what you said") || r.detail(0).contains("you said"))
-        val h = c.send(null, "[]").horizon()
-        val line = h.lines().first { it.contains("storage contract") }
+        val h = c.focusedOn("storage contract")
+        val line = h.lines().first { it.startsWith("- ") && it.contains("storage contract") }
         assertFalse(line.contains("noted earlier") && !line.contains("Admin notes"), line)
         assertTrue(line.contains("not the owner's own statement"), line)
 
@@ -387,7 +398,7 @@ class OwnerHorizonSourcedTest {
         assertEquals("active", item.get("state")); assertEquals("hard", item.get("dueKind")); assertEquals(true, item.get("stateFromSource"))
         assertNull(item.get("waitingOn"), "only a state and a hard or soft deadline are taken from a source")
         val read = c.send(null, "[]")
-        val line = read.horizon().lines().first { it.contains("Sign off the press release") }
+        val line = c.focusedOn("Sign off the press release").lines().first { it.startsWith("- ") && it.contains("Sign off the press release") }
         assertTrue(line.contains("[active per the source]"), line)
         assertTrue(line.contains("not the owner's own statement or commitment"), line)
         val snapshotLine = read.refs().lines().first { it.contains("Sign off the press release") }

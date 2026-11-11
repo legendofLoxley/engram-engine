@@ -100,6 +100,8 @@ class DirectorTick(
     private val renderEvery: Duration = Duration.ofHours(1),
     /** Optional daily schema audit. Read-only, writes only its own `integrity.md`, and changes nothing about the tick (prompt, latest.md, marker, counters). */
     private val integrity: IntegrityCheck? = null,
+    /** Where the zoomed-out board gets its facts; the tick's prompt carries the same board the owner's tool does. */
+    private val board: app.alfrd.engram.cognitive.pipeline.horizon.BoardSource? = null,
 ) {
     init {
         require(!interval.isNegative && !interval.isZero) { "interval must be positive" }
@@ -107,7 +109,7 @@ class DirectorTick(
     }
 
     private val logger = LoggerFactory.getLogger(DirectorTick::class.java)
-    private val standing = StandingContext(email, true, interval.seconds, assembler, probe, notion, hermes, budgets, zone)
+    private val standing = StandingContext(email, true, interval.seconds, assembler, probe, notion, hermes, budgets, zone, board)
     private val lock = Any()
     private var ticks = 0L
     private var previous: ChangeMarker? = null
@@ -278,6 +280,7 @@ fun bootstrapDirectorTick(
         notion = { notionState(notionStartup) },
         hermes = { hermesActive.activeByKind() },
         budgets = { budgetDefaults(notionStartup) },
+        board = app.alfrd.engram.cognitive.pipeline.horizon.ArcadeBoardSource(db),
         integrity = if (env[IntegrityCheck.ENV_DISABLE]?.trim()?.lowercase() in setOf("off", "false", "0")) null else IntegrityCheck(db, dir.resolve(IntegrityCheck.FILE_NAME)),
     )
     if (start) tick.start(scope)

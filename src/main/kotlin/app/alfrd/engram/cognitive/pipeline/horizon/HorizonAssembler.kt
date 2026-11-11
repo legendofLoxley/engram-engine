@@ -442,8 +442,7 @@ class ArcadeHorizonAssembler(
                     if (project != null && (project.get("status") != "active" || project.get("attention") == AttentionDirective.SUPPRESSED.name.lowercase())) continue
                     val hard = DueKind.fromWire(v.get("dueKind") as? String) == DueKind.HARD
                     val overdue = dueAt < now
-                    val qualifies = if (hard) dueAt < hardEnd && (!spec.boundToMoment || !overdue) else !overdue && dueAt < softEnd
-                    if (!qualifies) continue
+                    if (!DueWindows.alsoDue(dueAt, hard, spec.boundToMoment, now, hardEnd, softEnd)) continue
                     found[uid] = AlsoDueEntry(uid, (v.get("text") as? String ?: "").take(HorizonLimits.MAX_CONTAINER_NAME_LENGTH * 2), dueAt, if (hard) "hard" else "soft", hasTime, overdue)
                 }
             }
@@ -849,8 +848,7 @@ class ArcadeHorizonAssembler(
             stateFromSource = state?.stateFromSource == true,
             lastEvidenceAt = state?.evidenceAt?.takeIf { it > 0L },
             // Asked about, not alarmed over: an open or active item that is past due and that nothing has confirmed for a long while.
-            stale = state != null && StateRules.canBeOverdue(state.workState) && state.dueAt != null && state.dueAt < now &&
-                state.evidenceAt > 0L && now - state.evidenceAt > policy.staleEvidenceDays * 86_400_000L,
+            stale = state != null && StateRules.stale(state.workState, state.dueAt, state.evidenceAt, now, policy.staleEvidenceDays),
         )
         // Ties keep the order the pools always gave them: by the cycle the thing that surfaced it happened in.
         val tie = when (surfacing) {
