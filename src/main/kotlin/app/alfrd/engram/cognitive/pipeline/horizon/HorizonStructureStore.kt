@@ -671,7 +671,13 @@ class ArcadeHorizonStructureStore(
         val leavingWaiting = state != WorkState.WAITING
         val nudgeUnchanged = if (nudge != null) currentNudge == nudge.at && (target.get("nudgeHasTime") == true) == nudge.hasTime else (!leavingWaiting || currentNudge == null)
         val waitingUnchanged = if (newWaitingOn != null) target.get("waitingOn") == newWaitingOn else (!leavingWaiting || target.get("waitingOn") == null)
-        if (current == state && target.get("state") == state.wire() && nudgeUnchanged && waitingUnchanged) return
+        if (current == state && nudgeUnchanged && waitingUnchanged) {
+            // Nothing the graph holds is different. An item whose state was never stored (it reads its state from the coarse `status`) still gets the
+            // state written down, but that is bookkeeping, not news: no evidence stamp, no updatedAt, no change record. Restating what is already
+            // true must not make an item look freshly confirmed; `confirm_item` is the way to say "still live".
+            if (target.get("state") != state.wire()) target.modify().apply { set("state", state.wire()); set("status", state.status); save() }
+            return
+        }
         val now = System.currentTimeMillis()
         val formerWaitingOn = target.get("waitingOn") as? String
         val newNudgeAt: Long? = if (nudge != null) nudge.at else if (leavingWaiting) null else currentNudge
