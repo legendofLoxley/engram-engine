@@ -102,6 +102,13 @@ class OwnerHorizonService(
 ) {
     private val logger = LoggerFactory.getLogger(OwnerHorizonService::class.java)
 
+    /**
+     * The items the last response's Horizon named, in order. They are listed with refs even when they fall outside the snapshot's own pools (a board line for
+     * an old overdue item, say), so the next call must build its snapshot with them too, or the ref it was shown would be refused. Kept in memory; a restart
+     * falls back to the snapshot's own pools.
+     */
+    @Volatile private var lastShownItems: List<String> = emptyList()
+
     suspend fun handle(message: String?, ops: JsonArray?, sources: JsonArray? = null): OwnerHorizonResponse {
         val text = message?.trim()?.takeIf { it.isNotEmpty() }
         val sent = ops ?: JsonArray(emptyList())
@@ -150,7 +157,8 @@ class OwnerHorizonService(
                 }
             }
             val snapshot = try {
-                snapshots.build(email, zone)
+                // The refs the last response showed were built with the items its Horizon named; building with the same ones keeps those refs working now.
+                snapshots.build(email, zone, include = lastShownItems)
             } catch (e: Exception) {
                 logger.warn("owner-horizon: view snapshot failed: {}", e::class.java.simpleName)
                 ViewSnapshot(emptyList(), emptyList(), emptyList(), zone = zone)
@@ -341,9 +349,13 @@ class OwnerHorizonService(
                 h.items.mapNotNull { it.sourceRefs.firstOrNull()?.phraseUid } + h.alsoDue.map { it.uid } + h.hidden.map { it.uid }
             }.orEmpty()
             snapshot = try { snapshots.build(email, zone, include = shown) } catch (e: Exception) { null }
+            lastShownItems = shown
             snapshot?.refsByUid().orEmpty()
         }
-        return rendered to (snapshot?.render() ?: "Refs unavailable: the graph read failed.")
+        // Zoomed out, the listing is bounded like the board: every area, the projects on the board, the projects of the items listed. A project left out is reached
+        // through its area. A focused view keeps the full listing (it is how an item is re-filed into any project).
+        val bound = rendered.board?.let { it.projectUids.toSet() }
+        return rendered to (snapshot?.render(bound) ?: "Refs unavailable: the graph read failed.")
     }
 
     private suspend fun refs(): String = try {

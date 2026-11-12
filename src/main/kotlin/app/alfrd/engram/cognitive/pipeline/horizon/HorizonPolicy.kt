@@ -132,7 +132,7 @@ data class HorizonPolicy(
     // A fixed-size status view of the whole graph, built by code on every read. Budgets are measured on the rendered text, not on item counts.
     /** Tokens the zoomed-out board may use, however many projects there are. A starting guess, to be tuned against the real graph. */
     val boardTokenBudget: Int = 800,
-    /** Tokens each focused (binoculars or telescope) view may use. A setting for now: the focused views are still bounded by [focusItemCap]. */
+    /** Tokens each focused view (a project, an area or one item) may use in the Director tick and the owner's tool; the lowest-pressure items are left out, and counted. */
     val zoomTokenBudget: Int = 1000,
     /** How a rendered size becomes tokens: characters divided by this. 3.5 is a little pessimistic for English with refs and digits, so a board errs small. */
     val charsPerToken: Double = 3.5,

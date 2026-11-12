@@ -77,6 +77,8 @@ data class RenderedBoard(
     val projectsShown: Int,
     val projectsTotal: Int,
     val itemUids: List<String>,
+    /** The projects with a line on the board: the refs listing keeps these (and every area) when it is bounded. */
+    val projectUids: List<String> = emptyList(),
 )
 
 /** A board with its lines chosen, not yet worded with refs. [render] words it and checks the budget against the real refs. */
@@ -99,13 +101,13 @@ class BoardPlan internal constructor(
             kept.removeAt(drop)
             text = assemble(kept, refs)
         }
-        return RenderedBoard(text, HorizonBoards.tokens(text, policy), policy.boardTokenBudget, kept.count { it.projectUid != null }, total, kept.flatMap { it.itemUids }.distinct())
+        return RenderedBoard(text, HorizonBoards.tokens(text, policy), policy.boardTokenBudget, kept.count { it.projectUid != null }, total, kept.flatMap { it.itemUids }.distinct(), kept.mapNotNull { it.projectUid })
     }
 
     /** The text with refs of a guessed width, for measuring before the listing exists (and for tests that do not care about refs). */
     fun renderWithHintedRefs(): RenderedBoard = RenderedBoard(
         assemble(blocks, null), HorizonBoards.tokens(assemble(blocks, null), policy), policy.boardTokenBudget,
-        blocks.count { it.projectUid != null }, total, itemUids,
+        blocks.count { it.projectUid != null }, total, itemUids, blocks.mapNotNull { it.projectUid },
     )
 }
 

@@ -4,8 +4,8 @@ When nothing is focused, the Horizon that the owner's tool and the Director tick
 It is built by code from the graph on every read (`HorizonBoard.kt`, `HorizonBoardSource.kt`). No model writes any of it, and it carries no Director commentary.
 Its size is set by a token budget, not by how many projects or items exist.
 
-A focused view (a project, an area or one item) is unchanged: it keeps its own listing. Conversational turns also keep the existing renderer for now (see
-"Not done").
+A focused view (a project, an area or one item) keeps its own listing, held to its own size budget (see "Focused views"). Conversational turns keep the existing
+renderer and are not held to either budget (see "Not done").
 
 ## What it shows
 
@@ -62,7 +62,7 @@ default 14). A soft stale item is asked about; a hard one keeps its overdue alar
 | Setting | Default | Environment override |
 |---|---|---|
 | `boardTokenBudget` | 800 | `HORIZON_BOARD_TOKENS` |
-| `zoomTokenBudget` | 1000 | `HORIZON_ZOOM_TOKENS` (a setting only for now; see "Not done") |
+| `zoomTokenBudget` | 1000 | `HORIZON_ZOOM_TOKENS` (holds each focused view in the tick and the tool; see "Focused views") |
 | `charsPerToken` | 3.5 | |
 | `boardQuietBelow` | 0.15 | |
 | `boardPinnedCap` | 8 | |
@@ -90,10 +90,49 @@ Tokens are measured on the rendered text: characters divided by `charsPerToken`.
 - **The legend is a mark table plus one sentence per verb**, travelling with every board (about 100 tokens), with one-character marks on the lines.
 - New items are counted from their creation time ("N new items"); change records cover changes to existing items.
 
+## The tool response is bounded too
+
+The owner's tool returns the horizon text and a `refs` listing next to it. Zoomed out, the listing is bounded like the board: every **area**, the **projects
+that have a line on the board**, and the project of every item the listing names (so an item's `[in cN]` always points at a listed line). The projects left
+out are counted in one line, and are reached through their area: `set_focus` on the area's ref, and the response then lists the projects in it with refs.
+
+The numbering does not change when the listing is bounded: every ref is still resolved against the full snapshot, so any ref shown works with every verb
+(`set_focus`, `set_attention`, `confirm_item`, `file_item` and the rest), and so would one that was not shown.
+
+Two things make "any ref shown works on the next call" true:
+
+- Items the board names beyond the snapshot's own pools (an old overdue item among many) get a ref only because the board lists them. The service remembers the
+  items the last response named, in order, and builds the next call's snapshot with them, so that ref is accepted. (Before this, such a ref was refused with
+  `unknown_ref`. A restart forgets the memory; a ref from before a restart then falls back to the snapshot's own pools.)
+- The listing grows with the number of **areas**, not projects. Areas are the handles for everything rolled up, so all of them are listed.
+
+Measured on a real scratch graph through `/owner/horizon` (the whole JSON response, tokens at 3.5 characters each; 3 projects need attention, the rest are quiet):
+
+| Projects | Whole response | Horizon text | Refs listing |
+|---|---|---|---|
+| 4 | 817 | 569 | 212 |
+| 40 | 878 | 602 | 240 |
+| 400 | 888 | 607 | 245 |
+
+Before the listing was bounded, the same graph returned 817, 1272 and 5671 tokens (the listing alone was 212, 624 and 4915).
+
+## Focused views
+
+A focused view in the tick and the tool is held to `zoomTokenBudget` the way the board is held to its own. The size is measured on the rendered section
+(orientation, also-due lines, grouped items, with a small allowance per item for its ref and for the note). When the view is larger, the **lowest-pressure
+items are dropped first** (an item's score, the same one that ranks it), the rest keep their order, and the view says how many it left out:
+
+> 77 more items were left out of this view to stay within its size budget (lowest pressure first); they are still in memory.
+
+For a focused project the count includes the project's open items that were never assembled into the view, so "listed plus left out" is the project's open
+count. Measured on a project of 100 tasks (5 of them hard-overdue): 3580 tokens untrimmed, 912 trimmed, 23 items kept, 77 left out; through the tool, 916 tokens
+with refs. The overdue items are kept. A view that already fits is returned unchanged.
+
+The refs listing of a focused view is not bounded: it still lists every area and project, because that is how an item is re-filed into any project.
+
 ## Not done
 
-- `zoomTokenBudget` is a setting, but the binoculars and telescope views are not yet held to it; they are still bounded by `focusItemCap`.
-- Conversational turns still use the earlier zoomed-out listing (`HorizonItemsRenderer`). The board is what the tick and the owner's tool return.
-  Switching turns is a one-line change at the turn's render call, but it changes live conversation prompts, so it was left for a decision.
-- The refs listing (the `refs` field next to the horizon text) still gives every area and project a `cN` ref, so it grows with the number of projects.
-  It is a separate field and is not part of the board's budget.
+- Conversational turns still use the earlier zoomed-out listing and are not held to the focus budget (`HorizonItemsRenderer` is shared, and the budget lives in the
+  standing context). The board and the focus budget apply to what the tick and the owner's tool return. Switching turns is a decision about live
+  conversation prompts, so it was left alone.
+- A focused view's refs listing still grows with the number of projects (see above).

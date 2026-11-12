@@ -205,8 +205,12 @@ data class ViewSnapshot(
         return if (hasTime) "${moment.toLocalDate()} ${"%02d:%02d".format(moment.hour, moment.minute)}" else moment.toLocalDate().toString()
     }
 
-    /** The exact text placed in the model's prompt. */
-    fun render(): String = buildString {
+    /**
+     * The exact text placed in the model's prompt. With [onlyContainers] (the zoomed-out board's projects), the listing is bounded: every area, those projects,
+     * and the project of every item listed (an item's `[in cN]` must point at a listed line) are shown, and the rest are counted and reached through their
+     * area (set_focus on the area's ref lists its projects). Every ref is still resolved against the full snapshot, so the numbering does not change.
+     */
+    fun render(onlyContainers: Set<String>? = null): String = buildString {
         // Qualified: a bare isEmpty() here resolves to the StringBuilder's (true while it is still empty).
         if (this@ViewSnapshot.isEmpty()) {
             append("Snapshot: nothing recorded yet.\n")
@@ -214,14 +218,18 @@ data class ViewSnapshot(
             append("Snapshot of what is in view:\n")
         }
         append("Focus: ").append(if (focusLines.isEmpty()) "none (zoomed out)" else focusLines.joinToString("; ")).append('\n')
+        val itemProjectRefs = items.mapNotNull { it.projectRef }.toSet()
+        val listed = if (onlyContainers == null) containers else containers.filter { it.kind == ContainerKind.DOMAIN || it.uid in onlyContainers || it.ref in itemProjectRefs }
         if (containers.isNotEmpty()) {
             append("Containers:\n")
-            containers.forEach { c ->
+            listed.forEach { c ->
                 append("  ${c.ref} ${c.name} (${c.kind.name.lowercase()}")
                 c.parentRef?.let { append(", in $it") }
                 c.attention?.let { append(", ${it.name.lowercase()}") }
                 append(")\n")
             }
+            val unlisted = containers.size - listed.size
+            if (unlisted > 0) append("  ($unlisted more project${if (unlisted == 1) "" else "s"} not listed: set_focus on an area's ref lists the projects in it)\n")
         }
         fun line(i: SnapshotItem) {
             append("  ${i.ref} ${i.kind.name.lowercase()} \"${i.text.replace('"', '\'').take(ITEM_TEXT_CAP)}\"")

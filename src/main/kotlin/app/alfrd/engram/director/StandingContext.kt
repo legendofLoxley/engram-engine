@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.BoardComposer
 import app.alfrd.engram.cognitive.pipeline.horizon.BoardPlan
 import app.alfrd.engram.cognitive.pipeline.horizon.BoardSource
+import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPolicy
 import app.alfrd.engram.cognitive.pipeline.horizon.RenderedBoard
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,8 @@ class StandingContext(
     private val zone: ZoneId = ZoneId.systemDefault(),
     /** Where the zoomed-out board gets its facts. Null only where no board is wanted (a test); the tick and the owner's tool both pass one. */
     private val board: BoardSource? = null,
+    /** Where the focused-view size budget (`zoomTokenBudget`) comes from; the board's policy when there is a board, else the environment's. */
+    private val policy: HorizonPolicy = board?.policy ?: HorizonPolicy.fromEnvironment(),
 ) {
     data class Rendered(val text: String, val outcome: AssembleOutcome, val state: SelfState, val board: RenderedBoard? = null)
 
@@ -47,7 +50,11 @@ class StandingContext(
         channel: String = DEFAULT_CHANNEL,
         refsFor: suspend (AssembleOutcome, BoardPlan?) -> Map<String, String> = { _, _ -> emptyMap() },
     ): Rendered {
-        val outcome = assembler.assemble(email, cycleSeq)
+        val assembled = assembler.assemble(email, cycleSeq)
+        // A focused view is held to the zoom budget; zoomed out, the board has its own.
+        val fit = (assembled as? AssembleOutcome.Assembled)?.let { FocusedViewBudget.fit(it.horizon, zone, policy) }
+        val outcome: AssembleOutcome = if (fit != null && fit.horizon !== (assembled as AssembleOutcome.Assembled).horizon) AssembleOutcome.Assembled(fit.horizon) else assembled
+        val omitted = fit?.omitted ?: 0
         // The board is for the zoomed-out view only; a focused view keeps its own listing.
         val zoomedOut = (outcome as? AssembleOutcome.Assembled)?.horizon?.focus == null && outcome is AssembleOutcome.Assembled
         val source = board.takeIf { zoomedOut }
@@ -73,8 +80,8 @@ class StandingContext(
             marker = marker,
             changes = changes,
         )
-        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs, shownBoard)
-        else DirectorPromptRenderer.render(state, outcome, zone, now, refs, shownBoard)
+        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs, shownBoard, omitted)
+        else DirectorPromptRenderer.render(state, outcome, zone, now, refs, shownBoard, omitted)
         return Rendered(text, outcome, state, shownBoard)
     }
 

@@ -19,12 +19,12 @@ object DirectorPromptRenderer {
 
     private val stamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
 
-    fun render(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null): String = buildString {
+    fun render(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null, omitted: Int = 0): String = buildString {
         append(Actor.STANDING_CONTEXT_POLICY)
         append("\n\nThis is your standing context, built without a message from the user: no one is speaking to you, and nothing here was just said.\n\n")
         append(situation(state, zone))
         append("\n\n")
-        append(horizonSection(horizon, zone, now, refs = refs, board = board))
+        append(horizonSection(horizon, zone, now, refs = refs, board = board, omitted = omitted))
         append('\n')
     }
 
@@ -39,12 +39,12 @@ object DirectorPromptRenderer {
      * The same situation and Horizon as [render], opened with [CHANNEL_PREAMBLE] instead of the Director's policy. Used only by the owner's
      * Horizon tool: the channel reading it is Claude and stays itself; alfrd is the memory behind it.
      */
-    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null): String = buildString {
+    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null, omitted: Int = 0): String = buildString {
         append(CHANNEL_PREAMBLE)
         append("\n\n")
         append(situation(state, zone, "alfrd's situation:"))
         append("\n\n")
-        append(horizonSection(horizon, zone, now, "alfrd's memory of the owner", refs, board))
+        append(horizonSection(horizon, zone, now, "alfrd's memory of the owner", refs, board, omitted))
         append('\n')
     }
 
@@ -74,7 +74,7 @@ object DirectorPromptRenderer {
             "; newest source read ${m.newestSourceReadAt?.let { Instant.ofEpochMilli(it) } ?: "never"}" +
             ", newest extraction run started ${m.newestRunStartedAt?.let { Instant.ofEpochMilli(it) } ?: "never"}"
 
-    private fun horizonSection(outcome: AssembleOutcome, zone: ZoneId, now: Instant, memoryOf: String = "your durable memory of this user", refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null): String = when (outcome) {
+    private fun horizonSection(outcome: AssembleOutcome, zone: ZoneId, now: Instant, memoryOf: String = "your durable memory of this user", refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null, omitted: Int = 0): String = when (outcome) {
         is AssembleOutcome.Assembled -> {
             val horizon = outcome.horizon
             val heading = "Contextual awareness — background orientation from $memoryOf:\n"
@@ -85,7 +85,8 @@ object DirectorPromptRenderer {
                 val items = HorizonItemsRenderer.render(horizon, zone, refs = refs)
                 val frame = HorizonItemsRenderer.composeOrientation(horizon, zone, refs = refs)
                 heading + (frame?.let { "$it\n\n" } ?: "") +
-                    if (items.isEmpty()) "(Nothing is in view: no focus, no open items, no recent reports. This says nothing about what is in memory.)" else grouped(items)
+                    (if (items.isEmpty()) "(Nothing is in view: no focus, no open items, no recent reports. This says nothing about what is in memory.)" else grouped(items)) +
+                    (if (omitted > 0) "\n\n$omitted more item${if (omitted == 1) "" else "s"} ${if (omitted == 1) "was" else "were"} left out of this view to stay within its size budget (lowest pressure first); they are still in memory." else "")
             }
         }
         is AssembleOutcome.ConsistencyFailure -> "Contextual awareness: unavailable this tick (a writer held the graph: ${outcome.reason})."
@@ -94,6 +95,8 @@ object DirectorPromptRenderer {
     }
 
     /** The same grouping a conversational turn uses (see Actor.renderGrouped): headings in the order their first item appears. */
+    internal fun groupedLength(items: List<HorizonPromptItem>): Int = if (items.isEmpty()) 0 else grouped(items).length
+
     private fun grouped(items: List<HorizonPromptItem>): String {
         if (items.all { it.group == null }) return items.joinToString("\n") { "- ${it.renderedLine}" }
         val byGroup = LinkedHashMap<String?, MutableList<HorizonPromptItem>>()
