@@ -15,6 +15,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.ItemWords
 import app.alfrd.engram.cognitive.pipeline.horizon.RecordItem
 import app.alfrd.engram.db.ChunkDraft
 import app.alfrd.engram.db.SourceChunker
+import app.alfrd.engram.db.SourceEditTime
 import app.alfrd.engram.db.SourceInput
 import app.alfrd.engram.db.SourceStore
 import app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer
@@ -233,7 +234,7 @@ class OwnerHorizonService(
                                 ),
                             )
                             val changed = sourceStore.markCurrent(email, result.source.uid)
-                            confirmItemsFrom(result.source.uid, joined)
+                            confirmItemsFrom(result.source.uid, joined, SourceEditTime.parse(obj.str("last_edited")))
                             OwnerSourceReport(
                                 rawId, title, true,
                                 when {
@@ -260,12 +261,13 @@ class OwnerHorizonService(
      * A document sent again, unchanged or not, confirms what was filed from it: every item that quotes any stored version of this page, and whose
      * quoted passage is still in the text just sent, has its evidence refreshed. An item whose passage is gone is left as it was.
      */
-    private suspend fun confirmItemsFrom(sourceUid: String, text: String) {
+    private suspend fun confirmItemsFrom(sourceUid: String, text: String, editedAt: Long?) {
         val wanted = SourceChunker.normalize(text)
         val items = sourceStore.itemsQuotedFrom(email, sourceStore.versionsOf(email, sourceUid))
             .filter { (_, quote) -> quote.isNullOrBlank() || wanted.contains(SourceChunker.normalize(quote)) }
             .map { it.first }.distinct()
-        for (uid in items) structure.touchEvidence(email, 0L, uid)
+        // With the page's last_edited, evidence follows it (raised when later; lowered only for an item no one but a source has touched). Without one, now, as before.
+        for (uid in items) structure.refreshEvidenceFromSource(email, 0L, uid, editedAt)
     }
 
     private sealed interface SourcedPlan {

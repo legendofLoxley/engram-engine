@@ -89,6 +89,8 @@ data class ItemExtras(
     val waitingOn: String? = null,
     /** True when [state] or [dueKind] is a claim made by the document the item was filed from (until anyone changes it). */
     val fromSource: Boolean = false,
+    /** When the item's evidence clock starts, instead of now: a source's `last_edited`. Bounded by now at the write; null means now. */
+    val evidenceAt: Long? = null,
 )
 
 /** Zoom levels a focus can carry: broad, one container, one item's neighborhood. */
@@ -280,6 +282,19 @@ interface HorizonStructureStore {
      * question the user owns; false for anything else. Attention changes (pin, suppress) are not evidence and never call this.
      */
     suspend fun touchEvidence(userEmail: String, cycleSeq: Long, targetUid: String): Boolean
+
+    /**
+     * A source says it still holds the item (a document sent again, or the same passage cited again). [editedAt] is that source's `last_edited`, or null when it
+     * did not give one, in which case this is [touchEvidence] (evidence is now), as it has always been.
+     *
+     * With [editedAt], the evidence follows the source's own edit time, bounded by now:
+     * - later than the item's evidence: evidence is raised to it;
+     * - earlier than the item's evidence: evidence is lowered to it only when nothing but source writes has touched the item since it was created (see the
+     *   implementation), so an item imported before this existed can be repaired by sending its source again, and an owner's confirmation is never undone;
+     * - done or dropped items are left alone.
+     * Only the evidence stamp moves; `updatedAt` stays, so a refresh is not mistaken for a change.
+     */
+    suspend fun refreshEvidenceFromSource(userEmail: String, cycleSeq: Long, targetUid: String, editedAt: Long?): Boolean
 
     /**
      * Sets the hard/soft marking of an item's due date, and optionally its check-in date. False for a fact, container, or target the
@@ -524,7 +539,8 @@ class ArcadeHorizonStructureStore(
                     val state = extras.state ?: WorkState.OPEN
                     set("state", state.wire())
                     set("status", state.status)
-                    set("lastEvidenceAt", now)
+                    // An item filed from a source starts as fresh as the source says (never in the future); otherwise as of now.
+                    set("lastEvidenceAt", extras.evidenceAt?.coerceIn(1L, now) ?: now)
                     if (state.closed) set("resolvedAt", now)
                     if (extras.dueKind != null && dueAt != null) set("dueKind", extras.dueKind.wire())
                     if (state == WorkState.WAITING || extras.nudge != null) extras.nudge?.let { set("nudgeAt", it.at); if (it.hasTime) set("nudgeHasTime", true) }
@@ -662,6 +678,42 @@ class ArcadeHorizonStructureStore(
             target.modify().apply { set("lastEvidenceAt", System.currentTimeMillis()); save() }
             true
         }
+
+    override suspend fun refreshEvidenceFromSource(userEmail: String, cycleSeq: Long, targetUid: String, editedAt: Long?): Boolean =
+        mutate("refreshEvidenceFromSource", false) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
+            if (!ItemKinds.isStateful(target.typeName)) return@mutate false
+            val now = System.currentTimeMillis()
+            if (editedAt == null) {
+                target.modify().apply { set("lastEvidenceAt", now); save() }   // the source gave no edit time: said again, so confirmed now, as before
+                return@mutate true
+            }
+            if (WorkState.of(target.get("state") as? String, target.get("status") as? String)?.closed == true) return@mutate true   // done and dropped are left alone
+            val candidate = minOf(editedAt, now).coerceAtLeast(1L)
+            val created = (target.get("createdAt") as? Number)?.toLong()
+            val current = (target.get("lastEvidenceAt") as? Number)?.toLong() ?: (target.get("updatedAt") as? Number)?.toLong() ?: created ?: 0L
+            val write = candidate > current || (candidate < current && onlySourceWritesTouched(userEmail, target))
+            if (write) target.modify().apply { set("lastEvidenceAt", candidate); save() }
+            true
+        }
+
+    /**
+     * Whether nothing but source writes has touched the item since it was made. No new property: the item says so itself. Creation writes `createdAt`, `updatedAt`
+     * and `lastEvidenceAt` as one moment, and every owner action moves one of them or leaves a record:
+     * - a confirmation (`confirm_item`) moves `lastEvidenceAt` off the creation moment;
+     * - a real change (state, dates, waiting, filing, attention) moves `lastEvidenceAt` or `updatedAt` and writes a change record;
+     * - a correction makes a new item and supersedes this one.
+     * So the item is "untouched" when its evidence stamp and `updatedAt` are still its creation moment and it has no change record. An item whose stamp was
+     * already moved (by an earlier resend, before this existed) cannot be told from a confirmed one and is not lowered: the safe side.
+     */
+    private fun onlySourceWritesTouched(owner: String, target: Vertex): Boolean {
+        val created = (target.get("createdAt") as? Number)?.toLong() ?: return false
+        val stamp = (target.get("lastEvidenceAt") as? Number)?.toLong() ?: created
+        val updated = (target.get("updatedAt") as? Number)?.toLong() ?: created
+        if (stamp != created || updated != created) return false
+        val uid = target.get("uid") as? String ?: return false
+        return changeLog.forTarget(owner, uid).isEmpty()
+    }
 
     /** Writes [state] and its coarse `status`; see [HorizonStructureStore.setState]. Caller holds the lock. */
     private fun applyState(owner: String, target: Vertex, state: WorkState, nudge: TimeValue?, waitingOn: String?) {

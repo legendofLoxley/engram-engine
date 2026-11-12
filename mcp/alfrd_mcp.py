@@ -48,7 +48,12 @@ the most recent response, not an earlier one. A refused operation reports the gu
 Sourced writes are for documents (a Notion page first): send the page in `sources` (a stable `id`, `title`, `kind` notion_page, and its `text` or
 `chunks`; re-sending unchanged text adds nothing, changed text supersedes the earlier text), then file an item with a record_item that cites it:
 `source` is that id and `quote` is a verbatim passage of the source's text. The item is shown as coming from the document, never as the owner's
-statement; the owner's own statements still use the message.
+statement; the owner's own statements still use the message. `last_edited` (ISO date or time) on a source sets the evidence date of the items filed
+from it: they read as fresh as the page says, never later than now, so an old page's tasks are asked about ("Still live?") rather than raised as
+overdue; sending the page again with a later `last_edited` refreshes them, and with an earlier one corrects items imported earlier that only a
+source has touched (confirmed or changed items are never lowered). Without `last_edited` an item starts fresh as of the import. A record_item
+`title` (task or event only) is kept only if at least half of its content words (four letters or more) come from the quote; otherwise it is dropped
+and the quote becomes the item's label, so write a title from the quote's own words.
 
 Items have a state: open, active, waiting, done or dropped (record_item takes an optional `state`; `set_state` moves an existing item, with an
 optional `nudge` date to check in and `waiting_on`, who or what it waits on; waiting is accepted without waiting_on, and the result says so).
