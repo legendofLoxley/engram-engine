@@ -96,6 +96,8 @@ class ArcadeBoardSource(
         val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
         val byProject = LinkedHashMap<String, MutableList<BoardItem>>()
         val unfiled = mutableListOf<BoardItem>()
+        val hiddenByProject = HashMap<String, Int>()
+        var unfiledHidden = 0
         val itemInfo = HashMap<String, Pair<String, String?>>()   // uid to (text, project uid)
         var newItems = 0
         for (spec in ItemKinds.stateful()) {
@@ -105,11 +107,12 @@ class ArcadeBoardSource(
                     val v = rs.next().toElement().asVertex()
                     seen++
                     val uid = v.get("uid") as? String ?: continue
-                    if (attention(v) == "suppressed") continue
-                    if (v.getEdges(Vertex.DIRECTION.IN, "RELATED_TO").any { it.get("relationType") == "supersedes" }) continue
                     val project = v.getVertices(Vertex.DIRECTION.OUT, "PART_OF").firstOrNull { it.typeName == "Project" }
                     val projectUid = project?.get("uid") as? String
                     if (project != null && projectUid !in projects) continue   // filed under a done or silenced project
+                    // A suppressed item is hidden: counted apart, never in the open number (the focused view says the same).
+                    if (attention(v) == "suppressed") { if (projectUid != null) hiddenByProject.merge(projectUid, 1, Int::plus) else unfiledHidden++; continue }
+                    if (v.getEdges(Vertex.DIRECTION.IN, "RELATED_TO").any { it.get("relationType") == "supersedes" }) continue
                     val hasTime = v.get("dueHasTime") == true
                     val raw = spec.dueProperty?.let { (v.get(it) as? Number)?.toLong() }
                     // A date-only event is stored at the start of its day; it is happening today until the day is over (as the "also due" block reads it).
@@ -160,9 +163,9 @@ class ArcadeBoardSource(
             asOf = now, sinceAt = sinceAt, sinceIsLookback = previous == null,
             areas = areas.values.toList(),
             projects = projects.values.map { p ->
-                BoardProject(p.uid, p.name, p.areaUid, p.pinned, maxOf(nudges[p.uid] ?: 0.0, p.areaUid?.let { nudges[it] } ?: 0.0), p.dueAt, byProject[p.uid].orEmpty())
+                BoardProject(p.uid, p.name, p.areaUid, p.pinned, maxOf(nudges[p.uid] ?: 0.0, p.areaUid?.let { nudges[it] } ?: 0.0), p.dueAt, byProject[p.uid].orEmpty(), hiddenByProject[p.uid] ?: 0)
             },
-            unfiled = unfiled, changes = changes, newItems = newItems, truncated = truncated,
+            unfiled = unfiled, changes = changes, newItems = newItems, truncated = truncated, unfiledHidden = unfiledHidden,
         )
     }
 }

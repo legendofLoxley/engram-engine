@@ -52,8 +52,10 @@ class StandingContext(
     ): Rendered {
         val assembled = assembler.assemble(email, cycleSeq)
         // A focused view is held to the zoom budget; zoomed out, the board has its own.
-        val fit = (assembled as? AssembleOutcome.Assembled)?.let { FocusedViewBudget.fit(it.horizon, zone, policy) }
-        val outcome: AssembleOutcome = if (fit != null && fit.horizon !== (assembled as AssembleOutcome.Assembled).horizon) AssembleOutcome.Assembled(fit.horizon) else assembled
+        // Hidden (suppressed) items are never in the open number here, so a project reads "5 open, 5 hidden" in the board and in its focused view alike.
+        val counted = (assembled as? AssembleOutcome.Assembled)?.let { AssembleOutcome.Assembled(withoutHiddenInOpen(it.horizon)) }
+        val fit = counted?.let { FocusedViewBudget.fit(it.horizon, zone, policy) }
+        val outcome: AssembleOutcome = if (fit != null) AssembleOutcome.Assembled(fit.horizon) else assembled
         val omitted = fit?.omitted ?: 0
         // The board is for the zoomed-out view only; a focused view keeps its own listing.
         val zoomedOut = (outcome as? AssembleOutcome.Assembled)?.horizon?.focus == null && outcome is AssembleOutcome.Assembled
@@ -84,6 +86,12 @@ class StandingContext(
         else DirectorPromptRenderer.render(state, outcome, zone, now, refs, shownBoard, omitted)
         return Rendered(text, outcome, state, shownBoard)
     }
+
+    /** The container views with suppressed items taken out of the open, active and waiting counts (the model keeps them in [app.alfrd.engram.cognitive.pipeline.horizon.HorizonContainerView.hiddenItems]). */
+    private fun withoutHiddenInOpen(h: app.alfrd.engram.cognitive.pipeline.horizon.ContextHorizon) =
+        if (h.containers.none { it.hiddenItems > 0 }) h else h.copy(containers = h.containers.map {
+            it.copy(openItems = it.openItems - it.hiddenItems, activeItems = it.activeItems - it.hiddenActive, waitingItems = it.waitingItems - it.hiddenWaiting)
+        })
 
     companion object {
         /** The channel name the Director tick reads the board under; the owner's tool uses its own. */

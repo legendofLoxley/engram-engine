@@ -81,7 +81,9 @@ object HorizonItemsRenderer {
         alreadyRaised: Set<String> = emptySet(),
         /** Phrase uid to the short ref the owner's tool shows for it; empty where there are no refs (the tick, a conversation). */
         refs: Map<String, String> = emptyMap(),
-    ): List<HorizonPromptItem> = arrange(horizon, zone, horizon.items.map { it to renderItem(it, horizon, zone, alreadyRaised, refs) }, refs)
+        /** Say how many of a project's items are hidden (suppressed) beside its open count. Only the standing context (the tick and the owner's tool) asks; turns do not. */
+        showHidden: Boolean = false,
+    ): List<HorizonPromptItem> = arrange(horizon, zone, horizon.items.map { it to renderItem(it, horizon, zone, alreadyRaised, refs) }, refs, showHidden)
 
     private fun renderItem(item: HorizonItem, horizon: ContextHorizon, zone: java.time.ZoneId, alreadyRaised: Set<String>, refs: Map<String, String>): HorizonPromptItem {
         val surfacing = item.surfacing
@@ -172,7 +174,7 @@ object HorizonItemsRenderer {
     }
 
     /** Where each item is listed. Focused on a project, its items come first, grouped by state (active, open, waiting) and then its hidden ones; zoomed out or focused on a domain, each project gets its count of plain open items. */
-    private fun arrange(horizon: ContextHorizon, zone: java.time.ZoneId, rendered: List<Pair<HorizonItem, HorizonPromptItem>>, refs: Map<String, String>): List<HorizonPromptItem> {
+    private fun arrange(horizon: ContextHorizon, zone: java.time.ZoneId, rendered: List<Pair<HorizonItem, HorizonPromptItem>>, refs: Map<String, String>, showHidden: Boolean): List<HorizonPromptItem> {
         val focus = horizon.focus
         val projectFocus = focus?.takeIf { it.kind == "project" }
         if (projectFocus != null) {
@@ -194,7 +196,8 @@ object HorizonItemsRenderer {
         val counts = horizon.containers.filter { it.kind == "project" && (domainFocus == null || it.parentUid == domainFocus.uid) }.mapNotNull { view ->
             val shownPlain = rendered.count { (item, _) -> item.container?.uid == view.uid && (item.state == null || item.state == "open") }
             val remaining = view.openItems - view.activeItems - view.waitingItems - shownPlain
-            if (remaining > 0) HorizonPromptItem("$remaining open", essential = false, group = "In \"${view.name}\" (project)") else null
+            val hiddenNote = if (showHidden && view.hiddenItems > 0) ", ${view.hiddenItems} hidden" else ""
+            if (remaining > 0 || hiddenNote.isNotEmpty()) HorizonPromptItem("${maxOf(remaining, 0)} open$hiddenNote", essential = false, group = "In \"${view.name}\" (project)") else null
         }
         return items + counts
     }
@@ -252,8 +255,9 @@ object HorizonItemsRenderer {
         zone: java.time.ZoneId = java.time.ZoneOffset.UTC,
         alreadyRaised: Set<String> = emptySet(),
         refs: Map<String, String> = emptyMap(),
+        showHidden: Boolean = false,
     ): String? {
-        val orientation = composeFrame(horizon, zone, alreadyRaised)
+        val orientation = composeFrame(horizon, zone, alreadyRaised, showHidden)
         val due = composeAlsoDue(horizon, zone, refs)
         return listOfNotNull(orientation, due).takeIf { it.isNotEmpty() }?.joinToString("\n\n")
     }
@@ -276,6 +280,7 @@ object HorizonItemsRenderer {
         horizon: ContextHorizon,
         zone: java.time.ZoneId,
         alreadyRaised: Set<String>,
+        showHidden: Boolean = false,
     ): String? {
         val focus = horizon.focus
         val others = horizon.containers.filter { it.uid != focus?.uid }.take(MAX_ORIENTATION_CONTAINERS)
@@ -283,7 +288,7 @@ object HorizonItemsRenderer {
         if (focus == null && others.isEmpty() && !timeSensitive) return null
         fun openWords(view: app.alfrd.engram.cognitive.pipeline.horizon.HorizonContainerView?): String {
             if (view == null) return ""
-            val open = if (view.openItems == 0) "nothing open" else "${view.openItems} open"
+            val open = (if (view.openItems == 0) "nothing open" else "${view.openItems} open") + if (showHidden && view.hiddenItems > 0) ", ${view.hiddenItems} hidden" else ""
             val next = view.nextDueAt?.let { ", next: " + describeDeadline(SurfacingReason.Urgent(it, overdue = it < horizon.asOf), horizon.asOf, zone) } ?: ""
             return " ($open$next)"
         }

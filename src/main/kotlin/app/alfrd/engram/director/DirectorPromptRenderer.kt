@@ -82,8 +82,8 @@ object DirectorPromptRenderer {
                 // Zoomed out, the view is the board and nothing else: a fixed-budget status of the whole graph, built by code. A focused view keeps its listing.
                 heading + (board?.text ?: "Board unavailable: no board source is configured.")
             } else {
-                val items = HorizonItemsRenderer.render(horizon, zone, refs = refs)
-                val frame = HorizonItemsRenderer.composeOrientation(horizon, zone, refs = refs)
+                val items = HorizonItemsRenderer.render(horizon, zone, refs = refs, showHidden = true)
+                val frame = HorizonItemsRenderer.composeOrientation(horizon, zone, refs = refs, showHidden = true)
                 heading + (frame?.let { "$it\n\n" } ?: "") +
                     (if (items.isEmpty()) "(Nothing is in view: no focus, no open items, no recent reports. This says nothing about what is in memory.)" else grouped(items)) +
                     (if (omitted > 0) "\n\n$omitted more item${if (omitted == 1) "" else "s"} ${if (omitted == 1) "was" else "were"} left out of this view to stay within its size budget (lowest pressure first); they are still in memory." else "")

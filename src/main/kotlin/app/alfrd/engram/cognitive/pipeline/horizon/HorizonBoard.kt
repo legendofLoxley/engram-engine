@@ -40,6 +40,8 @@ data class BoardProject(
     val focusWeight: Double,
     val dueAt: Long?,
     val items: List<BoardItem>,
+    /** Suppressed items, never counted in the open number. */
+    val hiddenItems: Int = 0,
 )
 
 data class BoardArea(val uid: String, val name: String, val pinned: Boolean, val focusWeight: Double)
@@ -67,6 +69,8 @@ data class BoardData(
     val newItems: Int,
     /** True when a scan hit its bound, so the counts are a floor. */
     val truncated: Boolean = false,
+    /** Suppressed items filed under no project. */
+    val unfiledHidden: Int = 0,
 )
 
 /** What a rendered board cost, and what it shows. */
@@ -126,16 +130,16 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
         val urgentMark: Boolean get() = hardOverdue || softOverdue || dueSoon
     }
 
-    private class Stats(val project: BoardProject?, val unfiled: List<BoardItem>?, val flags: List<Flags>, val changedItems: Int, val pressure: Double, val projectDueSoon: Boolean) {
+    private class Stats(val project: BoardProject?, val unfiled: List<BoardItem>?, val unfiledHidden: Int, val flags: List<Flags>, val changedItems: Int, val pressure: Double, val projectDueSoon: Boolean) {
         val items: List<BoardItem> get() = project?.items ?: unfiled.orEmpty()
         val open: Int get() = flags.size
+        val hidden: Int get() = project?.hiddenItems ?: unfiledHidden
         val active: Int get() = flags.count { it.item.state == WorkState.ACTIVE }
         val waiting: Int get() = flags.count { it.item.state == WorkState.WAITING }
         val urgent: Int get() = flags.count { it.urgentMark } + if (projectDueSoon) 1 else 0
         val waitingDue: Int get() = flags.count { it.waitingDue }
         val stale: List<Flags> get() = flags.filter { it.staleSoft }
         val pinnedItems: List<Flags> get() = flags.filter { it.item.pinned }
-        val hot: Boolean get() = pressure > 0.0
     }
 
     fun plan(data: BoardData): BoardPlan {
@@ -176,7 +180,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
                 policy.boardWeightFocused * focus.coerceIn(0.0, 1.0),
                 policy.boardWeightPinned * (if (pinnedNode) 1.0 else 0.0),
             )
-            return Stats(project, unfiled, flags, changed, HorizonPolicy.combine(signals), projectDueSoon)
+            return Stats(project, unfiled, if (project == null) data.unfiledHidden else 0, flags, changed, HorizonPolicy.combine(signals), projectDueSoon)
         }
 
         val areaName = data.areas.associate { it.uid to it.name }
@@ -255,6 +259,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
 
         fun nodeCounts(s: Stats): String = buildList {
             add("${s.open} open")
+            if (s.hidden > 0) add("${s.hidden} hidden")
             if (s.urgent > 0) add("!${s.urgent}")
             if (s.waitingDue > 0) add("~${s.waitingDue}")
             if (s.changedItems > 0) add("*${s.changedItems}")
@@ -338,7 +343,9 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
             }
             // Everything else, by area. Honest about what was left out for space.
             val leftOver = projectStats.filter { (p, _) -> p.uid !in shown }
-            val hotLeft = leftOver.count { (_, s) -> s.hot }
+            // Only a project that qualified for a line (pressure at or above the quiet floor, something open) and did not fit is "not shown for space".
+            // A project that merely has some pressure (an empty one with a change record, a faint mention) was never a candidate and is not counted.
+            val hotLeft = candidates.count { it.project != null && it.project.uid !in shown && !requiredOf(it) }
             if (leftOver.isNotEmpty() || (unfiledStats.open > 0 && blocks.none { it.unfiled })) {
                 val byArea = leftOver.filter { (p, _) -> p.areaUid !in shownAreas || p.areaUid == null }.groupBy { (p, _) -> p.areaUid }
                     .map { (area, ps) -> Triple(area, ps.size, ps.sumOf { it.second.open }) }

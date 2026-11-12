@@ -208,7 +208,8 @@ data class ViewSnapshot(
     /**
      * The exact text placed in the model's prompt. With [onlyContainers] (the zoomed-out board's projects), the listing is bounded: every area, those projects,
      * and the project of every item listed (an item's `[in cN]` must point at a listed line) are shown, and the rest are counted and reached through their
-     * area (set_focus on the area's ref lists its projects). Every ref is still resolved against the full snapshot, so the numbering does not change.
+     * area (set_focus on the area's ref lists its projects). Refs are positional per response (numbered afresh each call); bounding the listing does not change which number a thing gets within it, and every ref is still resolved against
+     * the full snapshot, so every ref shown resolves on the next call.
      */
     fun render(onlyContainers: Set<String>? = null): String = buildString {
         // Qualified: a bare isEmpty() here resolves to the StringBuilder's (true while it is still empty).

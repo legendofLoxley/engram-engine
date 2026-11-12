@@ -5,6 +5,7 @@ import app.alfrd.engram.api.configureOwnerHorizonRoutes
 import app.alfrd.engram.cognitive.pipeline.agentwork.NotionCycleStartup
 import app.alfrd.engram.cognitive.pipeline.hermes.HermesActiveAssignmentRegistry
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonStructureStore
+import app.alfrd.engram.cognitive.pipeline.horizon.AttentionDirective
 import app.alfrd.engram.cognitive.pipeline.horizon.ContainerKind
 import app.alfrd.engram.cognitive.pipeline.horizon.DueKind
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPolicy
@@ -52,7 +53,7 @@ class OwnerHorizonBoardToolTest {
     private val policy = HorizonPolicy()
 
     /** A fresh owner with [projects] projects spread over 8 areas (5 quiet tasks each), and three that need attention. */
-    private inner class Owner(val projects: Int, seed: (ArcadeHorizonStructureStore, String) -> Unit = { _, _ -> }) {
+    private inner class Owner(val projects: Int, seed: (ArcadeHorizonStructureStore, String, com.arcadedb.database.Database) -> Unit = { _, _, _ -> }) {
         val tmp: Path = Files.createTempDirectory("owner-board")
         val manager = DatabaseManager(tmp.resolve("db").toString())
         val email: String
@@ -80,7 +81,7 @@ class OwnerHorizonBoardToolTest {
                     val p = store.createContainer(email, 1, ContainerKind.PROJECT, name, parentDomainUid = areas[0].uid)!!
                     store.createItem(email, 1, ItemKind.TASK, task, dueAt = System.currentTimeMillis() - 2 * day, projectUid = p.uid, extras = ItemExtras(dueKind = DueKind.HARD))
                 }
-                seed(store, email)
+                seed(store, email, db)
             }
             startup = bootstrapOwnerHorizon(
                 db, NotionCycleStartup.Disabled("off", false), HermesActiveAssignmentRegistry(), DirectorTickStartup.Disabled("off", false),
@@ -176,7 +177,7 @@ class OwnerHorizonBoardToolTest {
     @Test
     fun `an item the board lists only because it needs attention keeps its ref on the next call`() {
         // The overdue task is the oldest of 40: it is outside the recent and open pools the listing always carries, so it has a ref only because the board names it.
-        val owner = Owner(0) { store, email ->
+        val owner = Owner(0) { store, email, db ->
             runBlocking {
                 val p = store.createContainer(email, 1, ContainerKind.PROJECT, "Permits")!!
                 store.createItem(email, 1, ItemKind.TASK, "Renew the boiler permit", dueAt = System.currentTimeMillis() - 5 * day, projectUid = p.uid, extras = ItemExtras(dueKind = DueKind.HARD))
@@ -198,7 +199,7 @@ class OwnerHorizonBoardToolTest {
 
     @Test
     fun `a focused project of 100 items is held to the zoom budget, says how many it left out, and keeps what presses`() {
-        val owner = Owner(0) { store, email ->
+        val owner = Owner(0) { store, email, db ->
             runBlocking {
                 val p = store.createContainer(email, 1, ContainerKind.PROJECT, "Big project")!!
                 (1..95).forEach { store.createItem(email, 1, ItemKind.TASK, "Routine task number $it for the big project", projectUid = p.uid) }
@@ -217,6 +218,57 @@ class OwnerHorizonBoardToolTest {
                 val left = Regex("""(\d+) more items? (?:were|was) left out""").find(section)?.groupValues?.get(1)?.toInt() ?: error("it does not say how many it left out:\n$section")
                 assertEquals(100, listed + left, "listed plus left out is every item")
                 (1..5).forEach { assertTrue("Overdue promise $it" in section, "what presses is kept: $it") }
+            }
+        } finally { owner.close() }
+    }
+
+    @Test
+    fun `open and hidden counts say the same thing on the board, in the focused view and in the area roll-up`() {
+        val owner = Owner(0) { store, email, db ->
+            runBlocking {
+                // Pantry needs attention (a hard overdue task), has 4 more plain open items, and 5 suppressed ones: 5 open, 5 hidden.
+                val pantry = store.createContainer(email, 1, ContainerKind.PROJECT, "Pantry")!!
+                store.createItem(email, 1, ItemKind.TASK, "Renew the pantry licence", dueAt = System.currentTimeMillis() - 2 * day, projectUid = pantry.uid, extras = ItemExtras(dueKind = DueKind.HARD))
+                (1..4).forEach { store.createItem(email, 1, ItemKind.TASK, "Plain pantry task $it", projectUid = pantry.uid) }
+                (1..5).forEach { i -> store.createItem(email, 1, ItemKind.TASK, "Hidden pantry task $i", projectUid = pantry.uid)!!.let { store.setAttention(email, 2, it.uid, AttentionDirective.SUPPRESSED) } }
+                // An area of two quiet projects: Larder has 3 open and 2 hidden, Shed has 4 open.
+                val home = store.createContainer(email, 1, ContainerKind.DOMAIN, "Home")!!
+                val larder = store.createContainer(email, 1, ContainerKind.PROJECT, "Larder", parentDomainUid = home.uid)!!
+                val shed = store.createContainer(email, 1, ContainerKind.PROJECT, "Shed", parentDomainUid = home.uid)!!
+                (1..3).forEach { store.createItem(email, 1, ItemKind.TASK, "Larder task $it", projectUid = larder.uid) }
+                // Suppressed directly, so no change record makes Larder "changed since last read": it stays quiet and rolls up into Home.
+                (1..2).forEach { i -> store.createItem(email, 1, ItemKind.TASK, "Hidden larder task $i", projectUid = larder.uid) }
+                db.transaction { db.command("sql", "UPDATE Task SET attention = 'suppressed' WHERE text LIKE 'Hidden larder task%'") }
+                (1..4).forEach { store.createItem(email, 1, ItemKind.TASK, "Shed task $it", projectUid = shed.uid) }
+            }
+        }
+        try {
+            owner.app { c ->
+                val (_, board) = c.call(null)
+                val text = board.horizon()
+                println("COUNTS-BOARD\n${text.lines().filter { "Pantry" in it || "Home" in it }.joinToString("\n")}")
+                val onBoard = Regex("""- c\d+ Pantry[^\n]*?: (\d+) open(?:, (\d+) hidden)?""").find(text) ?: error("Pantry is not on the board:\n$text")
+                assertEquals("5", onBoard.groupValues[1], "the board counts open items only:\n$text")
+                assertEquals("5", onBoard.groupValues[2], "and says how many are hidden:\n$text")
+
+                // The focused view says the same.
+                val pantryRef = Regex("""\b(c\d+) Pantry \(project""").find(board.refs())?.groupValues?.get(1) ?: error("no Pantry ref")
+                val focused = c.call("Let's work on the pantry.", """[{"verb":"set_focus","target":"$pantryRef","quote":"work on the pantry"}]""").second.horizon()
+                val inView = Regex("""focused on the project "Pantry" \((\d+) open(?:, (\d+) hidden)?""").find(focused) ?: error("no count in the focused view:\n$focused")
+                assertEquals(onBoard.groupValues[1], inView.groupValues[1], "open: board and focused view agree:\n$focused")
+                assertEquals(onBoard.groupValues[2], inView.groupValues[2], "hidden: board and focused view agree")
+                assertEquals(5, focused.lines().count { "suppressed at their request" in it }, "and the hidden items it lists are those five:\n$focused")
+                c.call("Back to everything.", """[{"verb":"release_focus","quote":"Back to everything"}]""")
+
+                // The area roll-up follows the same rule: hidden items are not in its open number, and it equals the sum over the area's projects.
+                val rollup = Regex("""Home: 2 projects, (\d+) open""").find(text)?.groupValues?.get(1)?.toInt() ?: error("no roll-up for Home:\n$text")
+                assertEquals(7, rollup, "3 + 4 open, the 2 hidden are not counted")
+                val homeRef = Regex("""\b(c\d+) Home \(domain""").find(board.refs())?.groupValues?.get(1) ?: error("no Home ref")
+                val area = c.call("Look at the home area.", """[{"verb":"set_focus","target":"$homeRef","quote":"home area"}]""").second.horizon()
+                val larder = Regex("""In "Larder" \(project\):\n- (\d+) open(?:, (\d+) hidden)?""").find(area) ?: error("no Larder count in the area view:\n$area")
+                val shed = Regex("""In "Shed" \(project\):\n- (\d+) open""").find(area) ?: error("no Shed count in the area view:\n$area")
+                assertEquals("3", larder.groupValues[1]); assertEquals("2", larder.groupValues[2]); assertEquals("4", shed.groupValues[1])
+                assertEquals(rollup, larder.groupValues[1].toInt() + shed.groupValues[1].toInt(), "roll-up equals the sum of the focused counts")
             }
         } finally { owner.close() }
     }

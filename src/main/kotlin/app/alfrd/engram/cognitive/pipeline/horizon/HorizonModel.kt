@@ -317,6 +317,13 @@ data class HorizonContainerView(
     /** Of [openItems], how many are active and how many waiting; the rest are plain open. */
     val activeItems: Int = 0,
     val waitingItems: Int = 0,
+    /**
+     * Of [openItems], how many are suppressed (hidden at the owner's request), and how many of those are active or waiting. [openItems] still counts them
+     * here, as it always has (conversational turns read it so); the standing context takes them out and says "N open, M hidden".
+     */
+    val hiddenItems: Int = 0,
+    val hiddenActive: Int = 0,
+    val hiddenWaiting: Int = 0,
 )
 
 /** One bounded candidate in a [ContextHorizon]. [actorMetadata] is non-null exactly when [provenance] is one of the three Actor-attributed [ProvenanceKind]s — see [ActorEventMetadata]. */

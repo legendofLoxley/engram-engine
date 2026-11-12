@@ -26,6 +26,13 @@ Legend: cN project or area, iN item; open either with set_focus on its ref. !n o
 Every line names real things by their ref (`cN` for a project or area, `iN` for an item), the same refs the existing verbs take, so a reader opens a line with
 `set_focus` on its ref. A project's "open" count is the number of items its focused view lists (open, active and waiting, not done, dropped or suppressed).
 
+## Counts
+
+"Open" means open, active or waiting, and **never suppressed**. Suppressed items are "hidden", counted apart, and the same two numbers are said everywhere the
+standing context shows them: a project reads `5 open, 5 hidden` on the board, in its focused view's heading, and in a focused area's per-project lines. An area's
+roll-up on the board sums open only, so it equals the sum of the open numbers its projects show in the area's focused view. (Conversational turns still count
+suppressed items in a project's open number, as before; the standing context takes them out using the container view's `hiddenItems`.)
+
 ## Marks
 
 | Mark | Meaning |
@@ -51,8 +58,11 @@ activations (each adds, none passes 1; `HorizonPolicy.combine`).
 | Focused | `boardWeightFocused` | 0.8 | scaled by a casual mention's strength (a mention of an area reaches its projects) |
 | Pinned | `boardWeightPinned` | 1.0 | the project is pinned |
 
-Below `boardQuietBelow` (0.15) a project is quiet. Quiet projects are never listed on their own; they roll up into their area ("Everything else"). The board
-lists nodes by pressure until the budget is used; whatever pressured nodes did not fit are counted ("Not shown for space"), never called quiet.
+A project gets a line only if it has something open (or is pinned) and its pressure is at or above `boardQuietBelow` (0.15). Below that, or with nothing open (an
+empty project that has a change record, a faint casual mention), it is quiet, whatever small pressure it has. Quiet projects are never listed on their own; they roll up into their area ("Everything else"). The board
+lists qualifying projects by pressure until the budget is used. "Not shown for space" counts only qualifying projects that did not fit; a quiet project is never
+counted there, so the line appears only when the budget really cut something. There is no separate cap on needs-attention projects: the budget (and the pinned cap)
+is the only limit.
 
 Staleness is the existing rule, called from one place: `StateRules.stale` (open or active, due date passed, no evidence for more than `staleEvidenceDays`,
 default 14). A soft stale item is asked about; a hard one keeps its overdue alarm. The assembler and the board both call it.
@@ -96,13 +106,16 @@ The owner's tool returns the horizon text and a `refs` listing next to it. Zoome
 that have a line on the board**, and the project of every item the listing names (so an item's `[in cN]` always points at a listed line). The projects left
 out are counted in one line, and are reached through their area: `set_focus` on the area's ref, and the response then lists the projects in it with refs.
 
-The numbering does not change when the listing is bounded: every ref is still resolved against the full snapshot, so any ref shown works with every verb
-(`set_focus`, `set_attention`, `confirm_item`, `file_item` and the rest), and so would one that was not shown.
+Refs are positional and per response: they are numbered afresh on every call (areas first, then projects oldest first, items in the order the listing builds
+them), so a ref should be taken from the latest response only, never carried over from an earlier one. Bounding the listing does not change which number a
+thing gets within a response, because every ref is still resolved against the full snapshot. What the board guarantees is narrower and checkable: **every ref
+it shows resolves in the next call** (provided nothing else changed the graph in between), with every verb (`set_focus`, `set_attention`, `confirm_item`,
+`file_item` and the rest).
 
 Two things make "any ref shown works on the next call" true:
 
 - Items the board names beyond the snapshot's own pools (an old overdue item among many) get a ref only because the board lists them. The service remembers the
-  items the last response named, in order, and builds the next call's snapshot with them, so that ref is accepted. (Before this, such a ref was refused with
+  items the last response named, in order, and builds the next call's snapshot with them, so the ref it was shown is accepted. (Before this, such a ref was refused with
   `unknown_ref`. A restart forgets the memory; a ref from before a restart then falls back to the snapshot's own pools.)
 - The listing grows with the number of **areas**, not projects. Areas are the handles for everything rolled up, so all of them are listed.
 

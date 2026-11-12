@@ -26,8 +26,8 @@ object FocusedViewBudget {
         val budgetChars = (policy.zoomTokenBudget * policy.charsPerToken).toInt()
 
         fun size(h: ContextHorizon): Int {
-            val items = HorizonItemsRenderer.render(h, zone)
-            val frame = HorizonItemsRenderer.composeOrientation(h, zone)
+            val items = HorizonItemsRenderer.render(h, zone, showHidden = true)
+            val frame = HorizonItemsRenderer.composeOrientation(h, zone, showHidden = true)
             return (frame?.length ?: 0) + DirectorPromptRenderer.groupedLength(items) + REF_ALLOWANCE * (h.items.size + h.alsoDue.size + h.hidden.size) + FIXED_ALLOWANCE
         }
 

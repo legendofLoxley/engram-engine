@@ -76,6 +76,44 @@ class HorizonBoardTest {
     }
 
     @Test
+    fun `under budget every hot project is shown, and nothing is said to be left out for space`() {
+        // 13 projects, 5 open items. Three projects need attention. Three more are empty but have a change record, one is empty with a faint mention:
+        // they have some pressure but are not candidates (nothing open, or below the quiet floor), so they were never "cut for space".
+        val hot = listOf(
+            BoardProject("w", "Williams", "a1", false, 0.0, null, listOf(item("w1", "File the permit", dueInDays = -2.0, hard = true))),
+            BoardProject("m", "Meridian demo", "a2", false, 0.0, null, listOf(item("m1", "Send the deck", dueInDays = 1.0, hard = true))),
+            BoardProject("g", "Garden", "a3", false, 0.0, null, listOf(item("g1", "Reply from the landscaper", WorkState.WAITING, nudgeInDays = -1.0, waitingOn = "Sam"), item("g2"), item("g3"))),
+        )
+        val emptyChanged = (1..3).map { BoardProject("e$it", "Empty $it", "a4", false, 0.0, null, emptyList()) }
+        val faint = BoardProject("f", "Faint mention", "a4", false, 0.1, null, emptyList())
+        val rest = (1..6).map { BoardProject("r$it", "Rest $it", "a5", false, 0.0, null, emptyList()) }
+        val changes = emptyChanged.map { BoardChange(it.uid, it.name, null, it.uid, "PART_OF", null, "a4", now - 1000) }
+        val b = board(data(hot + emptyChanged + faint + rest, changes = changes))
+        println("BOARD-13 tokens=${b.tokens}\n${b.text}")
+        listOf("Williams", "Meridian demo", "Garden").forEach { name -> assertTrue(b.text.lines().any { it.startsWith("- ") && name in it }, "$name is shown:\n${b.text}") }
+        assertEquals(3, b.projectsShown, b.text)
+        assertFalse("Not shown for space" in b.text, "nothing was cut for space:\n${b.text}")
+        assertTrue(b.tokens < policy.boardTokenBudget / 2, "and it is well under the budget: ${b.tokens}")
+    }
+
+    @Test
+    fun `hidden items are named beside the open count and never counted in it`() {
+        val p = BoardProject("p", "Pantry", "a1", false, 0.0, null, (1..5).map { item("p$it", dueInDays = if (it == 1) -2.0 else null, hard = it == 1) }, hiddenItems = 5)
+        val b = board(data(listOf(p)))
+        assertTrue("5 open, 5 hidden" in b.text, b.text)
+        assertTrue("5 open items" in b.text.lines().first(), "the header counts open items only: ${b.text.lines().first()}")
+        assertFalse("hidden" in board(data(listOf(p.copy(hiddenItems = 0)))).text.substringBefore("Legend:"), "nothing hidden, nothing said")
+    }
+
+    @Test
+    fun `projects cut by the budget are the ones counted as not shown for space`() {
+        val d = live(40)
+        val tight = board(d, policy.copy(boardTokenBudget = 230))
+        val cut = Regex("""Not shown for space: (\d+) project""").find(tight.text)?.groupValues?.get(1)?.toInt() ?: error(tight.text)
+        assertEquals(3 - tight.projectsShown, cut, "exactly the hot projects that did not fit:\n${tight.text}")
+    }
+
+    @Test
     fun `when every project needs attention the board fills its budget and stops there, at 4, 40 and 400`() {
         fun allHot(n: Int) = data((1..n).map { i ->
             BoardProject("p$i", "Project $i", "a${(i % 8) + 1}", false, 0.0, null, listOf(

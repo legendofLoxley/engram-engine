@@ -503,6 +503,7 @@ internal class HorizonSelector(
                 val open = members.filter { it.get("status") == "open" }
                 val activeCount = open.count { it.get("state") == WorkState.ACTIVE.wire() }
                 val waitingCount = open.count { it.get("state") == WorkState.WAITING.wire() }
+                val hidden = open.filter { it.get("attention") == AttentionDirective.SUPPRESSED.name.lowercase() }
                 val next = open.filter { StateRules.canBeOverdue(WorkState.of(it.get("state") as? String, it.get("status") as? String)) }.mapNotNull { (it.get(ItemKinds.forType(it.typeName)?.dueProperty ?: "dueAt") as? Number)?.toLong() }.minOrNull()
                 val projectDue = (v.get("dueAt") as? Number)?.toLong()
                 HorizonContainerView(
@@ -517,6 +518,9 @@ internal class HorizonSelector(
                     parentUid = if (v.typeName == "Project") v.getVertices(Vertex.DIRECTION.OUT, "PART_OF").firstOrNull { it.typeName == "Domain" }?.get("uid") as? String else null,
                     activeItems = activeCount,
                     waitingItems = waitingCount,
+                    hiddenItems = hidden.size,
+                    hiddenActive = hidden.count { it.get("state") == WorkState.ACTIVE.wire() },
+                    hiddenWaiting = hidden.count { it.get("state") == WorkState.WAITING.wire() },
                 )
             }
             .sortedWith(compareByDescending<HorizonContainerView> { it.inFocus }.thenByDescending { it.score }.thenByDescending { it.openItems })
