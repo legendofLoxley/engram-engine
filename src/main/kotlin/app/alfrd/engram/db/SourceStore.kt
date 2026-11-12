@@ -116,6 +116,20 @@ data class ItemProvenance(
  * created by the existing Horizon operations; [linkItem] only adds the QUOTES edge to the chunk.
  * Nothing here computes a score or confidence, and nothing logs memory text: logs carry counts and ids only.
  */
+/**
+ * A channel's `last_edited` as epoch milliseconds, or null when it is absent or not a recognisable ISO date or time (then it is treated as not given).
+ * Accepts an instant (`2026-11-07T10:00:00Z`), an offset time, a local date-time (read as UTC) and a plain date (the start of that day, UTC).
+ */
+object SourceEditTime {
+    fun parse(raw: String?): Long? {
+        val text = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return runCatching { java.time.Instant.parse(text).toEpochMilli() }.getOrNull()
+            ?: runCatching { java.time.OffsetDateTime.parse(text).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching { java.time.LocalDateTime.parse(text).toInstant(java.time.ZoneOffset.UTC).toEpochMilli() }.getOrNull()
+            ?: runCatching { java.time.LocalDate.parse(text).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli() }.getOrNull()
+    }
+}
+
 class SourceStore(private val db: Database) {
 
     private val logger = LoggerFactory.getLogger(SourceStore::class.java)
@@ -296,6 +310,11 @@ class SourceStore(private val db: Database) {
     fun chunks(userEmail: String, sourceUid: String): List<ChunkRecord> =
         db.query("sql", "SELECT FROM Chunk WHERE sourceUid = :s AND ownerEmail = :o ORDER BY ordinal", mapOf("s" to sourceUid, "o" to userEmail))
             .use { rs -> val out = ArrayList<ChunkRecord>(); while (rs.hasNext()) out += rs.next().toElement().asVertex().toChunk(); out }
+
+    /** What a channel said about when the source version was last edited, in epoch milliseconds, or null when it said nothing usable. */
+    fun lastEditedMillis(userEmail: String, sourceUid: String): Long? =
+        db.query("sql", "SELECT lastEditedAt FROM Source WHERE uid = :u AND ownerEmail = :o", mapOf("u" to sourceUid, "o" to userEmail))
+            .use { rs -> if (rs.hasNext()) SourceEditTime.parse(rs.next().getProperty<String>("lastEditedAt")) else null }
 
     fun chunk(userEmail: String, chunkUid: String): ChunkRecord? =
         db.query("sql", "SELECT FROM Chunk WHERE uid = :u AND ownerEmail = :o", mapOf("u" to chunkUid, "o" to userEmail))

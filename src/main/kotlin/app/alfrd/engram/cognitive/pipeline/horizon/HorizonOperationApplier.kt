@@ -280,7 +280,9 @@ class HorizonOperationApplier(
     private suspend fun recordPlain(
         userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
         sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
-    ): AppliedOperation = duplicateOf(userEmail, opKey, op, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE) } ?: run {
+        /** For an item filed from a source: when the source says it was last edited, which is when the item's evidence starts (bounded by now at the write). */
+        evidenceAt: Long? = null,
+    ): AppliedOperation = duplicateOf(userEmail, opKey, op, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE, editedAt = evidenceAt) } ?: run {
             val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
             // The model rarely files an item even when the message plainly names its project, and an unfiled
             // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
@@ -294,6 +296,7 @@ class HorizonOperationApplier(
                 starts = op.startsAt?.let { TimeValue(it, op.startsHasTime) }, nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) },
                 happened = op.happenedAt?.let { TimeValue(it, op.happenedHasTime) }, waitingOn = op.waitingOn,
                 fromSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE,
+                evidenceAt = evidenceAt.takeIf { sourceType == CHANNEL_SOURCED_SOURCE_TYPE },
             )
             val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType, extras = extras)
             if (record == null) {
@@ -328,19 +331,21 @@ class HorizonOperationApplier(
         if (op.quote.isBlank() || !SourceChunker.normalize(chunk.text).contains(SourceChunker.normalize(op.quote))) {
             return AppliedOperation(op, false, "Could not record from a source: the quote is not in the chunk")
         }
+        // What the source says about when it was last edited: where the evidence of an item filed from it starts, and what a repeat of it refreshes to.
+        val editedAt = if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) store.lastEditedMillis(userEmail, chunk.sourceUid) else null
         // A key already applied is a replay: the item (created, or matched when it was first applied) is found by the key on
         // its chunk link, so nothing is created, matched again or stamped with a cycle, whatever has happened to it since.
         store.itemForOpKey(userEmail, opKey)?.let { uid ->
             // The same item again is idempotent, but from a channel a different date is said, not silently dropped or applied.
             // Said again by the source, it is confirmed by it.
-            if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) structure.touchEvidence(userEmail, cycleSeq, uid)
+            if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) structure.refreshEvidenceFromSource(userEmail, cycleSeq, uid, editedAt)
             val have = structure.getItem(userEmail, uid)?.dueAt
             val conflict = if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE && op.dueAt != null && have != null && op.dueAt != have) {
                 "; the source gives a different date (${describeDue(op.dueAt, zone)}, the item has ${describeDue(have, zone)}) — the date was not changed"
             } else ""
             return AppliedOperation(op, true, "Already recorded from this source (nothing new was added)$conflict", existingUid = uid)
         }
-        val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, sourceType)
+        val result = recordPlain(userEmail, cycleSeq, opKey, op, createdContainerUids, zone, sourceType, evidenceAt = editedAt)
         val uid = result.resultUid ?: result.existingUid ?: return result
         val linked = store.linkItem(userEmail, uid, chunk.uid, op.writer?.takeIf { it.isNotBlank() } ?: "director", op.claimant, opKey, draftQuote = op.quote, draftDueAt = op.dueAt, runId = op.runId)
         return if (linked == LinkOutcome.REFUSED) result.copy(applied = false, summary = "Recorded but could not be tied to its chunk") else result
@@ -384,11 +389,11 @@ class HorizonOperationApplier(
     }
 
     /** The new record was the same as [existing]: add nothing, but carry over a date the user just gave, and say so plainly. */
-    private suspend fun applyDuplicate(userEmail: String, cycleSeq: Long, op: RecordItem, existing: ItemRecord, zone: ZoneId, scopedToSource: Boolean = false): AppliedOperation {
+    private suspend fun applyDuplicate(userEmail: String, cycleSeq: Long, op: RecordItem, existing: ItemRecord, zone: ZoneId, scopedToSource: Boolean = false, editedAt: Long? = null): AppliedOperation {
         val newDue = op.dueAt?.takeIf { it != existing.dueAt }
         // A repeat from a source never moves a date: the item's own date stands and the difference is reported. (What the owner just said wins, as before.)
         val conflict = scopedToSource && newDue != null && existing.dueAt != null
-        if (scopedToSource) structure.touchEvidence(userEmail, cycleSeq, existing.uid)
+        if (scopedToSource) structure.refreshEvidenceFromSource(userEmail, cycleSeq, existing.uid, editedAt)
         val dueSet = newDue != null && !conflict && structure.setDue(userEmail, cycleSeq, existing.uid, newDue, op.dueHasTime)
         val note = when {
             conflict -> "; the source gives a different date (${describeDue(newDue!!, zone)}, the item has ${describeDue(existing.dueAt!!, zone)}) — the date was not changed"

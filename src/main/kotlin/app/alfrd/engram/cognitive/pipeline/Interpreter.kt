@@ -254,7 +254,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         put("description", "true when it clearly belongs to one of the projects but you cannot tell which.")
                     },
                     "due" to str("ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."),
-                    "title" to str("Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions."),
+                    "title" to str("Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions. It is kept only if at least half of its content words (words of four letters or more, matched on their first four letters) come from the quote; otherwise it is dropped, not repaired, and the quote becomes the item's label. At most 80 characters on one line; a title with no such words is kept."),
                     "about" to buildJsonObject {
                         put("type", "array")
                         putJsonObject("items") { put("type", "string") }
@@ -272,7 +272,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                     "item" to str("Ref of the item being corrected."),
                     "quote" to QUOTE,
                     "due" to str("New ISO date, if the correction changes the date."),
-                    "title" to str("The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement."),
+                    "title" to str("The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement. For a task or event it is kept only if at least half of its content words (four letters or more) come from the quote or the item's old label; otherwise it is dropped."),
                 )
             },
             variant("file_item", listOf("item", "into", "quote")) {
@@ -391,7 +391,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                 "quote" to str("A passage copied verbatim from the cited source's text (it is checked against that source, not the message)."),
                 "project" to str("c-ref of the project. Omit if unrelated or unsure."),
                 "due" to str("ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM. Omit if none stated."),
-                "title" to str("Optional. For a task or event only: a short plain label (at most 8 words)."),
+                "title" to str("Optional. For a task or event only: a short plain label (at most 8 words). It is kept only if at least half of its content words (words of four letters or more, matched on their first four letters) come from the quote; otherwise it is dropped, not repaired, and the quote becomes the item's label. At most 80 characters on one line; a title with no such words is kept."),
                 "about" to buildJsonObject {
                     put("type", "array")
                     putJsonObject("items") { put("type", "string") }
@@ -454,7 +454,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         }
                         put("description", "The text already cut into chunks. Send this or `text`, not both.")
                     }
-                    put("last_edited", str("When the document was last edited, if known (ISO time)."))
+                    put("last_edited", str("When the document was last edited, if known (ISO date or time). It sets the evidence date of items filed from this source: an item reads as fresh as the page says (never later than now), so a task from a page untouched for two months is asked about (\"still live?\") instead of raised as overdue. Send the page again with a later last_edited to refresh its items; send it again with an earlier one to correct items imported earlier that no one has touched since (an item the owner confirmed or changed is never lowered). Without it, items start fresh as of the import."))
                 }
                 putJsonArray("required") { add("id"); add("title"); add("kind") }
                 put("additionalProperties", false)

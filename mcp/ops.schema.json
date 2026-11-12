@@ -39,7 +39,7 @@
                         },
                         "title": {
                             "type": "string",
-                            "description": "Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions."
+                            "description": "Optional. For a task or event only: a short plain label (at most 8 words) that reads well as a list item, e.g. \"Order the soil\". Omit when the quote already reads that way, and omit for facts and questions. It is kept only if at least half of its content words (words of four letters or more, matched on their first four letters) come from the quote; otherwise it is dropped, not repaired, and the quote becomes the item's label. At most 80 characters on one line; a title with no such words is kept."
                         },
                         "about": {
                             "type": "array",
@@ -231,7 +231,7 @@
                         },
                         "title": {
                             "type": "string",
-                            "description": "The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement."
+                            "description": "The item's label after the correction, at most 8 words, e.g. \"Sister's birthday\". For a fact or question, repeat the corrected statement. For a task or event it is kept only if at least half of its content words (four letters or more) come from the quote or the item's old label; otherwise it is dropped."
                         },
                         "due_kind": {
                             "type": "string",
@@ -469,7 +469,7 @@
                         },
                         "title": {
                             "type": "string",
-                            "description": "Optional. For a task or event only: a short plain label (at most 8 words)."
+                            "description": "Optional. For a task or event only: a short plain label (at most 8 words). It is kept only if at least half of its content words (words of four letters or more, matched on their first four letters) come from the quote; otherwise it is dropped, not repaired, and the quote becomes the item's label. At most 80 characters on one line; a title with no such words is kept."
                         },
                         "about": {
                             "type": "array",
@@ -562,7 +562,7 @@
                 },
                 "last_edited": {
                     "type": "string",
-                    "description": "When the document was last edited, if known (ISO time)."
+                    "description": "When the document was last edited, if known (ISO date or time). It sets the evidence date of items filed from this source: an item reads as fresh as the page says (never later than now), so a task from a page untouched for two months is asked about (\"still live?\") instead of raised as overdue. Send the page again with a later last_edited to refresh its items; send it again with an earlier one to correct items imported earlier that no one has touched since (an item the owner confirmed or changed is never lowered). Without it, items start fresh as of the import."
                 }
             },
             "required": [

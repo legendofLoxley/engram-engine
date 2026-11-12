@@ -736,10 +736,15 @@ class ArcadeHorizonAssembler(
         wallClockCap: Duration?,
         limit: Int,
     ): ReactivationQueryResult {
+        // A link whose source item is resolved (done or dropped) is not new evidence about the target, so it does not surface it: "surfaced this again, separate
+        // from: <a closed task>" was noise, worst after a bulk import where many of the sources were already closed. The filter is on read, in the query (so closed
+        // rows do not use up the limit and an older link from an open item can still surface the target); no edge is written or changed. A source with no status of
+        // its own (a plain fact, which cannot be closed) still counts, and an item closed after the link was made stops surfacing from it.
         val sql = """
             SELECT @out.uid as triggerUid, @out.text as triggerText, @in.uid as targetUid, strength, cycleSeq, createdAt
             FROM RELATED_TO
             WHERE ownerEmail = :ownerEmail AND relationType = 'relevant_to' AND cycleSeq >= :minCycle AND cycleSeq <= :currentCycleSeq
+              AND (@out.status IS NULL OR @out.status <> 'resolved')
             ORDER BY cycleSeq DESC
             LIMIT :limit
         """.trimIndent()
