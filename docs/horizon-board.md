@@ -55,7 +55,7 @@ activations (each adds, none passes 1; `HorizonPolicy.combine`).
 | Waiting, due for a nudge | `boardWeightWaitingDue` | 0.6 | a waiting item's check-in date has arrived |
 | Changed since last read | `boardWeightChanged` | 0.5 | a change record touches the project or its items (0.5 plus 0.1 per changed item, up to 1) |
 | Stale but open | `boardWeightStale` | 0.5 | a soft overdue item has no recent evidence |
-| Focused | `boardWeightFocused` | 0.8 | scaled by a casual mention's strength (a mention of an area reaches its projects) |
+| Focused | `boardWeightFocused` | 0.8 | scaled by a casual mention's strength now (a mention of an area reaches its projects) |
 | Pinned | `boardWeightPinned` | 1.0 | the project is pinned |
 
 A project gets a line only if it has something open (or is pinned) and its pressure is at or above `boardQuietBelow` (0.15). Below that, or with nothing open (an
@@ -63,6 +63,8 @@ empty project that has a change record, a faint casual mention), it is quiet, wh
 lists qualifying projects by pressure until the budget is used. "Not shown for space" counts only qualifying projects that did not fit; a quiet project is never
 counted there, so the line appears only when the budget really cut something. There is no separate cap on needs-attention projects: the budget (and the pinned cap)
 is the only limit.
+
+A casual mention fades by the selector's own function (`HorizonPolicy.nudgeStrengthAt`: it halves every `nudgeHalfLifeCycles` turns and is nothing below `nudgeFloor`), read at the cycle the Horizon is being read at, which a pure read takes as the next cycle without allocating or writing one; a pin never fades.
 
 Staleness is the existing rule, called from one place: `StateRules.stale` (open or active, due date passed, no evidence for more than `staleEvidenceDays`,
 default 14). A soft stale item is asked about; a hard one keeps its overdue alarm. The assembler and the board both call it.

@@ -178,6 +178,13 @@ data class HorizonPolicy(
         return if (strength < nudgeFloor) 0.0 else strength
     }
 
+    /** [nudgeStrength] for a nudge set at cycle [setCycleSeq], read at [currentCycleSeq]. The selector and the zoomed-out board both call this, so they fade a nudge identically. */
+    fun nudgeStrengthAt(weight: Double, setCycleSeq: Long, currentCycleSeq: Long): Double = nudgeStrength(weight, currentCycleSeq - setCycleSeq)
+
+    /** What a focus edge contributes now: a pinned focus is [pinnedFocusActivation] and never fades; a nudge fades by [nudgeStrengthAt] and is 0 once below [nudgeFloor]. */
+    fun focusStrength(pinned: Boolean, weight: Double, setCycleSeq: Long, currentCycleSeq: Long): Double =
+        if (pinned) pinnedFocusActivation else nudgeStrengthAt(weight, setCycleSeq, currentCycleSeq)
+
     /**
      * What one more step leaves: [activation] carried over an edge with [transmission], from a node
      * already [fromHops] steps out. The first step from a seed keeps the edge's full strength; each

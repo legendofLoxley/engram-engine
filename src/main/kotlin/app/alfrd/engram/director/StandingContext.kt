@@ -60,7 +60,7 @@ class StandingContext(
         // The board is for the zoomed-out view only; a focused view keeps its own listing.
         val zoomedOut = (outcome as? AssembleOutcome.Assembled)?.horizon?.focus == null && outcome is AssembleOutcome.Assembled
         val source = board.takeIf { zoomedOut }
-        val data = source?.read(email, channel)
+        val data = source?.read(email, channel, cycleSeq)
         val plan = data?.let { BoardComposer(source.policy, source.zone).plan(it) }
         val refs = refsFor(outcome, plan)
         val shownBoard: RenderedBoard? = when {

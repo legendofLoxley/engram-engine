@@ -136,8 +136,7 @@ internal class HorizonSelector(
                 focusSeeds += Seed(target, policy.pinnedFocusActivation, target.labelOf())
                 focusRef = HorizonFocusRef(target.get("uid") as String, target.labelOf(), target.focusKind(), zoom)
             } else {
-                val age = currentCycleSeq - ((edge.get("setCycleSeq") as? Number)?.toLong() ?: 0L)
-                val strength = policy.nudgeStrength(weight, age)
+                val strength = policy.nudgeStrengthAt(weight, (edge.get("setCycleSeq") as? Number)?.toLong() ?: 0L, currentCycleSeq)
                 if (strength > 0.0) nudgeSeeds += Seed(target, strength, "mentioned")
             }
         }

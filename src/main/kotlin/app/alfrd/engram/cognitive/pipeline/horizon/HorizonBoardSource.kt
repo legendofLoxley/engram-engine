@@ -17,8 +17,11 @@ interface BoardSource {
     val policy: HorizonPolicy
     val zone: ZoneId
 
-    /** The board's facts for [email] as one [channel] sees them, or null if the graph could not be read this time. */
-    suspend fun read(email: String, channel: String): BoardData?
+    /**
+     * The board's facts for [email] as one [channel] sees them, or null if the graph could not be read this time. [cycleSeq] is the cycle the Horizon is being read
+     * at (for a pure read, the one that would come next; nothing is allocated or written): a casual mention fades by how many cycles old it is at that cycle.
+     */
+    suspend fun read(email: String, channel: String, cycleSeq: Long): BoardData?
 
     /** Records that [channel] has been shown the board as of [at], so its next "since last time" starts there. */
     fun markRead(channel: String, at: Long)
@@ -44,9 +47,10 @@ class ArcadeBoardSource(
 
     override fun markRead(channel: String, at: Long) { lastRead[channel] = at }
 
-    override suspend fun read(email: String, channel: String): BoardData? {
+    override suspend fun read(email: String, channel: String, cycleSeq: Long): BoardData? {
+        // Focus edges at their strength now, by the selector's own fade (a mention halves every few cycles and is nothing below the floor; a pin never fades).
         val nudges = try {
-            structure.getFocus(email).filter { it.mode == FocusMode.NUDGE }.associate { it.targetUid to it.weight }
+            structure.getFocus(email).associate { it.targetUid to policy.focusStrength(it.mode == FocusMode.PINNED, it.weight, it.setCycleSeq, cycleSeq) }.filterValues { it > 0.0 }
         } catch (e: Exception) {
             logger.warn("board: focus read failed: {}", e::class.java.simpleName)
             emptyMap()
