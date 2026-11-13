@@ -227,6 +227,7 @@ class HorizonOperationApplier(
             val label = labelOf(userEmail, op.targetUid)
             val nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) }
             val done = structure.setState(userEmail, cycleSeq, op.targetUid, op.state, nudge, op.waitingOn)
+            val unapprovedGoal = !done && op.state == WorkState.ACTIVE && structure.getItem(userEmail, op.targetUid)?.let { it.kind == ItemKind.GOAL && it.approval != "approved" } == true
             val note = if (op.state == WorkState.WAITING && op.waitingOn == null) " (nothing says who or what it waits on; say so to add it)" else ""
             val nudgeNote = nudge?.let { ", check in ${describeDue(it.at, zone)}" } ?: ""
             val phrase = when (op.state) {
@@ -236,7 +237,14 @@ class HorizonOperationApplier(
                 WorkState.ACTIVE -> "Marked in progress"
                 WorkState.WAITING -> "Marked waiting" + (op.waitingOn?.let { " on $it" } ?: "")
             }
-            AppliedOperation(op, done, if (done) "$phrase: $label$nudgeNote$note" else "Could not change the state of $label")
+            AppliedOperation(
+                op, done,
+                when {
+                    done -> "$phrase: $label$nudgeNote$note"
+                    unapprovedGoal -> "Refused: $label is not approved, so it cannot run. The owner approves it first (approve_goal, with their own words)"
+                    else -> "Could not change the state of $label"
+                },
+            )
         }
         is ApproveGoal -> {
             val label = labelOf(userEmail, op.targetUid)
@@ -441,6 +449,9 @@ class HorizonOperationApplier(
     private suspend fun applyCorrection(userEmail: String, cycleSeq: Long, opKey: String, op: CorrectItem, sourceType: String = DatabaseEngramClient.SOURCE_TYPE, zone: ZoneId = ZoneId.systemDefault()): AppliedOperation {
         val old = structure.getItem(userEmail, op.targetUid)
             ?: return AppliedOperation(op, false, "Could not find the item to correct")
+        // A correction writes a new item and closes the old one, which would carry a goal round its approval and its locked done-when. The parser already refuses it;
+        // it is refused here too, so an operation built in code cannot get past it either.
+        if (old.kind == ItemKind.GOAL) return AppliedOperation(op, false, "Refused: a goal is changed with edit_goal, and a goal whose done-when must change is stopped and proposed again")
         // The corrected item keeps where the old one stood and what was said about its time, except what the correction changes.
         val dueChanged = op.dueAt != null
         val extras = if (old.kind == ItemKind.FACT) ItemExtras(happened = old.happenedAt?.let { TimeValue(it, old.happenedHasTime) }) else ItemExtras(

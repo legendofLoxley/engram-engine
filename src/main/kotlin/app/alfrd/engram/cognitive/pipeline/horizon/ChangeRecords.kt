@@ -21,7 +21,8 @@ import kotlin.coroutines.CoroutineContext
  * is recorded before it goes. (`pruneNudges` also deletes `FOCUSES_ON` edges; that is a fade-out cleanup, not a change anyone made, and is not recorded.)
  */
 object ChangeTracking {
-    val FIELDS: Set<String> = linkedSetOf("state", "dueAt", "dueKind", "waitingOn", "nudgeAt", "attention")
+    /** A goal's `approval`, `doneWhen`, `stopWhen` and `budget` are named here too: approving a goal and changing what it is judged by must leave a record. */
+    val FIELDS: Set<String> = linkedSetOf("state", "dueAt", "dueKind", "waitingOn", "nudgeAt", "attention", "approval", "doneWhen", "stopWhen", "budget")
     val EDGES: Set<String> = linkedSetOf("PART_OF", "FOCUSES_ON")
 
     const val TYPE = "ChangeRecord"

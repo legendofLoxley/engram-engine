@@ -29,7 +29,9 @@ constraint can never be saved again, not even to change another field.
 | `mandatory:Domain.ownerEmail`, `mandatory:Project.ownerEmail` | containers have an owner |
 | `mandatory:Domain.createdAt`, `mandatory:Project.createdAt`, `mandatory:Phrase.createdAt` | creation time (Phrase's covers Task, Event and Question) |
 | `readonly:Phrase.sourceQuote` | the user's own words are written once, with the item |
-| `state-vocabulary:Task/Event/Question` | `state` is one of `open, active, waiting, done, dropped` when it is set (absent is allowed: older rows) |
+| `state-vocabulary:Task/Event/Question/Goal` | `state` is one of `open, active, waiting, done, dropped` when it is set (absent is allowed: older rows) |
+| `approval-vocabulary:Goal` | `Goal.approval` is `proposed` or `approved` |
+| `mandatory:Goal.approval` | a goal is never written without an approval: it is `proposed` when made, and only the owner's approval (a quoted `approve_goal`) makes it `approved` |
 
 Left out on purpose:
 

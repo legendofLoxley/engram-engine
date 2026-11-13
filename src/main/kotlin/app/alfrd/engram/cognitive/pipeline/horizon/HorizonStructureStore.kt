@@ -595,7 +595,8 @@ class ArcadeHorizonStructureStore(
                 }
                 if (ItemKinds.of(kind).carriesState) {
                     // The state is the item's own; `status` is its coarse open/resolved projection (indexed, and what older readers use).
-                    val state = extras.state ?: WorkState.OPEN
+                    // A goal is written open (and proposed): running needs the owner's approval, which setState checks, so it cannot be asked for here.
+                    val state = if (kind == ItemKind.GOAL) WorkState.OPEN else extras.state ?: WorkState.OPEN
                     set("state", state.wire())
                     set("status", state.status)
                     // An item filed from a source starts as fresh as the source says (never in the future); otherwise as of now.
