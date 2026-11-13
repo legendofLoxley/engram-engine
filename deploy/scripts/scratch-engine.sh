@@ -25,7 +25,7 @@ BACKUPS="${BACKUP_DIR:-/home/halo/backups/engram-graph/auto}"
 
 case "$PORT" in 8080|8081|8082|8083|8084|8091|8788) echo "refusing: port $PORT belongs to a live service" >&2; exit 2;; esac
 [ -f "$JAR" ] || { echo "no engine jar at $JAR" >&2; exit 2; }
-ZIP="${1:-$(ls -t "$BACKUPS"/graph-*.zip | head -1)}"
+ZIP="${1:-$(ls -t "$BACKUPS"/graph-*.zip | sed -n 1p)}"
 [ -f "$ZIP" ] || { echo "no backup zip: $ZIP" >&2; exit 2; }
 case "$(readlink -f "$ZIP")" in /home/halo/development/engram-engine/data/*) echo "refusing: the source is inside the live data directory" >&2; exit 2;; esac
 if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then echo "refusing: something already listens on $PORT" >&2; exit 2; fi
