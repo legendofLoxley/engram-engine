@@ -109,6 +109,8 @@ under systemd.
 
 ## Update
 
+> **Warning:** this procedure overwrites the running jar. See the Notion task "Deploys: builds must never overwrite the running jar" until it is replaced.
+
 ```bash
 cd /home/halo/development/engram-engine
 git pull
@@ -123,6 +125,8 @@ nothing still works (it just restarts the two native services and recreates
 the container from the same config).
 
 ## Rollback
+
+> **Warning:** this procedure overwrites the running jar. See the Notion task "Deploys: builds must never overwrite the running jar" until it is replaced.
 
 ```bash
 cd /home/halo/development/engram-engine
