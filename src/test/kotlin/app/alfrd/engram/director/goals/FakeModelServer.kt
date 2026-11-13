@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class FakeModelServer {
     /** What to answer one call with. [arguments] is the JSON the "model" puts in the tool call (or any text, to play a model that returns garbage). */
-    class Reply(val arguments: String, val completionTokens: Int = 100, val delayMillis: Long = 0, val noToolCall: Boolean = false)
+    class Reply(val arguments: String, val completionTokens: Int = 100, val delayMillis: Long = 0, val noToolCall: Boolean = false, val emptyLength: Boolean = false)
 
     class Seen(val tool: String, val body: String)
 
@@ -57,9 +57,10 @@ class FakeModelServer {
         val reply = handlers[tool]?.invoke(n) ?: Reply("{}")
         try {
             if (reply.delayMillis > 0) Thread.sleep(reply.delayMillis)
-            val message = if (reply.noToolCall) """{"role":"assistant","content":"I would rather chat than call the tool."}"""
+            val message = if (reply.emptyLength) """{"role":"assistant","content":""}"""
+            else if (reply.noToolCall) """{"role":"assistant","content":"I would rather chat than call the tool."}"""
             else """{"role":"assistant","content":"","tool_calls":[{"id":"c$n","type":"function","function":{"name":"$tool","arguments":${quote(reply.arguments)}}}]}"""
-            val out = """{"id":"x","model":"fake-model","choices":[{"index":0,"finish_reason":"${if (reply.noToolCall) "stop" else "tool_calls"}","message":$message}],"usage":{"prompt_tokens":50,"completion_tokens":${reply.completionTokens}}}"""
+            val out = """{"id":"x","model":"fake-model","choices":[{"index":0,"finish_reason":"${if (reply.emptyLength) "length" else if (reply.noToolCall) "stop" else "tool_calls"}","message":$message}],"usage":{"prompt_tokens":50,"completion_tokens":${reply.completionTokens}}}"""
             ex.responseHeaders.add("Content-Type", "application/json")
             val bytes = out.toByteArray()
             ex.sendResponseHeaders(200, bytes.size.toLong())

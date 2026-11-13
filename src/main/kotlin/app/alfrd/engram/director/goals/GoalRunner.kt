@@ -44,11 +44,13 @@ data class StepReport(
     val wrote: Int, val refused: Int, val covered: Int, val discarded: Int, val impact: String, val note: String,
     /** What the step was given: open items, evidence lines, the prompt's size, and what was left out for room. */
     val items: Int = 0, val evidence: Int = 0, val promptChars: Int = 0, val leftOut: List<String> = emptyList(), val evidenceTrimmed: Int = 0,
+    /** Proposals written as "unclassifiable, no supporting evidence" because their claim did not stand, questions cut for length or list shape, and why a failed step failed. */
+    val downgraded: Int = 0, val askCut: Int = 0, val failureReason: String? = null, val error: String? = null,
 )
 
 /** One thing the Director wrote, with the open item it concerns and the evidence lines it cites, by ref. */
 @Serializable
-data class Proposal(val kind: String, val text: String, val about: String? = null, val support: List<String> = emptyList())
+data class Proposal(val kind: String, val text: String, val about: String? = null, val support: List<String> = emptyList(), val disposition: String? = null, val downgraded: Boolean = false)
 
 /** What a ref in a report stands for, so a reader can check each cited line against the graph. */
 @Serializable
@@ -66,6 +68,7 @@ data class RunReport(
     val qcMillis: Long = 0, val qcTokens: Long = 0, val qcCompletionTokens: Long = 0,
     val totalMillis: Long = 0, val totalTokens: Long = 0,
     val replans: Int = 0,
+    val downgraded: Int = 0,
     val looksMet: String? = null,
     val proposals: List<Proposal> = emptyList(),
     val messages: List<String> = emptyList(),
@@ -73,7 +76,7 @@ data class RunReport(
     val refs: Map<String, RefInfo> = emptyMap(),
 )
 
-private data class Written(val applied: Int, val refused: Int, val covered: Int) { val attempted get() = applied + refused }
+private data class Written(val applied: Int, val refused: Int, val covered: Int, val downgraded: Int = 0) { val attempted get() = applied + refused }
 
 private sealed interface Yielded<out T> {
     data class Done<T>(val value: T) : Yielded<T>
@@ -250,7 +253,7 @@ class GoalRunner(
     /** What the cycle knows of the goal's project, read once at its start. */
     private class ProjectScope(
         val shownOpen: List<ItemRecord>, val counts: GoalPrompts.ProjectCounts, val pool: List<ItemRecord>, val df: Map<String, Int>,
-        val directorLines: List<String>, val known: Set<String>,
+        val directorLines: List<String>, val known: Set<String>, val common: Set<String>,
     )
 
     // ── The cycle's state ────────────────────────────────────────────────────
@@ -279,7 +282,7 @@ class GoalRunner(
 
         fun report(outcome: RunOutcome, reason: String) = RunReport(
             outcome, reason, goal.uid, cycle.number, stepReports, planMillis, planTokens, planCompletion, qcMillis, qcTokens, qcCompletion,
-            elapsed(), usage.tokens, replans, looksMet, proposals, sentMessages, planRejected, refInfo,
+            elapsed(), usage.tokens, replans, stepReports.sumOf { it.downgraded }, looksMet, proposals, sentMessages, planRejected, refInfo,
         )
 
         suspend fun seq() = cycleSeq()
@@ -357,11 +360,12 @@ class GoalRunner(
             val owner = all.filter { it.directorGoalUid == null }
             val open = owner.filter(GoalEvidence::isOpen).sortedWith(compareBy<ItemRecord>({ it.dueAt == null }, { it.dueAt ?: 0L }, { -it.createdAt }))
             val pool = GoalEvidence.pool(owner)
+            val common = GoalEvidence.commonWords(owner)
             val counts = GoalPrompts.ProjectCounts(open.size, minOf(open.size, config.scopeItems), pool.count { it.kind != ItemKind.FACT }, pool.count { it.kind == ItemKind.FACT }, director.size)
             return ProjectScope(
-                open.take(config.scopeItems), counts, pool, GoalEvidence.documentFrequency(pool),
+                open.take(config.scopeItems), counts, pool, GoalEvidence.documentFrequency(pool, common),
                 director.sortedBy { it.createdAt }.takeLast(20).map { "${it.kind.name.lowercase()}: ${GoalText.clean(it.text, 160)}" },
-                all.map { ItemWords.normalize(it.text) }.toHashSet(),
+                all.map { ItemWords.normalize(it.text) }.toHashSet(), common,
             )
         }
 
@@ -393,7 +397,7 @@ class GoalRunner(
                 val step = plan.steps[index]
                 val views = step.refs.mapNotNull { r ->
                     scope.resolveOpen(r)?.let { item ->
-                        GoalPrompts.ItemView(r, item, GoalEvidence.related(item, world.pool, world.df, clock(), config.evidencePerItem).map { scope.evidenceRef(it) to it })
+                        GoalPrompts.ItemView(r, item, GoalEvidence.related(item, world.pool, world.df, clock(), config.evidencePerItem, world.common, config.minEvidenceScore).map { GoalPrompts.EvidenceLine(scope.evidenceRef(it.item), it.item, it.relevance) })
                     }
                 }.take(config.stepItems)
                 val context = GoalPrompts.step(goal, step, views, stepLines, config.maxItemsPerStep, config.stepPromptChars, clock(), config.stepItems)
@@ -407,7 +411,7 @@ class GoalRunner(
                 }
                 usage += result.usage
                 if (result.outcome == StepOutcome.DONE) worked += context.shownRefs.filter { it.startsWith("i") }
-                val written = writeStep(step, result, scope, known, context.shownRefs)
+                val written = writeStep(step, result, scope, known, context)
                 ranTitles += step.title
                 stepLines += "step ${step.number} ${step.title}: ${result.summary.ifEmpty { result.failure ?: "" }}"
                 if (result.outcome == StepOutcome.FAILED) failures++
@@ -420,6 +424,7 @@ class GoalRunner(
                     step.number, step.title, step.kind.label, result.outcome.name.lowercase(), result.usage.millis, result.usage.tokens, result.usage.completionTokens,
                     written.applied, written.refused, written.covered, result.discarded, impact.name.lowercase(), note,
                     items = openShown, evidence = context.shownRefs.count { it.startsWith("e") }, promptChars = context.prompt.length, leftOut = context.leftOutItems, evidenceTrimmed = context.evidenceTrimmed,
+                    downgraded = written.downgraded, askCut = result.askCut, failureReason = result.reason, error = result.error,
                 )
                 if (failures >= 3 || (failures >= 2 && failures == stepReports.size)) {
                     return failedCycle("model_failed", "Cycle ${cycle.number} stopped: the model gave no usable answer for $failures steps.")
@@ -445,35 +450,58 @@ class GoalRunner(
 
         fun accountPlan(u: CallUsage) { usage += u; planMillis += u.millis; planTokens += u.tokens; planCompletion += u.completionTokens }
 
-        suspend fun writeStep(step: PlanStep, result: StepResult, scope: ScopeMap, known: MutableSet<String>, shown: Set<String>): Written {
-            var applied = 0; var refused = 0; var covered = 0
+        suspend fun writeStep(step: PlanStep, result: StepResult, scope: ScopeMap, known: MutableSet<String>, context: GoalPrompts.StepContext): Written {
+            var applied = 0; var refused = 0; var covered = 0; var downgraded = 0
             val sequence = seq()
-            for (item in result.items) {
-                if (!known.add(ItemWords.normalize(item.text))) { covered++; continue } // the graph already says this
-                val made = writer.apply(email, cycle, sequence, listOf(RecordItem(item.kind, item.text)), zone).single()
+            val shown = GoalClaims.Shown(context.evidenceFor, scope, config.minEvidenceScore)
+
+            /** Writes one note (a fact) linked to the open item it concerns; false if the graph refused it. */
+            suspend fun note(text: String, about: ItemRecord?, support: List<ItemRecord> = emptyList(), kind: ItemKind = ItemKind.FACT): String? {
+                val made = writer.apply(email, cycle, sequence, listOf(RecordItem(kind, text)), zone).single()
                 val uid = made.resultUid
-                if (!made.applied || uid == null) { refused++; continue }
+                if (!made.applied || uid == null) { refused++; return null }
                 applied++
+                for (target in listOfNotNull(about) + support) {
+                    if (!writer.apply(email, cycle, sequence, listOf(LinkItems(uid, target.uid, text)), zone).single().applied) refused++
+                }
+                return uid
+            }
+
+            for (item in result.items) {
+                val verdict = GoalClaims.check(item.disposition, item.aboutRef, item.supportRefs, item.noEvidenceFound, shown)
+                if (!verdict.stands) {
+                    // The claim does not stand: write what is true (nothing supports it) and keep the model's reasoning as a note, plainly labelled as unverified.
+                    val about = scope.resolve(item.aboutRef)
+                    val label = about?.text?.let { GoalText.clean(it, 80) } ?: "an item"
+                    val headline = "Unclassifiable, no supporting evidence for \"$label\"."
+                    downgraded++
+                    if (known.add(ItemWords.normalize(headline))) note(headline, about)
+                    // Every downgraded claim keeps its own reasoning, plainly labelled as unverified.
+                    val reasoning = "Unverified reasoning (proposed ${item.disposition?.label ?: "a state"}; ${verdict.why}): ${GoalText.clean(item.text, 300)}"
+                    if (known.add(ItemWords.normalize(reasoning))) note(reasoning, about) else covered++
+                    proposals += Proposal("fact", headline, item.aboutRef, emptyList(), "unclassifiable", downgraded = true)
+                    continue
+                }
+                if (!known.add(ItemWords.normalize(item.text))) { covered++; continue } // the graph already says this
                 val about = scope.resolve(item.aboutRef)
                 val support = item.supportRefs.mapNotNull { scope.resolve(it) }
-                proposals += Proposal(item.kind.name.lowercase(), item.text, item.aboutRef, item.supportRefs)
+                val uid = note(item.text, about, support, item.kind) ?: continue
+                proposals += Proposal(item.kind.name.lowercase(), item.text, item.aboutRef, item.supportRefs, item.disposition?.label)
                 sourceOf[uid] = (listOfNotNull(about?.let { "About: ${it.text}" }) + support.map { "Supporting line: ${it.text}" }).joinToString("\n").ifEmpty { "(no source line was cited)" }
-                // The links are the pointers from what the Director wrote to what it rests on; the guard checks each is inside the goal's scope.
-                for (target in listOfNotNull(about) + support) {
-                    if (!writer.apply(email, cycle, sequence, listOf(LinkItems(uid, target.uid, item.text)), zone).single().applied) refused++
-                }
                 if (step.kind == StepKind.ASK && item.kind == ItemKind.QUESTION && questionsSent < MAX_QUESTIONS_PER_CYCLE) {
                     questionsSent++
-                    writer.send(email, cycle, DirectorMessageKind.QUESTION, PromptText.excerpt(item.text, 560), uid)
+                    writer.send(email, cycle, DirectorMessageKind.QUESTION, PromptText.excerpt(item.text, GoalAsk.MAX + 10), uid)
                     sentMessages += item.text
                 }
             }
             for (s in result.suggestions) {
                 val target = scope.resolveOpen(s.targetRef) ?: continue
+                val claim = when (s.state) { WorkState.DONE -> Disposition.DONE; WorkState.DROPPED -> Disposition.DROPPED; WorkState.WAITING -> Disposition.WAITING; else -> Disposition.LIVE }
+                if (!GoalClaims.check(claim, s.targetRef, s.supportRefs, s.noEvidenceFound, shown).stands) { downgraded++; continue } // the disposition note already says unclassifiable
                 val out = writer.suggestStateChange(email, cycle, sequence, target.uid, s.state, s.reason, zone)
-                if (out.all { it.applied }) { applied++; proposals += Proposal("suggestion", "mark \"${target.text.take(80)}\" ${s.state.wire()} — ${s.reason}", s.targetRef) } else refused++
+                if (out.all { it.applied }) { applied++; proposals += Proposal("suggestion", "mark \"${target.text.take(80)}\" ${s.state.wire()} — ${s.reason}", s.targetRef, s.supportRefs, claim.label) } else refused++
             }
-            return Written(applied, refused, covered)
+            return Written(applied, refused, covered, downgraded)
         }
 
         suspend fun qcAndClose(scope: ScopeMap): RunReport {

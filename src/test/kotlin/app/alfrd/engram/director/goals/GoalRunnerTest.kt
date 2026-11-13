@@ -79,6 +79,7 @@ class GoalRunnerTest {
             williams = structure.createContainer(user, 1, ContainerKind.PROJECT, "Williams")!!
             meridian = structure.createContainer(user, 1, ContainerKind.PROJECT, "Meridian")!!
             ownerTask1 = structure.createItem(user, 1, ItemKind.TASK, "Call Williams about the invoice", projectUid = williams.uid)!!
+            Thread.sleep(3) // distinct creation times, so the open items come in a known order (newest first: ownerTask2 is i1)
             ownerTask2 = structure.createItem(user, 1, ItemKind.TASK, "Send the Williams inspection report", projectUid = williams.uid)!!
             ownerNote = structure.createItem(user, 1, ItemKind.FACT, "Williams prefers email", projectUid = williams.uid)!!
             meridianTask = structure.createItem(user, 1, ItemKind.TASK, "Renew the Meridian contract", projectUid = meridian.uid)!!
@@ -644,6 +645,155 @@ class GoalRunnerTest {
         val out = run()
         assertEquals(RunOutcome.FAILED, out.outcome, "no usable step: the plan failed")
         assertEquals(0, server.calls("report_goal_step"))
+    }
+
+    // ── claims are checked in code ───────────────────────────────────────────
+
+    private fun claimItem(disposition: String?, text: String, about: String, support: List<String> = emptyList(), noEvidence: Boolean = false) = buildJsonObject {
+        put("kind", "note"); put("text", text); put("about", about)
+        disposition?.let { put("disposition", it) }
+        put("support", buildJsonArray { support.forEach { add(it) } })
+        if (noEvidence) put("no_evidence_found", true)
+    }
+
+    private fun stepOf(vararg items: kotlinx.serialization.json.JsonObject) = buildJsonObject {
+        put("outcome", "done"); put("summary", "reviewed"); put("impact", "none"); put("items", buildJsonArray { items.forEach { add(it) } })
+    }.toString()
+
+    @Test
+    fun `a done or dropped claim without a fitting shown evidence item is written as unclassifiable and the reasoning kept as a note`() {
+        val goal = approvedGoal("Review the open Williams items")
+        closedWilliams("Send the Williams inspection report to Sam")
+        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("One")) }
+        server.on("report_goal_step") {
+            FakeModelServer.Reply(stepOf(
+                claimItem("done", "Proposed done: the report went out", "i1", listOf("e1")),                 // stands: e1 is a done item shown with i1
+                claimItem("done", "Proposed done: surely finished", "i2"),                                  // nothing cited
+                claimItem("dropped", "Proposed dropped: obsolete", "i1", listOf("e1")),                     // e1 is done, not dropped
+                claimItem("waiting", "Proposed waiting: probably", "i2"),                                   // no cited line, no explicit no-evidence
+                claimItem("waiting", "Waiting on Sam. No evidence was found.", "i2", noEvidence = true),    // stands: says so
+                claimItem(null, "Proposed disposition for i2: done, it looks complete", "i2"),               // a claim in the text only
+            ))
+        }
+        val out = run(runner(config { copy(maxItemsPerStep = 8) }))
+        assertEquals(RunOutcome.COMPLETED, out.outcome, out.reason)
+        val step = out.steps.single()
+        assertEquals(4, step.downgraded, "four claims did not stand: ${out.proposals.map { it.text }}")
+        assertEquals(4, out.downgraded)
+        val texts = wrote(goal).map { it.text }
+        assertTrue(texts.any { it == "Proposed done: the report went out" }, "the supported claim is written as it was")
+        assertTrue(texts.any { it.startsWith("Waiting on Sam") })
+        assertTrue(texts.count { it.startsWith("Unclassifiable, no supporting evidence for") } >= 2, "written as unclassifiable: $texts")
+        assertTrue(texts.any { it.startsWith("Unverified reasoning (proposed dropped") && it.contains("obsolete") }, "the reasoning is kept as a note")
+        assertEquals(4, texts.count { it.startsWith("Unverified reasoning") }, "one for each claim that did not stand")
+        assertTrue(texts.none { it == "Proposed done: surely finished" || it == "Proposed dropped: obsolete" || it.startsWith("Proposed disposition for i2: done") }, "an unsupported claim is not written as a claim")
+        assertTrue(out.proposals.filter { it.downgraded }.all { it.disposition == "unclassifiable" })
+    }
+
+    @Test
+    fun `the claim check applies with step reasoning off and on alike`() {
+        for (stepReasoning in listOf(true, false)) {
+            val goal = approvedGoal("Goal reasoning=$stepReasoning")
+            server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("One")) }
+            server.on("report_goal_step") { FakeModelServer.Reply(stepOf(claimItem("done", "Confident done for $stepReasoning", "i1"))) }
+            val out = run(runner(config { copy(stepReasoning = stepReasoning) }), goal = goal, manual = true)
+            assertEquals(1, out.downgraded, "reasoning=$stepReasoning")
+            assertTrue(wrote(goal).none { it.text == "Confident done for $stepReasoning" })
+            runBlocking { structure.setState(user, ++seq, goal.uid, WorkState.DROPPED) } // done with this goal; the next one is the only candidate
+        }
+    }
+
+    @Test
+    fun `suggested done or dropped states need the same support or they are not written`() {
+        val goal = approvedGoal("Review the open Williams items")
+        closedWilliams("Send the Williams inspection report to Sam")
+        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("One")) }
+        server.on("report_goal_step") {
+            FakeModelServer.Reply(buildJsonObject {
+                put("outcome", "done"); put("summary", "s"); put("impact", "none"); put("items", buildJsonArray { })
+                put("suggestions", buildJsonArray {
+                    add(buildJsonObject { put("item", "i1"); put("state", "done"); put("reason", "the report went out"); put("support", buildJsonArray { add("e1") }) })
+                    add(buildJsonObject { put("item", "i2"); put("state", "done"); put("reason", "surely") })
+                })
+            }.toString())
+        }
+        val out = run()
+        assertEquals(RunOutcome.COMPLETED, out.outcome, out.reason)
+        assertEquals(1, out.downgraded)
+        val notes = wrote(goal).map { it.text }
+        assertTrue(notes.any { it.startsWith("Suggestion: mark") && it.contains("the report went out") })
+        assertTrue(notes.none { it.contains("surely") })
+    }
+
+    // ── limits and failures ──────────────────────────────────────────────────
+
+    @Test
+    fun `a step that hits the token limit records the reason and the exact error`() {
+        approvedGoal("Review the open Williams items")
+        server.on("report_goal_step") { FakeModelServer.Reply("", emptyLength = true) }
+        val out = run()
+        assertEquals(RunOutcome.FAILED, out.outcome, out.reason)
+        val failed = out.steps.first()
+        assertEquals("failed", failed.outcome)
+        assertTrue(failed.failureReason!!.contains("token limit") && failed.failureReason!!.contains("finish_reason=length"), failed.failureReason)
+        assertTrue(failed.error!!.contains("empty completion"), failed.error)
+        assertTrue(failed.error!!.length <= 330)
+    }
+
+    @Test
+    fun `a step that answers in text and makes no tool call says so`() {
+        approvedGoal("Review the open Williams items")
+        server.on("report_goal_step") { FakeModelServer.Reply("I would rather chat", noToolCall = true) }
+        val failed = run().steps.first()
+        assertTrue(failed.failureReason!!.contains("no tool call"), failed.failureReason)
+    }
+
+    @Test
+    fun `step reasoning is its own switch and plan and QC keep theirs`() {
+        approvedGoal("Review the open Williams items")
+        run(runner(config { copy(stepReasoning = false, reasoning = true) }))
+        assertTrue(server.requests("report_goal_step").all { it.contains("enable_thinking") }, "steps ask for thinking off")
+        assertTrue(server.requests("propose_goal_plan").none { it.contains("enable_thinking") } && server.requests("record_goal_qc").none { it.contains("enable_thinking") }, "plan and QC keep reasoning on")
+        val c = GoalRunnerConfig.fromEnvironment(mapOf("GOAL_RUNNER_STEP_REASONING" to "off"))
+        assertFalse(c.stepReasoning); assertTrue(c.reasoning)
+        assertTrue(GoalRunnerConfig.fromEnvironment(emptyMap()).stepReasoning, "on by default")
+    }
+
+    @Test
+    fun `the step limits are configurable and larger than before`() {
+        val d = GoalRunnerConfig()
+        assertTrue(d.stepMaxTokens >= 16_000 && d.stepTimeoutMs >= 900_000)
+        val c = GoalRunnerConfig.fromEnvironment(mapOf("GOAL_RUNNER_STEP_MAX_TOKENS" to "24000", "GOAL_RUNNER_STEP_TIMEOUT_SECONDS" to "1200", "GOAL_RUNNER_MIN_EVIDENCE_SCORE" to "2.5"))
+        assertEquals(24_000, c.stepMaxTokens); assertEquals(1_200_000L, c.stepTimeoutMs); assertEquals(2.5, c.minEvidenceScore, 1e-9)
+        assertEquals(16_000, GoalRunnerConfig.fromEnvironment(mapOf("GOAL_RUNNER_STEP_MAX_TOKENS" to "5")).stepMaxTokens, "nonsense falls back")
+    }
+
+    // ── code-side rules, not prompt lines ────────────────────────────────────
+
+    @Test
+    fun `a hand-over step is rejected at planning whatever the prompt said`() {
+        approvedGoal("Review the open Williams items")
+        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("Review login items", "Show the full disposition list to the owner")) }
+        val out = run()
+        assertEquals(listOf("Review login items"), out.steps.map { it.title })
+        assertTrue(out.planRejected.any { it.contains("hand results to the owner") }, out.planRejected.toString())
+    }
+
+    @Test
+    fun `a question that is a list or too long is cut and flagged`() {
+        val goal = approvedGoal("Review the open Williams items")
+        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("Ask", kind = "ask")) }
+        server.on("report_goal_step") {
+            FakeModelServer.Reply(stepOf(
+                buildJsonObject { put("kind", "question"); put("text", "Please confirm: 1. i4: waiting 2. i7: waiting 3. i9: done"); put("about", "i1") },
+                buildJsonObject { put("kind", "question"); put("text", "Is the review meant to include closed items? " + "z".repeat(330)); put("about", "i1") },
+            ))
+        }
+        val out = run(runner(config { copy(maxItemsPerStep = 8) }))
+        assertEquals(2, out.steps.single().askCut)
+        val questions = wrote(goal).filter { it.kind == ItemKind.QUESTION }
+        assertTrue(questions.all { it.text.length <= GoalAsk.MAX } && questions.none { it.text.contains("2. i7") }, questions.map { it.text }.toString())
+        assertTrue(thread(goal).filter { it.kind == DirectorMessageKind.QUESTION }.all { it.text.length <= GoalAsk.MAX + 10 })
     }
 
     // ── retract ──────────────────────────────────────────────────────────────

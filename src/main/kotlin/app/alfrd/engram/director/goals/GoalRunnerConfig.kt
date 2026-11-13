@@ -18,7 +18,10 @@ import java.nio.file.Path
  * | `GOAL_RUNNER_REPLAN_CAP` | 2 | the most times a major impact may replan before the goal is paused |
  * | `GOAL_RUNNER_DEFAULT_MINUTES` / `_TOKENS` | 30 / 60000 | the budget of a goal that names none (or only one of the two) |
  * | `GOAL_RUNNER_MIN_FREE_RAM_MB` / `_GPU_MB` | 4096 / 2048 | no cycle starts below these |
- * | `GOAL_RUNNER_REASONING` | `on` | whether the forced-tool-call model calls let the model reason; the Notion cycle code does, and a forced tool call after a pre-closed think block fails on long prompts |
+ * | `GOAL_RUNNER_REASONING` | `on` | whether the plan and QC calls let the model reason; the Notion cycle code does, and a forced tool call after a pre-closed think block fails on long prompts |
+ * | `GOAL_RUNNER_STEP_REASONING` | `on` | the same for step calls, so reasoning can be off for steps while it stays on for plan and QC |
+ * | `GOAL_RUNNER_STEP_MAX_TOKENS`, `GOAL_RUNNER_STEP_TIMEOUT_SECONDS` | 16000, 900 | the most a step may generate (reasoning counts) and wait |
+ * | `GOAL_RUNNER_MIN_EVIDENCE_SCORE` | 1.5 | the least relevance for a closed item to count as evidence |
  */
 data class GoalRunnerConfig(
     val enabled: Boolean = false,
@@ -33,7 +36,12 @@ data class GoalRunnerConfig(
     val defaultTokens: Long = 60_000L,
     val minFreeRamMb: Long = 4096L,
     val minFreeGpuMb: Long = 2048L,
+    /** Whether plan and QC calls let the model reason. */
     val reasoning: Boolean = true,
+    /** Whether step calls let the model reason. On by default, as the Notion cycle's calls are; off is for measurement and is safe only because claims are checked in code. */
+    val stepReasoning: Boolean = true,
+    /** The least relevance (shared words and concepts) for a closed item to count as evidence for an open one. */
+    val minEvidenceScore: Double = 1.5,
     /** How often a running model call checks whether a conversation has started. */
     val yieldPollMillis: Long = 1_500L,
     /** Items of the goal's project shown to the planner, and per step. */
@@ -45,10 +53,10 @@ data class GoalRunnerConfig(
     val maxItemsPerStep: Int = 5,
     val sampleSize: Int = 3,
     val planMaxTokens: Int = 12_000,
-    val stepMaxTokens: Int = 6_000,
+    val stepMaxTokens: Int = 16_000,
     val qcMaxTokens: Int = 8_000,
     val planTimeoutMs: Long = 600_000L,
-    val stepTimeoutMs: Long = 300_000L,
+    val stepTimeoutMs: Long = 900_000L,
 ) {
     companion object {
         const val ENV_ENABLED = "GOAL_RUNNER_ENABLED"
@@ -72,6 +80,10 @@ data class GoalRunnerConfig(
                 minFreeRamMb = long("GOAL_RUNNER_MIN_FREE_RAM_MB", base.minFreeRamMb, 512L..262_144L),
                 minFreeGpuMb = long("GOAL_RUNNER_MIN_FREE_GPU_MB", base.minFreeGpuMb, 0L..262_144L),
                 reasoning = text("GOAL_RUNNER_REASONING")?.lowercase() !in setOf("off", "false", "0", "no"),
+                stepReasoning = text("GOAL_RUNNER_STEP_REASONING")?.lowercase() !in setOf("off", "false", "0", "no"),
+                minEvidenceScore = text("GOAL_RUNNER_MIN_EVIDENCE_SCORE")?.toDoubleOrNull()?.takeIf { it in 0.0..20.0 } ?: base.minEvidenceScore,
+                stepMaxTokens = long("GOAL_RUNNER_STEP_MAX_TOKENS", base.stepMaxTokens.toLong(), 1_000L..64_000L).toInt(),
+                stepTimeoutMs = long("GOAL_RUNNER_STEP_TIMEOUT_SECONDS", base.stepTimeoutMs / 1000, 30L..7_200L) * 1000,
             )
         }
     }

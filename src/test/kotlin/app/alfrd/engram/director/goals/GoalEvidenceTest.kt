@@ -31,7 +31,7 @@ class GoalEvidenceTest {
         )
         val df = GoalEvidence.documentFrequency(pool)
         val got = GoalEvidence.related(open, pool, df, now, 4)
-        assertEquals("c1", got.first().uid, "magic and link are rare, login is in every item")
+        assertEquals("c1", got.first().item.uid, "magic and link are rare, login is in every item")
     }
 
     @Test
@@ -39,8 +39,8 @@ class GoalEvidenceTest {
         val pool = listOf(rec("c1", "Order cable for the garden", ageDays = 0.1)) + (1..10).map { rec("m$it", "Magic link login fix number $it", ageDays = it.toDouble()) }
         val got = GoalEvidence.related(open, pool, GoalEvidence.documentFrequency(pool), now, 4)
         assertEquals(4, got.size)
-        assertTrue(got.none { it.uid == "c1" })
-        assertEquals(listOf("m1", "m2", "m3", "m4"), got.map { it.uid }, "equally related: the more recent first")
+        assertTrue(got.none { it.item.uid == "c1" })
+        assertEquals(listOf("m1", "m2", "m3", "m4"), got.map { it.item.uid }, "equally related: the more recent first")
     }
 
     @Test
@@ -49,7 +49,7 @@ class GoalEvidenceTest {
         val without = rec("c2", "Handover notes")
         val item = rec("o2", "Chase the contract", WorkState.OPEN, about = listOf("ron"))
         val got = GoalEvidence.related(item, listOf(without, withConcept), emptyMap(), now, 4)
-        assertEquals(listOf("c1"), got.map { it.uid })
+        assertEquals(listOf("c1"), got.map { it.item.uid })
     }
 
     @Test
@@ -66,7 +66,7 @@ class GoalEvidenceTest {
     fun `retrieval is deterministic`() {
         val pool = (1..30).map { rec("c$it", "Magic link login item $it", ageDays = (it % 5).toDouble()) }
         val df = GoalEvidence.documentFrequency(pool)
-        assertEquals(GoalEvidence.related(open, pool, df, now, 4).map { it.uid }, GoalEvidence.related(open, pool.shuffled(java.util.Random(7)), df, now, 4).map { it.uid })
+        assertEquals(GoalEvidence.related(open, pool, df, now, 4).map { it.item.uid }, GoalEvidence.related(open, pool.shuffled(java.util.Random(7)), df, now, 4).map { it.item.uid })
     }
 
     // ── the step prompt's budget ─────────────────────────────────────────────
@@ -76,7 +76,7 @@ class GoalEvidenceTest {
 
     private fun views(n: Int, evidence: Int, evidenceChars: Int = 200) = (1..n).map { i ->
         GoalPrompts.ItemView("i$i", rec("o$i", "Open item number $i about the magic link ${"x".repeat(100)}", WorkState.OPEN),
-            (1..evidence).map { e -> "e${i}_$e" to rec("c${i}_$e", "Closed evidence line $e for item $i ${"y".repeat(evidenceChars)}") })
+            (1..evidence).map { e -> GoalPrompts.EvidenceLine("e${i}_$e", rec("c${i}_$e", "Closed evidence line $e for item $i ${"y".repeat(evidenceChars)}"), 3.0) })
     }
 
     @Test
@@ -113,5 +113,40 @@ class GoalEvidenceTest {
         val result = GoalStepValidator.parse(input, 5, scope, setOf("i1", e), CallUsage.NONE)
         assertEquals("i1", result.items.single().aboutRef)
         assertEquals(listOf(e), result.items.single().supportRefs, "i2 was not shown; i1 is the item itself")
+    }
+
+    // ── relevance: the minimum and the words that are everywhere ─────────────
+
+    @Test
+    fun `a weak match is not evidence when a minimum is set`() {
+        val pool = (1..8).map { rec("c$it", "Login page number $it") } + rec("strong", "Magic link login shipped")
+        val df = GoalEvidence.documentFrequency(pool)
+        val all = GoalEvidence.related(open, pool, df, now, 10)
+        val filtered = GoalEvidence.related(open, pool, df, now, 10, minRelevance = 1.5)
+        assertTrue(all.size > filtered.size, "the minimum removes the items that share only a common word")
+        assertEquals(listOf("strong"), filtered.map { it.item.uid })
+        assertTrue(filtered.all { it.relevance >= 1.5 })
+    }
+
+    @Test
+    fun `words in more than a quarter of the project's items are ignored`() {
+        val projectItems = (1..24).map { rec("p$it", "Williams item number $it about something else") } + rec("x", "Magic link login shipped")
+        val common = GoalEvidence.commonWords(projectItems)
+        assertTrue("williams" in common && "magic" !in common)
+        val item = rec("o", "Williams chase", WorkState.OPEN)
+        val pool = listOf(rec("c1", "Williams parking permit", WorkState.DONE))
+        assertEquals(1, GoalEvidence.related(item, pool, GoalEvidence.documentFrequency(pool), now, 4).size, "connected through the project's own name")
+        assertTrue(GoalEvidence.related(item, pool, GoalEvidence.documentFrequency(pool, common), now, 4, common).isEmpty(), "not once that name is ignored")
+        assertTrue(GoalEvidence.commonWords(projectItems.take(10)).isEmpty(), "a tiny project has no common words")
+    }
+
+    @Test
+    fun `an item with no qualifying evidence is told so plainly`() {
+        val view = GoalPrompts.ItemView("i1", open, emptyList())
+        val ctx = GoalPrompts.step(goal, step, listOf(view), emptyList(), 5, 12_000, now)
+        assertTrue(ctx.prompt.contains("NO EVIDENCE FOUND"))
+        assertTrue(ctx.prompt.contains("unclassifiable"))
+        assertEquals(setOf("i1"), ctx.shownRefs)
+        assertEquals(emptySet<String>(), ctx.evidenceFor["i1"])
     }
 }

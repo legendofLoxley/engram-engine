@@ -15,7 +15,8 @@ import kotlin.math.ln
  *  - **shared meaningful words** with the open item, each weighted by how rare it is in the project's evidence (a word in every item says nothing);
  *  - **shared concepts** (the `about` links the two items have in common);
  *  - **recency**, a small bonus that only breaks ties between items that are related at all.
- * An item that shares no word and no concept is not evidence, however recent.
+ * An item that shares no word and no concept is not evidence, however recent, and neither is one whose relevance is below the minimum ([GoalRunnerConfig.minEvidenceScore]).
+ * Words that appear in more than a quarter of the project's items are ignored (they connect everything to everything).
  */
 object GoalEvidence {
     private val STOP = setOf(
@@ -24,8 +25,19 @@ object GoalEvidence {
         "needs", "done", "task", "status", "priority", "start", "date", "item", "items", "open", "closed",
     )
 
-    fun words(text: String): Set<String> =
-        text.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 4 && it !in STOP && !it.all(Char::isDigit) }.toSet()
+    /** The meaningful words of [text]: four letters or more, not a stop word, not a number, and not in [ignore] (the words too common in the project to tell items apart). */
+    fun words(text: String, ignore: Set<String> = emptySet()): Set<String> =
+        text.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 4 && it !in STOP && it !in ignore && !it.all(Char::isDigit) }.toSet()
+
+    /** Words that appear in more than a quarter of the project's items say nothing about any one of them (the project's own name, mostly). Only judged once the project has [MIN_ITEMS_FOR_COMMON] items; a tiny project has no "common". */
+    fun commonWords(projectItems: List<ItemRecord>): Set<String> {
+        if (projectItems.size < MIN_ITEMS_FOR_COMMON) return emptySet()
+        val df = HashMap<String, Int>()
+        projectItems.forEach { i -> words(i.text).forEach { df.merge(it, 1, Int::plus) } }
+        return df.filterValues { it * 4 > projectItems.size }.keys
+    }
+
+    const val MIN_ITEMS_FOR_COMMON = 20
 
     /** What may serve as evidence from [projectItems]: the owner's closed items and notes. */
     fun pool(projectItems: List<ItemRecord>): List<ItemRecord> = projectItems.filter { it.directorGoalUid == null && it.kind != ItemKind.GOAL && isClosedOrNote(it) }
@@ -35,24 +47,31 @@ object GoalEvidence {
     private fun isClosedOrNote(i: ItemRecord): Boolean = i.kind == ItemKind.FACT || i.workState == WorkState.DONE || i.workState == WorkState.DROPPED
 
     /** How many pool items contain each word, for weighting. */
-    fun documentFrequency(pool: List<ItemRecord>): Map<String, Int> {
+    fun documentFrequency(pool: List<ItemRecord>, ignore: Set<String> = emptySet()): Map<String, Int> {
         val df = HashMap<String, Int>()
-        pool.forEach { p -> words(p.text).forEach { df.merge(it, 1, Int::plus) } }
+        pool.forEach { p -> words(p.text, ignore).forEach { df.merge(it, 1, Int::plus) } }
         return df
     }
 
-    /** Up to [limit] items of [pool] that bear on [item], best first. Pure: the same inputs give the same list. */
-    fun related(item: ItemRecord, pool: List<ItemRecord>, df: Map<String, Int>, now: Long, limit: Int): List<ItemRecord> {
-        val mine = words(item.text)
+    /** A candidate and how it scored. [relevance] is shared words and shared concepts only (what the minimum is judged on); [score] adds the recency tie-break. */
+    data class Scored(val item: ItemRecord, val relevance: Double, val score: Double)
+
+    /**
+     * Up to [limit] items of [pool] that bear on [item], best first, each with at least [minRelevance] of relevance. Pure: the same inputs give the same list.
+     * Nothing qualifying gives an empty list, which the step is told plainly ("no evidence found").
+     */
+    fun related(item: ItemRecord, pool: List<ItemRecord>, df: Map<String, Int>, now: Long, limit: Int, ignore: Set<String> = emptySet(), minRelevance: Double = 0.0): List<Scored> {
+        val mine = words(item.text, ignore)
         val myAbout = item.about.map { it.lowercase() }.toSet()
         if (mine.isEmpty() && myAbout.isEmpty()) return emptyList()
         return pool.asSequence().filter { it.uid != item.uid }.mapNotNull { candidate ->
-            val shared = mine.intersect(words(candidate.text))
+            val shared = mine.intersect(words(candidate.text, ignore))
             val sharedAbout = myAbout.intersect(candidate.about.map { it.lowercase() }.toSet())
             if (shared.isEmpty() && sharedAbout.isEmpty()) return@mapNotNull null
-            val wordScore = shared.sumOf { 1.0 / ln(2.0 + (df[it] ?: 1)) }
+            val relevance = 3.0 * shared.sumOf { 1.0 / ln(2.0 + (df[it] ?: 1)) } + 1.5 * sharedAbout.size
+            if (relevance < minRelevance) return@mapNotNull null
             val ageDays = ((now - candidate.evidenceAt).coerceAtLeast(0)) / 86_400_000.0
-            candidate to (3.0 * wordScore + 1.5 * sharedAbout.size + 0.5 * exp(-ageDays / 180.0))
-        }.sortedWith(compareByDescending<Pair<ItemRecord, Double>> { it.second }.thenByDescending { it.first.evidenceAt }.thenBy { it.first.uid }).take(limit).map { it.first }.toList()
+            Scored(candidate, relevance, relevance + 0.5 * exp(-ageDays / 180.0))
+        }.sortedWith(compareByDescending<Scored> { it.score }.thenByDescending { it.item.evidenceAt }.thenBy { it.item.uid }).take(limit).toList()
     }
 }
