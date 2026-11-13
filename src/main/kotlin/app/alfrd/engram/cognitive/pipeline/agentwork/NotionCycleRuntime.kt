@@ -76,6 +76,14 @@ class NotionCycleRuntime(
         const val ENV_LEASE_SECONDS = "NOTION_WORKER_LEASE_SECONDS"
         const val ENV_WORKER_ID = "NOTION_WORKER_ID"
 
+        /**
+         * `NOTION_CYCLES_POLLING=off` (or `false`, `0`, `no`) switches the Notion cycle channel off: nothing is polled, no cycle is claimed, no Notion call is made. The
+         * code stays. Unset or any other value leaves it as before, which is on when `NOTION_WORKER_CONFIG` is set.
+         */
+        const val ENV_POLLING = "NOTION_CYCLES_POLLING"
+
+        fun pollingSwitchedOff(env: Map<String, String>): Boolean = env[ENV_POLLING]?.trim()?.lowercase() in setOf("off", "false", "0", "no")
+
         /** Optional second llama.cpp endpoint for the plan call only. Unset: every call goes to the one default endpoint. */
         const val ENV_PLAN_BASE_URL = "PLAN_LLM_BASE_URL"
         const val ENV_PLAN_TIMEOUT_SECONDS = "PLAN_LLM_TIMEOUT_SECONDS"
@@ -229,6 +237,11 @@ fun bootstrapNotionCycles(
     env: Map<String, String> = System.getenv(),
     build: () -> NotionCycleStartup = { NotionCycleRuntime.fromEnvironment(env) },
 ): NotionCycleStartup {
+    if (NotionCycleRuntime.pollingSwitchedOff(env)) {
+        val off = NotionCycleStartup.Disabled("switched off by ${NotionCycleRuntime.ENV_POLLING}", misconfigured = false)
+        bootLog.info("notion-cycles: not running: {}", off.reason)
+        return off
+    }
     val startup = try {
         build()
     } catch (e: NotionConfigException) {

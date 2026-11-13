@@ -250,9 +250,9 @@ internal class HorizonSelector(
             if (current.hops >= maxHops) continue
             if (expanded >= policy.maxExpansions) { cut = true; break }
             expanded++
-            for ((next, transmission, via) in neighbors(current, userEmail, currentCycleSeq)) {
+            for ((next, transmission, via, cap) in neighbors(current, userEmail, currentCycleSeq)) {
                 val nextUid = next.get("uid") as? String ?: continue
-                val activation = policy.step(current.activation, transmission, current.hops)
+                val activation = policy.step(current.activation, transmission, current.hops).let { if (cap != null) minOf(it, cap) else it }
                 if (activation < policy.spreadFloor) continue
                 val known = best[nextUid]
                 if (known != null && known.activation >= activation) continue
@@ -264,7 +264,8 @@ internal class HorizonSelector(
         return best to cut
     }
 
-    private data class Step(val vertex: Vertex, val transmission: Double, val via: String?)
+    /** [cap], when set, is the most activation this step may give the node it reaches (a Director link; see HorizonPolicy.directorLinkMaxActivation). */
+    private data class Step(val vertex: Vertex, val transmission: Double, val via: String?, val cap: Double? = null)
 
     /** The nodes one step from [from], with how strongly each edge carries activation. Everything is scoped to the user before it is followed. */
     private fun neighbors(from: Reach, userEmail: String, currentCycleSeq: Long): List<Step> {
@@ -300,7 +301,9 @@ internal class HorizonSelector(
         val edgeCycle = (edge.get("cycleSeq") as? Number)?.toLong() ?: return null
         if (edgeCycle > currentCycleSeq || currentCycleSeq - edgeCycle > DEFAULT_LINK_WINDOW) return null
         val strength = (edge.get("strength") as? Number)?.toDouble() ?: 0.0
-        return edge.getVertex(otherEnd)?.let { Step(it, strength * policy.relevantTo, "linked to something recent") }
+        // A link the Director wrote lifts what it points at by a bounded amount, however strong it says it is (see HorizonPolicy.directorLinkMaxActivation).
+        val byDirector = edge.get("directorGoalUid") != null
+        return edge.getVertex(otherEnd)?.let { Step(it, strength * policy.relevantTo, "linked to something recent", cap = if (byDirector) policy.directorLinkMaxActivation else null) }
     }
 
     // ── Deadlines ────────────────────────────────────────────────────────────

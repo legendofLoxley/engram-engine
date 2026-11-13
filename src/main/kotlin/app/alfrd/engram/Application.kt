@@ -15,6 +15,7 @@ import app.alfrd.engram.api.configureDebugSourceRoutes
 import app.alfrd.engram.api.configureDebugHermesActivityRoutes
 import app.alfrd.engram.api.configureDebugHermesAssignmentRoutes
 import app.alfrd.engram.api.configureDebugDirectorTickRoutes
+import app.alfrd.engram.api.configureDebugGoalRunnerRoutes
 import app.alfrd.engram.api.configureOwnerHorizonRoutes
 import app.alfrd.engram.director.bootstrapOwnerHorizon
 import app.alfrd.engram.api.configureDebugNotionCycleRoutes
@@ -157,7 +158,8 @@ fun main() {
 
     // The Director's standing-context tick (read-only: no model call, no graph write). Off unless DIRECTOR_TICK_IDENTITY is set.
     val tickScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    val directorTickStartup = bootstrapDirectorTick(tickScope, db, notionStartup, hermesActiveAssignments)
+    val goalRunnerStartup = app.alfrd.engram.director.goals.bootstrapGoalRunner(tickScope, db, hermesActiveAssignments)
+    val directorTickStartup = bootstrapDirectorTick(tickScope, db, notionStartup, hermesActiveAssignments, goalRunner = (goalRunnerStartup as? app.alfrd.engram.director.goals.GoalRunnerStartup.Ready)?.runner)
     val ownerHorizonStartup = bootstrapOwnerHorizon(db, notionStartup, hermesActiveAssignments, directorTickStartup)
     Runtime.getRuntime().addShutdownHook(Thread { tickScope.cancel() })
 
@@ -217,6 +219,7 @@ fun main() {
             configureDebugHermesActivityRoutes(db, hermesActiveAssignments)
             configureDebugNotionCycleRoutes(notionStartup)
             configureDebugDirectorTickRoutes(directorTickStartup)
+            configureDebugGoalRunnerRoutes(goalRunnerStartup)
             configureDebugGraphBackupRoutes(db, localBackup)
             configureDebugSourceRoutes(db)
             configureDebugPdfSourceRoutes(db)

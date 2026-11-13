@@ -223,6 +223,8 @@ data class ItemRecord(
     val doneWhen: String? = null,
     val stopWhen: String? = null,
     val budget: String? = null,
+    /** A goal only: when the owner approved it (ms), the order the goal runner takes goals in. Null until approved, and for every other kind. */
+    val approvedAt: Long? = null,
     /** Set only on what the Director wrote: the goal it was working and which cycle of it (see [DirectorStamp]). Null for everything else, whoever wrote it. */
     val directorGoalUid: String? = null,
     val directorCycle: Int? = null,
@@ -443,6 +445,9 @@ interface HorizonStructureStore {
      * kept apart (see [DirectorMessageStore]).
      */
     suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int? = null, newest: Int? = null): List<ItemRecord> = emptyList()
+
+    /** Every goal the user has, proposed or approved, in any state, oldest first. The goal runner reads this to choose, and to find a goal a crash left running. */
+    suspend fun listGoals(userEmail: String): List<ItemRecord> = emptyList()
 
     /**
      * Retracts everything the Director wrote for [goalUid] in [cycle]: each item is set to dropped, with a change record (cause `retract_cycle`), and nothing is
@@ -1107,6 +1112,14 @@ class ArcadeHorizonStructureStore(
         }
     }
 
+    override suspend fun listGoals(userEmail: String): List<ItemRecord> = read("listGoals", emptyList()) {
+        db.query("sql", "SELECT FROM ${ItemKind.GOAL.typeName} WHERE ownerEmail = :e", mapOf("e" to userEmail)).use { rs ->
+            val out = mutableListOf<ItemRecord>()
+            while (rs.hasNext()) out += rs.next().toElement().asVertex().toItemRecord()
+            out.sortedBy { it.createdAt }
+        }
+    }
+
     override suspend fun retractDirectorCycle(userEmail: String, cycleSeq: Long, goalUid: String, cycle: Int): RetractOutcome =
         mutate("retractDirectorCycle", RetractOutcome(emptyList(), 0)) {
             val targets = mutableListOf<Vertex>()
@@ -1458,6 +1471,7 @@ class ArcadeHorizonStructureStore(
             doneWhen = if (kind == ItemKind.GOAL) get("doneWhen") as? String else null,
             stopWhen = if (kind == ItemKind.GOAL) get("stopWhen") as? String else null,
             budget = if (kind == ItemKind.GOAL) get("budget") as? String else null,
+            approvedAt = if (kind == ItemKind.GOAL) (get("approvedAt") as? Number)?.toLong() else null,
             directorGoalUid = get("directorGoalUid") as? String,
             directorCycle = (get("directorCycle") as? Number)?.toInt(),
             // SQL, not getVertices(IN, "ASSERTS"): ASSERTS edges are unidirectional, so incoming traversal is silently empty (see HorizonOwnership).

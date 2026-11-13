@@ -96,6 +96,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
         authenticate("supabase") {
         route("/cognitive") {
             post("/chat") {
+                app.alfrd.engram.director.goals.ConversationActivity.shared.touch()
                 val req = call.receive<ChatRequest>()
                 val userId = call.userEmail()
                     ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Missing identity"))
@@ -143,6 +144,7 @@ fun Application.configureCognitiveRoutes(sessionManager: SessionManager) {
             }
 
             post("/chat/stream") {
+                app.alfrd.engram.director.goals.ConversationActivity.shared.touch()
                 val req = call.receive<ChatRequest>()
                 val userId = call.userEmail()
                     ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Missing identity"))

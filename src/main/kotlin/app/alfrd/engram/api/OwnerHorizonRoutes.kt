@@ -39,6 +39,7 @@ fun Application.configureOwnerHorizonRoutes(
             if (presented.isEmpty() || !MessageDigest.isEqual(presented.toByteArray(), running.token.toByteArray())) {
                 return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing token"))
             }
+            app.alfrd.engram.director.goals.ConversationActivity.shared.touch()
             val raw = call.receiveText()
             if (raw.length > MAX_BODY_CHARS) return@post call.respond(HttpStatusCode.PayloadTooLarge, mapOf("error" to "body too large"))
             val body = if (raw.isBlank()) JsonObject(emptyMap()) else try {

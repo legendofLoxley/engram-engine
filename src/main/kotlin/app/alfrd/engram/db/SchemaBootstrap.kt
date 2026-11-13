@@ -218,6 +218,8 @@ object SchemaBootstrap {
                 vt.createProperty("answersUid", Type.STRING)    // nullable: the node it answers
                 vt.createProperty("createdAt", Type.LONG)
                 vt.createProperty("retractedAt", Type.LONG)     // nullable: set when its cycle is retracted
+                vt.createProperty("usageTokens", Type.LONG)     // the goal runner: model tokens a cycle used (completion tokens counted, prompt tokens estimated); nullable
+                vt.createProperty("usageMillis", Type.LONG)     // the goal runner: wall-clock milliseconds a cycle used; nullable
             }
             ensureEdge(schema, "MESSAGE_FOR") { }
             ensureEdge(schema, "ANSWERS") { }
