@@ -62,23 +62,22 @@ object GoalVerification {
     /** The quote the model gave, without the quotation marks it may have put around it. */
     fun unwrap(quote: String): String = fold(quote).trim(*WRAPPERS).trim()
 
-    /** The three checks [judge] makes. Named so a test can take one away and show the attack it stops then gets through; production never passes any. */
-    enum class Check { ANSWER, QUOTE_LENGTH, QUOTE_IN_CITED_LINE }
+    // The three checks, each a plain function. [judge] runs all of them in order and has no way to skip one: a test that wants to show what a check stops recombines these in
+    // the test source set (GoalVerifierTest), so nothing in production, in config or behind a route can take a check away.
+    fun saysSupports(v: ClaimVerdict): Boolean = v.answer == Answer.SUPPORTS
+    fun longEnough(quote: String): Boolean = quote.length >= MIN_QUOTE
+    fun lineHolding(claim: ClaimToVerify, quote: String): CitedLine? = claim.lines.firstOrNull { fold(it.text).contains(quote) }
 
-    fun judge(claim: ClaimToVerify, answer: VerifierAnswer): ClaimCheck = judge(claim, answer, emptySet())
-
-    internal fun judge(claim: ClaimToVerify, answer: VerifierAnswer, without: Set<Check>): ClaimCheck {
+    fun judge(claim: ClaimToVerify, answer: VerifierAnswer): ClaimCheck {
         val cited = claim.lines.map { it.ref }
         val v = answer.verdict
         fun no(why: String, a: String = v?.answer?.label ?: "no answer", q: String = v?.quote.orEmpty()) =
             ClaimCheck(claim.id, claim.disposition.label, false, a, q, null, why, cited, answer.usage.millis, answer.usage.tokens)
         if (v == null) return no("the verifier gave no usable answer (${answer.failure ?: "no verdict"})")
-        if (Check.ANSWER !in without && v.answer != Answer.SUPPORTS) return no("the verifier said \"${v.answer.label}\"${v.reason.takeIf { it.isNotBlank() }?.let { ": ${GoalText.clean(it, 200)}" }.orEmpty()}")
+        if (!saysSupports(v)) return no("the verifier said \"${v.answer.label}\"${v.reason.takeIf { it.isNotBlank() }?.let { ": ${GoalText.clean(it, 200)}" }.orEmpty()}")
         val quote = unwrap(v.quote)
-        if (Check.QUOTE_LENGTH !in without && quote.length < MIN_QUOTE) return no("the verifier said \"supports\" but gave no usable quote")
-        val line = claim.lines.firstOrNull { fold(it.text).contains(quote) }
-            ?: if (Check.QUOTE_IN_CITED_LINE in without) claim.lines.firstOrNull() else null
-        line ?: return no("the verifier said \"supports\" but its quote is not in any cited line", q = quote)
+        if (!longEnough(quote)) return no("the verifier said \"supports\" but gave no usable quote")
+        val line = lineHolding(claim, quote) ?: return no("the verifier said \"supports\" but its quote is not in any cited line", q = quote)
         return ClaimCheck(claim.id, claim.disposition.label, true, v.answer.label, quote, line.ref, "the quote is in ${line.ref}", cited, answer.usage.millis, answer.usage.tokens)
     }
 }

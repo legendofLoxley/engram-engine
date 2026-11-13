@@ -69,7 +69,7 @@ A goal is picked only if it is approved, open or running, filed under an active 
 
 ## Budget
 
-A goal's `budget` text is read each time ("30 minutes, 50k tokens", "2 hours"); what it does not say falls back to the defaults. Tokens are the completion tokens llama.cpp reports plus prompt tokens estimated from characters (it reports none for the prompt). Minutes are wall-clock minutes of runner work. Usage is summed over all of a goal's cycles from the closing message of each; a spent budget pauses the goal before a cycle starts, and a cycle stops between steps when it runs out.
+A goal's `budget` text is read each time ("30 minutes, 50k tokens", "2 hours"); what it does not say falls back to the defaults. Tokens are the completion tokens llama.cpp reports plus prompt tokens estimated from characters (it reports none for the prompt). Minutes are wall-clock minutes of runner work. Usage is summed over all of a goal's cycles from the closing message of each; a spent budget pauses the goal before a cycle starts, and a cycle stops between steps when it runs out. The verifier's calls are counted like any other (its tokens and seconds are in the cycle's usage and so in the closing message), and the verifier pass checks the budget before each claim: when it is spent the goal is paused and the claims not yet checked are dropped, nothing of them written.
 
 ## Cycle numbers
 

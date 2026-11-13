@@ -565,6 +565,8 @@ class GoalRunner(
             var kept = 0; var down = 0
             for ((i, p) in pending.withIndex()) {
                 mustStop(false)?.let { return yielded(it) }
+                // The verifier's calls are the goal's spend like any other: when the budget is gone, the claims not yet reached are dropped (nothing of them was written) and the goal pauses.
+                spent()?.let { return pausedFor("budget_spent", "Cycle ${cycle.number} stopped: the goal's budget is spent on $it while its done and dropped claims were being checked. The goal is paused; the claims not yet checked were not written.") }
                 val claim = ClaimToVerify("c${i + 1}", p.disposition, p.about.text, p.cited.map { (ref, item) -> CitedLine(ref, item.workState?.wire() ?: "note", GoalVerification.lineText(item)) })
                 val answer = if (claim.lines.isEmpty()) VerifierAnswer(null, CallUsage.NONE, "no cited line was shown with this item") else when (val r = yieldable { verifier.verify(claim) }) {
                     is Yielded.Stopped -> return yielded(r.why)

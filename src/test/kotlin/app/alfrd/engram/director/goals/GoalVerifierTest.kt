@@ -10,13 +10,36 @@ import org.junit.jupiter.api.Test
 
 /**
  * The verifier's code side and the evidence bar, with no graph and no model. The attack tests do not only show that an attack fails: each one also shows that it
- * *passes* once the check that stops it is taken away ([GoalVerification.Check]), so a test cannot go on passing after its check has been deleted.
+ * *passes* once the check that stops it is taken away (`Skip` below), so a test cannot go on passing after its check has been deleted.
  */
 class GoalVerifierTest {
     private val line = CitedLine("e1", "done", "Send the Williams inspection report to Sam on Friday. The invoice is separate.")
     private val claim = ClaimToVerify("c1", Disposition.DONE, "Send the Williams inspection report", listOf(line))
     private fun answer(a: Answer, quote: String = "", reason: String = "r") = VerifierAnswer(ClaimVerdict(a, quote, reason), CallUsage(10, 20, 30), null)
-    private fun judge(a: VerifierAnswer, vararg without: GoalVerification.Check) = GoalVerification.judge(claim, a, without.toSet())
+
+    /** Which of the three checks to take away. Test-only: the production `judge` has no way to skip one (see [judge cannot skip a check]). */
+    private enum class Skip { ANSWER, QUOTE_LENGTH, QUOTE_IN_CITED_LINE }
+
+    /** The three production checks recombined with some left out: what each one stops, shown by the attack getting through without it. Production code cannot do this. */
+    private fun judge(a: VerifierAnswer, vararg without: Skip): ClaimCheck {
+        val skip = without.toSet()
+        if (skip.isEmpty()) return GoalVerification.judge(claim, a)
+        val v = a.verdict ?: return GoalVerification.judge(claim, a)
+        if (Skip.ANSWER !in skip && !GoalVerification.saysSupports(v)) return GoalVerification.judge(claim, a)
+        val quote = GoalVerification.unwrap(v.quote)
+        if (Skip.QUOTE_LENGTH !in skip && !GoalVerification.longEnough(quote)) return GoalVerification.judge(claim, a)
+        val line = GoalVerification.lineHolding(claim, quote) ?: if (Skip.QUOTE_IN_CITED_LINE in skip) claim.lines.first() else return GoalVerification.judge(claim, a)
+        return ClaimCheck(claim.id, claim.disposition.label, true, v.answer.label, quote, line.ref, "kept with ${skip.joinToString()} removed", listOf(line.ref))
+    }
+
+    @Test
+    fun `judge cannot skip a check`() {
+        // Nothing but the three checks and the two-argument judge is public on GoalVerification, and no nested enum or overload takes a set of checks to leave out.
+        val judges = GoalVerification::class.java.declaredMethods.filter { it.name == "judge" }
+        assertTrue(judges.isNotEmpty() && judges.all { it.parameterCount == 2 }, judges.joinToString { it.toString() })
+        assertTrue(GoalVerification::class.java.declaredClasses.none { it.simpleName.contains("Check") }, "no Check enum in production")
+        assertTrue(GoalVerification::class.java.declaredMethods.none { m -> m.parameterTypes.any { Set::class.java.isAssignableFrom(it) } }, "nothing takes a set of things to leave out")
+    }
 
     @Test
     fun `supports with a verbatim quote of a cited line is kept`() {
@@ -38,7 +61,7 @@ class GoalVerifierTest {
         val real = "Send the Williams inspection report to Sam on Friday."
         for (a in listOf(Answer.DOES_NOT_SUPPORT, Answer.UNCLEAR)) {
             assertFalse(judge(answer(a, real)).kept, a.label)
-            assertTrue(judge(answer(a, real), GoalVerification.Check.ANSWER).kept, "without the answer check, ${a.label} with a real quote would be kept")
+            assertTrue(judge(answer(a, real), Skip.ANSWER).kept, "without the answer check, ${a.label} with a real quote would be kept")
         }
         assertEquals(Answer.UNCLEAR, Answer.of("definitely yes"), "anything unrecognised is unclear")
         assertEquals(Answer.DOES_NOT_SUPPORT, Answer.of("does_not_support"))
@@ -48,7 +71,7 @@ class GoalVerifierTest {
     fun `a quote that is not a substring of a cited line fails, and removing that check lets it through`() {
         val invented = "The report was sent and the item is done"
         assertFalse(judge(answer(Answer.SUPPORTS, invented)).kept)
-        assertTrue(judge(answer(Answer.SUPPORTS, invented), GoalVerification.Check.QUOTE_IN_CITED_LINE).kept, "without the substring check an invented quote would be kept")
+        assertTrue(judge(answer(Answer.SUPPORTS, invented), Skip.QUOTE_IN_CITED_LINE).kept, "without the substring check an invented quote would be kept")
         assertTrue(judge(answer(Answer.SUPPORTS, invented)).why.contains("not in any cited line"))
     }
 
@@ -64,7 +87,7 @@ class GoalVerifierTest {
     fun `a quote too short to say anything fails, and removing that check lets it through`() {
         assertFalse(judge(answer(Answer.SUPPORTS, "report")).kept)
         assertFalse(judge(answer(Answer.SUPPORTS, "")).kept)
-        assertTrue(judge(answer(Answer.SUPPORTS, "report"), GoalVerification.Check.QUOTE_LENGTH).kept, "without the length check one word of a line would be kept")
+        assertTrue(judge(answer(Answer.SUPPORTS, "report"), Skip.QUOTE_LENGTH).kept, "without the length check one word of a line would be kept")
     }
 
     @Test
@@ -96,15 +119,15 @@ class GoalVerifierTest {
     private fun rec(uid: String, text: String, state: WorkState? = WorkState.DONE, about: List<String> = emptyList()) =
         ItemRecord(uid = uid, kind = ItemKind.TASK, text = text, status = if (state == WorkState.DONE) "resolved" else "open", dueAt = null, projectUid = "p", createdAt = now, about = about, state = state, lastEvidenceAt = now)
 
-    private val open = rec("o", "Not started until Ron prints the barcodes", WorkState.OPEN, about = listOf("barcodes"))
+    private val open = rec("o", "Not started until Rowan prints the barcodes", WorkState.OPEN, about = listOf("barcodes"))
 
     private fun related(pool: List<ItemRecord>, minWords: Int = 2, concepts: Boolean = true, ignore: Set<String> = emptySet()) =
         GoalEvidence.related(open, pool, GoalEvidence.documentFrequency(pool, ignore), now, 5, ignore, 0.0, minWords, concepts).map { it.item.uid }
 
     @Test
     fun `one shared word is not enough, two are, and a shared concept that is not common counts instead`() {
-        val oneWord = rec("c1", "Form engine rebuilt with Ron's templates")                       // shares only "ron"
-        val twoWords = rec("c2", "Ron printed the barcodes for the first batch")                   // shares ron, barcodes (printed != prints)
+        val oneWord = rec("c1", "Form engine rebuilt with Rowan's templates")                       // shares only "rowan"
+        val twoWords = rec("c2", "Rowan printed the barcodes for the first batch")                   // shares rowan, barcodes (printed != prints)
         val concept = rec("c3", "Label stock ordered", about = listOf("barcodes"))                 // shares no word, shares the concept
         val pool = listOf(oneWord, twoWords, concept)
         assertEquals(setOf("c2", "c3"), related(pool).toSet(), "the one-word item is out")
@@ -123,10 +146,10 @@ class GoalVerifierTest {
     @Test
     fun `the strictest bar takes concepts away and asks for more words`() {
         val concept = rec("c3", "Label stock ordered", about = listOf("barcodes"))
-        val threeWords = rec("c4", "Ron prints barcodes before the form engine goes live")       // ron, prints, barcodes
+        val threeWords = rec("c4", "Rowan prints barcodes before the form engine goes live")       // rowan, prints, barcodes
         val pool = listOf(concept, threeWords)
         assertEquals(setOf("c3", "c4"), related(pool).toSet())
         assertEquals(listOf("c4"), related(pool, minWords = 3, concepts = false), "words only, three of them")
-        assertTrue(related(listOf(rec("c2", "Ron printed the barcodes for the first batch")), minWords = 3, concepts = false).isEmpty())
+        assertTrue(related(listOf(rec("c2", "Rowan printed the barcodes for the first batch")), minWords = 3, concepts = false).isEmpty())
     }
 }
