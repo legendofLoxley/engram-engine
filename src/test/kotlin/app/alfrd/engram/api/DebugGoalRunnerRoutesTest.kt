@@ -54,7 +54,7 @@ class DebugGoalRunnerRoutesTest {
             val cfg = GoalRunnerConfig(enabled = false, killFile = File(base, "STOP").toPath())
             val runner = GoalRunner(
                 email = user, structure = structure, messages = messages, writer = writer, cycles = DirectorCycles(structure, messages),
-                planner = GoalPlanDirector(LocalLlmClient(baseUrl = cfg.planUrl), cfg), stepper = GoalStepExecutor(LocalLlmClient(baseUrl = cfg.stepUrl), cfg), qc = GoalQcDirector(LocalLlmClient(baseUrl = cfg.planUrl), cfg),
+                planner = GoalPlanDirector(LocalLlmClient(baseUrl = cfg.planUrl), cfg), stepper = GoalStepExecutor(LocalLlmClient(baseUrl = cfg.stepUrl), cfg), qc = GoalQcDirector(LocalLlmClient(baseUrl = cfg.planUrl), cfg), verifier = GoalVerifier(LocalLlmClient(baseUrl = cfg.planUrl), cfg),
                 config = cfg, resources = object : ResourceProbe { override fun freeRamMb() = 16_000L; override fun freeGpuMb() = 30_000L },
                 slots = object : SlotProbe { override suspend fun slots(baseUrl: String) = Slots(2, 2) }, activity = ConversationActivity(),
                 hermesBusy = { 0 }, cycleSeq = { 100L }, zone = ZoneOffset.UTC,

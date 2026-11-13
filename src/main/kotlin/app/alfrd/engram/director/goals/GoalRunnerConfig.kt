@@ -22,6 +22,9 @@ import java.nio.file.Path
  * | `GOAL_RUNNER_STEP_REASONING` | `on` | the same for step calls, so reasoning can be off for steps while it stays on for plan and QC |
  * | `GOAL_RUNNER_STEP_MAX_TOKENS`, `GOAL_RUNNER_STEP_TIMEOUT_SECONDS` | 16000, 900 | the most a step may generate (reasoning counts) and wait |
  * | `GOAL_RUNNER_MIN_EVIDENCE_SCORE` | 1.5 | the least relevance for a closed item to count as evidence |
+ * | `GOAL_RUNNER_MIN_SHARED_WORDS` | 2 | the fewest meaningful words a closed item must share with the open one (a shared concept that is not common in the project counts instead, unless the next switch is off) |
+ * | `GOAL_RUNNER_CONCEPT_EVIDENCE` | `on` | whether a shared concept alone can make a closed item evidence; `off` is the strictest bar (words only) |
+ * | `GOAL_RUNNER_VERIFIER_MAX_TOKENS` | 6000 | the most one verifier call (one done or dropped claim) may generate, reasoning included |
  */
 data class GoalRunnerConfig(
     val enabled: Boolean = false,
@@ -42,6 +45,12 @@ data class GoalRunnerConfig(
     val stepReasoning: Boolean = true,
     /** The least relevance (shared words and concepts) for a closed item to count as evidence for an open one. */
     val minEvidenceScore: Double = 1.5,
+    /** The fewest meaningful words a closed item must share with an open one to be evidence, unless a shared concept that is not common in the project says it is about the same thing. */
+    val minSharedWords: Int = 2,
+    /** Whether a shared concept can stand in for the shared words. Off is the strictest bar. */
+    val conceptEvidence: Boolean = true,
+    /** The most one verifier call may generate. */
+    val verifierMaxTokens: Int = 6_000,
     /** How often a running model call checks whether a conversation has started. */
     val yieldPollMillis: Long = 1_500L,
     /** Items of the goal's project shown to the planner, and per step. */
@@ -82,6 +91,9 @@ data class GoalRunnerConfig(
                 reasoning = text("GOAL_RUNNER_REASONING")?.lowercase() !in setOf("off", "false", "0", "no"),
                 stepReasoning = text("GOAL_RUNNER_STEP_REASONING")?.lowercase() !in setOf("off", "false", "0", "no"),
                 minEvidenceScore = text("GOAL_RUNNER_MIN_EVIDENCE_SCORE")?.toDoubleOrNull()?.takeIf { it in 0.0..20.0 } ?: base.minEvidenceScore,
+                minSharedWords = long("GOAL_RUNNER_MIN_SHARED_WORDS", base.minSharedWords.toLong(), 1L..10L).toInt(),
+                conceptEvidence = text("GOAL_RUNNER_CONCEPT_EVIDENCE")?.lowercase() !in setOf("off", "false", "0", "no"),
+                verifierMaxTokens = long("GOAL_RUNNER_VERIFIER_MAX_TOKENS", base.verifierMaxTokens.toLong(), 500L..32_000L).toInt(),
                 stepMaxTokens = long("GOAL_RUNNER_STEP_MAX_TOKENS", base.stepMaxTokens.toLong(), 1_000L..64_000L).toInt(),
                 stepTimeoutMs = long("GOAL_RUNNER_STEP_TIMEOUT_SECONDS", base.stepTimeoutMs / 1000, 30L..7_200L) * 1000,
             )
