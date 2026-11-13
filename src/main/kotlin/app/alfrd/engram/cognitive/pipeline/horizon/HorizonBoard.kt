@@ -28,6 +28,8 @@ data class BoardItem(
     val pinned: Boolean,
     val evidenceAt: Long,
     val createdAt: Long,
+    /** True for something the Director wrote for a goal: its line says so, so it never reads as the owner's. */
+    val byDirector: Boolean = false,
 )
 
 /** A project and the open items filed under it. Suppressed items and items of a done or silenced project are never here. */
@@ -246,7 +248,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
                 if (f.waitingDue) add("waiting" + (i.waitingOn?.let { " on $it" } ?: "") + ", check-in date reached")
                 if (i.pinned && f.urgentMark.not() && !f.waitingDue && i.dueAt == null) add("pinned")
             }.joinToString(", ")
-            return "  $mark ${handle(i.uid, "i", refs)}${q(i.text)}" + if (detail.isNotEmpty()) ": $detail" else ""
+            return "  $mark ${handle(i.uid, "i", refs)}${q(i.text)}" + (if (i.byDirector) " [from the Director]" else "") + if (detail.isNotEmpty()) ": $detail" else ""
         }
 
         fun staleLine(s: Stats, refs: Map<String, String>?): String {
@@ -265,7 +267,8 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
 
         /** The listing of what is on the line: flagged items first (hard overdue, due soon, waiting past check-in), then pinned ones; stale soft ones are asked together. */
         fun itemsToList(s: Stats): List<Flags> {
-            val order = compareBy<Flags>({ if (it.hardOverdue) 0 else if (it.softOverdue) 1 else if (it.dueSoon) 2 else if (it.waitingDue) 3 else 4 }, { it.item.dueAt ?: Long.MAX_VALUE })
+            // The owner's own items are named first: what the Director wrote can fill only the lines the owner's leave, however many it wrote or however overdue.
+            val order = compareBy<Flags>({ if (it.item.byDirector) 1 else 0 }, { if (it.hardOverdue) 0 else if (it.softOverdue) 1 else if (it.dueSoon) 2 else if (it.waitingDue) 3 else 4 }, { it.item.dueAt ?: Long.MAX_VALUE })
             val listed = (s.flags.filter { it.flagged }.sortedWith(order) + s.pinnedItems.filterNot { it.flagged }).distinctBy { it.item.uid }
             return listed.take(policy.boardItemsPerNode)
         }

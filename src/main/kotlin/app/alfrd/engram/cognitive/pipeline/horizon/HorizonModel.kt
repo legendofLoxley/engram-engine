@@ -38,6 +38,13 @@ const val CLAUDE_SESSION_SOURCE_TYPE = "claude_session"
 const val CHANNEL_SOURCED_SOURCE_TYPE = "channel_sourced"
 
 /**
+ * `Source.type` of the Director's own Source: everything the Director writes for a goal is asserted by it (see [DirectorWriter]). The owner trusts it like their
+ * other Sources so what it writes is reachable, but it is not the owner speaking: [ArcadeHorizonAssembler] presents such an item as [ProvenanceKind.DIRECTOR],
+ * never as the owner's statement. Every item it asserts also carries the goal and the cycle (`directorGoalUid`, `directorCycle`).
+ */
+const val DIRECTOR_SOURCE_TYPE = "director"
+
+/**
  * `Source.type` values for the three Actor-attributed provenance kinds [ActorEventIngestionService]
  * distinguishes — never inferred from a caller-supplied free-text field (see that service's
  * `ActorEventKind`). Kept distinct from each other and from [ENVIRONMENT_SOURCE_TYPE] so
@@ -168,7 +175,13 @@ enum class ProvenanceKind {
     ACTOR_OBSERVATION, ACTOR_INTERPRETATION, ACTOR_TOOL_RESULT,
     /** Filed by a channel from a document it supplied: the document's words, not the owner's and not read by the Director. */
     CHANNEL_SOURCED,
+    /** Written by the Director while working a goal: its own writing, stamped with the goal and the cycle, never the owner's statement. */
+    DIRECTOR,
 }
+
+/** Which goal and which cycle of it the Director wrote an item in, for a [ProvenanceKind.DIRECTOR] item. */
+@Serializable
+data class DirectorNote(val goalUid: String, val cycle: Int)
 
 /** Where a [ProvenanceKind.CHANNEL_SOURCED] item came from: the document's title and the location of the chunk it quotes. [superseded] when the document has since been re-sent with other text. */
 @Serializable
@@ -351,6 +364,8 @@ data class HorizonItem(
     val container: HorizonContainerRef? = null,
     /** Non-null exactly when [provenance] is [ProvenanceKind.CHANNEL_SOURCED] and the quoted chunk could be found. */
     val documentSource: DocumentSourceNote? = null,
+    /** Non-null exactly when [provenance] is [ProvenanceKind.DIRECTOR]: the goal and cycle the Director wrote it in. */
+    val director: DirectorNote? = null,
     /** The item's work state (`open`, `active`, `waiting`, `done`, `dropped`); null for anything that has none. */
     val state: String? = null,
     /** `hard` or `soft`, set only when the item has a due date. */

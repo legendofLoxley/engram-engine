@@ -58,9 +58,19 @@ and the quote becomes the item's label, so write a title from the quote's own wo
 Goals are what the owner wants worked on: record_item with kind goal (a one-sentence `title`, optional `done_when`, `stop_when` and `budget`, and the project it
 serves) writes a proposal from the owner's words. Only the owner's own words approve it (`approve_goal`, with a quote; a question or a "no" is refused), and
 approving freezes it: its sentence, done_when, stop_when, budget and project cannot change again. A proposed goal can still be re-worded and re-filed with
-`edit_goal` and `file_item`. To change what an approved goal means, stop it (`set_state` stopped), write a new goal, and link the two with `link_items`; every
+`edit_goal` and `file_item`. To change what an approved goal means, stop it (`set_state` stopped), write a new goal with `record_item` and `replaces` set to the old one (it writes the link to it in the same step); every
 refusal says so. A goal runs (`set_state` running) only after approval, can be paused and resumed, and once done or stopped it is final and cannot be reopened.
 The board's Goals line reads running (active only), approved (not started), waiting for approval and stalled.
+
+A goal that was stopped is replaced in one step: record_item kind goal with `replaces` set to the stopped goal's ref (it serves the same project unless you name
+another, and it is proposed like any goal). The replacement is written with its link to the old goal, so there is no separate link_items to forget; a goal that is
+not stopped, or already has a replacement, cannot be replaced.
+
+The Director works approved, running goals as its own source. Everything it writes is its own, never the owner's statement: items it filed say so and name the
+goal and the cycle, and a note of its own may suggest a change to the owner's item, but it never edits, resolves, re-files or deletes what it did not write.
+What it sends you appears at the end of the Horizon as "From the Director" (questions, failures and finished goals; routine progress stays quiet). To take back
+everything one cycle of a goal wrote, use retract_cycle (item = the goal, cycle = its number, quote from the owner's own words): its items and notes become
+dropped and its messages are marked dropped, each with a change record. Nothing is deleted.
 
 Items have a state: open, active, waiting, done or dropped (record_item takes an optional `state`; `set_state` moves an existing item, with an
 optional `nudge` date to check in and `waiting_on`, who or what it waits on; waiting is accepted without waiting_on, and the result says so).

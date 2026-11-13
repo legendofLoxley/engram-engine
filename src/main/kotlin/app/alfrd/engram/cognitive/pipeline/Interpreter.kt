@@ -348,6 +348,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             "done_when" to str("For a goal: a check anyone could apply to see it is met. Frozen once the goal is approved."),
             "stop_when" to str("For a goal: when to give up on it. Frozen once the goal is approved."),
             "budget" to str("For a goal: how much effort it may take, in the owner's words. Frozen once the goal is approved."),
+            "replaces" to str("For a goal only: ref of a STOPPED goal this one replaces. The new goal is written with its link to the old one in the same step (no separate link_items), serves the same project unless you give another, and is proposed like any goal. A goal that is not stopped, or already has a replacement, cannot be replaced."),
         )
 
         private fun verbOf(variant: JsonObject): String? =
@@ -365,7 +366,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         /** The owner tool's `reopen_item` and `file_item`: the base ones, with what changes for goals said in the item's own description. */
         private val OWNER_REOPEN_VARIANT: JsonObject = extend(
             OPERATION_VARIANTS.first { verbOf(it) == "reopen_item" },
-            mapOf("item" to str("Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal and link it to the old one with link_items. A paused goal resumes with set_state.")),
+            mapOf("item" to str("Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal with record_item and replaces set to the old one (the link is written with it). A paused goal resumes with set_state.")),
         )
         private val OWNER_FILE_VARIANT: JsonObject = extend(
             OPERATION_VARIANTS.first { verbOf(it) == "file_item" },
@@ -391,11 +392,23 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         /** `edit_goal`: change a proposed goal's sentence, done-when, stop-when or budget. An approved goal is frozen. */
         private val EDIT_GOAL_VARIANT: JsonObject = variant("edit_goal", listOf("item", "quote")) {
             mapOf(
-                "item" to str("Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal and link the two with link_items."),
+                "item" to str("Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal with record_item and replaces set to the old one, which writes the link to it in the same step."),
                 "title" to str("The goal's new sentence. At least half of its content words (four letters or more) must come from the quote or the old sentence."),
                 "done_when" to str("New done-when."),
                 "stop_when" to str("New stop-when."),
                 "budget" to str("New budget."),
+                "quote" to QUOTE,
+            )
+        }
+
+        /**
+         * `retract_cycle`: the owner takes back everything one cycle of a goal wrote (the Director's items and notes become dropped, its messages too). Nothing is deleted,
+         * and each item keeps a change record. The cycle number is the one the "From the Director" lines and the Director's items name.
+         */
+        private val RETRACT_CYCLE_VARIANT: JsonObject = variant("retract_cycle", listOf("item", "cycle", "quote")) {
+            mapOf(
+                "item" to str("Ref of the goal whose cycle is retracted."),
+                "cycle" to buildJsonObject { put("type", "integer"); put("minimum", 1); put("description", "Which cycle of the goal (1 for the first) to retract.") },
                 "quote" to QUOTE,
             )
         }
@@ -447,7 +460,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         when (verbOf(v)) {
                             "record_item" -> add(OWNER_RECORD_VARIANT)
                             "correct_item" -> add(OWNER_CORRECT_VARIANT)
-                            "reopen_item" -> { add(OWNER_REOPEN_VARIANT); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT); add(APPROVE_GOAL_VARIANT); add(EDIT_GOAL_VARIANT) }
+                            "reopen_item" -> { add(OWNER_REOPEN_VARIANT); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT); add(APPROVE_GOAL_VARIANT); add(EDIT_GOAL_VARIANT); add(RETRACT_CYCLE_VARIANT) }
                             "file_item" -> add(OWNER_FILE_VARIANT)
                             else -> add(v)
                         }

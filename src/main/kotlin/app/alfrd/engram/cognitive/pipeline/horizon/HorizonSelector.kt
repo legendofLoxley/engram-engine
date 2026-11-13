@@ -453,7 +453,8 @@ internal class HorizonSelector(
                 uid = uid,
                 kind = kind,
                 text = v.get("text") as? String ?: "",
-                status = if (!spec.carriesState) null else v.get("status") as? String,
+                // A fact has no status; a retracted one (see HorizonStructureStore.retractDirectorCycle) is the one exception and reads as resolved, so it leaves the Horizon.
+                status = if (!spec.carriesState) (v.get("status") as? String)?.takeIf { it == "resolved" } else v.get("status") as? String,
                 dueAt = dueAt,
                 attention = attentionOf(v),
                 askedBy = if (spec.kind == ItemKind.QUESTION) v.get("askedBy") as? String else null,
@@ -461,7 +462,7 @@ internal class HorizonSelector(
                 containerStatus = project?.get("status") as? String,
                 containerAttention = project?.let { attentionOf(it) },
                 superseded = superseded,
-                workState = if (!spec.carriesState) null else WorkState.of(v.get("state") as? String, v.get("status") as? String),
+                workState = if (!spec.carriesState) (if (v.get("status") == "resolved") WorkState.fromWire(v.get("state") as? String) else null) else WorkState.of(v.get("state") as? String, v.get("status") as? String),
                 dueKind = DueKind.fromWire(v.get("dueKind") as? String),
                 dueHasTime = v.get("dueHasTime") == true,
                 nudgeAt = (v.get("nudgeAt") as? Number)?.toLong(),

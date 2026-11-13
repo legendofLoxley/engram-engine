@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -75,6 +76,11 @@ data class RecordItem(
     val doneWhen: String? = null,
     val stopWhen: String? = null,
     val budget: String? = null,
+    /**
+     * For a goal: the stopped goal this one replaces. The replacement is written with its link to the old goal in one step, so the link cannot be forgotten;
+     * a goal that is not stopped, or has already been replaced, cannot be replaced. Only meaningful for a goal.
+     */
+    val replacesUid: String? = null,
 ) : HorizonOperation { override val verb get() = "record_item" }
 
 @Serializable
@@ -112,6 +118,13 @@ data class EditGoal(
     /** The goal's new sentence. */
     val text: String? = null,
 ) : HorizonOperation { override val verb get() = "edit_goal" }
+
+/**
+ * The owner retracts everything one cycle of a goal wrote: its items and notes are set to dropped (each with a change record) and its messages are marked
+ * dropped. Nothing is deleted. Owner only: the Director's guard refuses it, and the Director's own operations never include it.
+ */
+@Serializable
+data class RetractCycle(val goalUid: String, val cycle: Int, override val quote: String) : HorizonOperation { override val verb get() = "retract_cycle" }
 
 /** "Yes, still live": refreshes when the item was last confirmed, and changes nothing else. */
 @Serializable
@@ -397,6 +410,15 @@ object OperationParser {
                 if ((kind == ItemKind.FACT || kind == ItemKind.EVENT || kind == ItemKind.GOAL) && quote.endsWith("?")) return One.Rejected("question_detected")
                 val goalFields = listOf("done_when", "stop_when", "budget").map { obj.str(it)?.trim()?.takeIf { v -> v.isNotBlank() } }
                 if (kind != ItemKind.GOAL && goalFields.any { it != null }) return One.Rejected("not_for_a_goal_field")
+                // A replacement names the stopped goal it replaces, by ref. Only a goal replaces a goal, and only one that is stopped.
+                val replacesRef = obj.str("replaces")?.trim()?.takeIf { it.isNotBlank() }
+                val replaces = replacesRef?.let { ref ->
+                    if (kind != ItemKind.GOAL) return One.Rejected("not_for_a_goal_field")
+                    val old = snapshot.item(ref) ?: return One.Rejected("unknown_ref")
+                    if (old.kind != ItemKind.GOAL) return One.Rejected("not_a_goal")
+                    if (old.state != WorkState.DROPPED) return One.Rejected("goal_not_stopped")
+                    old
+                }
                 val projectRaw = obj.str("project")?.trim()?.takeIf { it.isNotBlank() }
                 var projectUid: String? = null
                 var projectName: String? = null
@@ -422,6 +444,7 @@ object OperationParser {
                         quote = quote,
                         title = if (kind == ItemKind.TASK || kind == ItemKind.EVENT || kind == ItemKind.GOAL) acceptableTitle(obj.str("title"), quote) else null,
                         doneWhen = goalFields[0], stopWhen = goalFields[1], budget = goalFields[2],
+                        replacesUid = replaces?.uid,
                         projectUid = projectUid,
                         projectName = projectName,
                         dueAt = parseWhen(obj.str("due"), zone, endOfDayForDateOnly = kind != ItemKind.EVENT),
@@ -502,6 +525,16 @@ object OperationParser {
                 val title = rawTitle?.let { acceptableTitle(it, quote, item.text) ?: return One.Rejected("title_not_in_quote") }
                 if (fields.all { it == null } && title == null) return One.Rejected("nothing_to_change")
                 One.Ok(EditGoal(item.uid, quote, fields[0], fields[1], fields[2], title))
+            }
+            "retract_cycle" -> {
+                val item = snapshot.item(obj.str("item")) ?: return One.Rejected("unknown_ref")
+                if (item.kind != ItemKind.GOAL) return One.Rejected("not_a_goal")
+                val cycle = obj.int("cycle")?.takeIf { it >= 1 } ?: return One.Rejected("missing_cycle")
+                // Retracting is the owner's say-so, like approval: a question, or a clause that says no, is not one.
+                val clause = clauseContaining(utterance, quote)
+                if (quote.endsWith("?") || clause.trim().endsWith("?")) return One.Rejected("question_detected")
+                if (NEGATION_REGEX.containsMatchIn(clause)) return One.Rejected("negation_marker_detected")
+                One.Ok(RetractCycle(item.uid, cycle, quote))
             }
             "correct_item" -> {
                 val ref = obj.str("item")
@@ -641,6 +674,7 @@ object OperationParser {
 
     private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
     private fun JsonObject.bool(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
+    private fun JsonObject.int(key: String): Int? = (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
     private fun JsonObject.strList(key: String): List<String> =
         (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content } ?: emptyList()
 }

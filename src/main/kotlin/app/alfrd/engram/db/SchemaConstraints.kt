@@ -103,6 +103,16 @@ object SchemaConstraints {
                 { Violations.NONE },
                 { s -> s.getType("Phrase").getProperty("sourceQuote").setReadonly(true) })
         }
+        // Who wrote an item, and in which cycle, is written once with the item: no later write can move an item between goals or cycles (which would move it
+        // in or out of a retraction set).
+        if (schema.existsType("Phrase")) {
+            for (property in listOf("directorGoalUid", "directorCycle")) {
+                out += Rule("readonly:Phrase.$property", "Phrase.$property cannot change after the item is written",
+                    { s -> s.getType("Phrase").getProperty(property).isReadonly },
+                    { Violations.NONE },
+                    { s -> s.getType("Phrase").getProperty(property).setReadonly(true) })
+            }
+        }
         // State is one of five words when it is set. (It may still be absent on rows written before it existed; that is not a violation of this rule.)
         for (name in app.alfrd.engram.cognitive.pipeline.horizon.ItemKinds.stateful().map { it.typeName }) {
             if (!schema.existsType(name)) continue

@@ -93,6 +93,10 @@
                         "budget": {
                             "type": "string",
                             "description": "For a goal: how much effort it may take, in the owner's words. Frozen once the goal is approved."
+                        },
+                        "replaces": {
+                            "type": "string",
+                            "description": "For a goal only: ref of a STOPPED goal this one replaces. The new goal is written with its link to the old one in the same step (no separate link_items), serves the same project unless you give another, and is proposed like any goal. A goal that is not stopped, or already has a replacement, cannot be replaced."
                         }
                     },
                     "required": [
@@ -138,7 +142,7 @@
                         },
                         "item": {
                             "type": "string",
-                            "description": "Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal and link it to the old one with link_items. A paused goal resumes with set_state."
+                            "description": "Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal with record_item and replaces set to the old one (the link is written with it). A paused goal resumes with set_state."
                         },
                         "quote": {
                             "type": "string",
@@ -260,7 +264,7 @@
                         },
                         "item": {
                             "type": "string",
-                            "description": "Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal and link the two with link_items."
+                            "description": "Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal with record_item and replaces set to the old one, which writes the link to it in the same step."
                         },
                         "title": {
                             "type": "string",
@@ -286,6 +290,37 @@
                     "required": [
                         "verb",
                         "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "retract_cycle"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of the goal whose cycle is retracted."
+                        },
+                        "cycle": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Which cycle of the goal (1 for the first) to retract."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "item",
+                        "cycle",
                         "quote"
                     ],
                     "additionalProperties": false

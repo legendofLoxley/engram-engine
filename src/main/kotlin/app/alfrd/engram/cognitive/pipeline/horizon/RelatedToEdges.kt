@@ -22,13 +22,15 @@ object RelatedToEdges {
      * one user via an index, before `LIMIT` is applied, rather than after. A scoping aid only, never
      * trusted on its own by the read path — see that property's schema doc.
      */
-    fun createRelevantTo(from: Vertex, to: Vertex, strength: Double, cycleSeq: Long, createdAt: Long, ownerEmail: String): Edge =
+    fun createRelevantTo(from: Vertex, to: Vertex, strength: Double, cycleSeq: Long, createdAt: Long, ownerEmail: String, director: DirectorStamp? = null): Edge =
         from.newEdge("RELATED_TO", to, true).apply {
             set("relationType", "relevant_to")
             set("strength", strength)
             set("cycleSeq", cycleSeq)
             set("createdAt", createdAt)
             set("ownerEmail", ownerEmail)
+            // A link the Director wrote says so on the edge: the goal and the cycle.
+            if (director != null) { set("directorGoalUid", director.goalUid); set("directorCycle", director.cycle) }
             save()
         }
 
@@ -38,13 +40,14 @@ object RelatedToEdges {
      * this also needs `bidirectional=true`, not the `false` every other `RELATED_TO` relationType
      * uses. [ownerEmail] — see [createRelevantTo].
      */
-    fun createSupersedes(newer: Vertex, older: Vertex, cycleSeq: Long, createdAt: Long, ownerEmail: String): Edge =
+    fun createSupersedes(newer: Vertex, older: Vertex, cycleSeq: Long, createdAt: Long, ownerEmail: String, director: DirectorStamp? = null): Edge =
         newer.newEdge("RELATED_TO", older, true).apply {
             set("relationType", "supersedes")
             set("strength", 1.0)
             set("cycleSeq", cycleSeq)
             set("createdAt", createdAt)
             set("ownerEmail", ownerEmail)
+            if (director != null) { set("directorGoalUid", director.goalUid); set("directorCycle", director.cycle) }
             save()
         }
 

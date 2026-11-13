@@ -205,6 +205,23 @@ object SchemaBootstrap {
                 vt.createProperty("budget", Type.STRING)
             }
 
+            // A message from the Director to the channel (see DirectorMessageStore). NOT a Phrase: it is not a statement about the owner's world, so no item scan,
+            // selector or audit sees it. `MESSAGE_FOR` points at the goal it belongs to, `ANSWERS` at what it answers, so a thread can be walked either way.
+            ensureVertex(schema, "DirectorMessage") { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("sender", Type.STRING)        // always "director"
+                vt.createProperty("goalUid", Type.STRING)
+                vt.createProperty("directorCycle", Type.INTEGER)
+                vt.createProperty("kind", Type.STRING)          // question | failure | finished | progress
+                vt.createProperty("text", Type.STRING)
+                vt.createProperty("answersUid", Type.STRING)    // nullable: the node it answers
+                vt.createProperty("createdAt", Type.LONG)
+                vt.createProperty("retractedAt", Type.LONG)     // nullable: set when its cycle is retracted
+            }
+            ensureEdge(schema, "MESSAGE_FOR") { }
+            ensureEdge(schema, "ANSWERS") { }
+
             // Durable per-user cycle-sequence identity and a bounded, checkpointed record of
             // in-flight/completed conversational-cycle requests. See
             // app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer and RequestLedger. The
@@ -381,6 +398,9 @@ object SchemaBootstrap {
             // task or event ("Order the soil" for "I never got around to ordering the soil"). Absent when
             // `text` already is the user's words.
             ensureProperty(schema, "Phrase",  "sourceQuote",         Type.STRING)
+            // What the Director wrote says which goal and which cycle on the item itself, from the moment it exists (see DirectorStamp). Absent on everything else.
+            ensureProperty(schema, "Phrase",  "directorGoalUid",     Type.STRING)
+            ensureProperty(schema, "Phrase",  "directorCycle",       Type.INTEGER)
             // Denormalized owner of an item created through HorizonStructureStore, so deadline and
             // attention lookups can be scoped to one user by an index BEFORE any LIMIT — the same reason
             // RELATED_TO carries one. A scoping aid only: ownership is still re-verified through
@@ -622,6 +642,8 @@ object SchemaBootstrap {
             ensureCompositeIndex(schema, "Phrase",  "attention", "ownerEmail")
             ensureIndex(schema, "ABOUT",       "ownerEmail")
             ensureIndex(schema, "PROGRESS_OF", "ownerEmail")
+            ensureIndex(schema, "DirectorMessage", "goalUid")
+            ensureIndex(schema, "Phrase", "directorGoalUid")
             ensureIndex(schema, "Concept",     "uid")
             ensureIndex(schema, "Concept",     "normalizedName")
             ensureIndex(schema, "Concept",     "conceptKey")

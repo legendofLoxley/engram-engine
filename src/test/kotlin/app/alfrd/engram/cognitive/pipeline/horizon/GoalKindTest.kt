@@ -178,7 +178,7 @@ class GoalKindTest {
         assertTrue(results[0].applied)
         assertFalse(results[1].applied)
         assertTrue(results[1].summary.contains("frozen"), results[1].summary)
-        assertTrue(results[1].summary.contains("stop it, propose a new goal, and link it to the old one with link_items"), results[1].summary)
+        assertTrue(results[1].summary.contains("stop it, then propose a new goal with record_item and replaces set to the old goal, which writes the link to it in the same step"), results[1].summary)
         assertEquals("All reviewed", stored(g.uid).doneWhen)
 
         // correct_item would write a new goal and close the old one; the parser refuses it for a goal

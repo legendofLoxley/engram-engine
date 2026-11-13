@@ -132,6 +132,7 @@ class ArcadeBoardSource(
                         pinned = attention(v) == "pinned",
                         evidenceAt = (v.get("lastEvidenceAt") as? Number)?.toLong() ?: (v.get("updatedAt") as? Number)?.toLong() ?: createdAt,
                         createdAt = createdAt,
+                        byDirector = v.get("directorGoalUid") != null,
                     )
                     if (createdAt > sinceAt) newItems++
                     itemInfo[uid] = text to projectUid

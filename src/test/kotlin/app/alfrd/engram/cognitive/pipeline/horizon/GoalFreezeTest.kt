@@ -65,7 +65,7 @@ class GoalFreezeTest {
     private fun stored(uid: String) = runBlocking { structure.getItem(user, uid)!! }
     private fun send(vararg ops: HorizonOperation) = runBlocking { applier.apply(user, ++cycle, "op-${UUID.randomUUID()}", ops.toList(), zone) }
     private fun one(op: HorizonOperation) = send(op).single()
-    private val rule = "stop it, propose a new goal, and link it to the old one with link_items"
+    private val rule = "stop it, then propose a new goal with record_item and replaces set to the old goal, which writes the link to it in the same step"
 
     // ── An approved goal is frozen ───────────────────────────────────────────
 

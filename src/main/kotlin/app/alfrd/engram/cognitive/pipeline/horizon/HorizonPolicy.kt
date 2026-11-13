@@ -154,6 +154,14 @@ data class HorizonPolicy(
     /** The Goals section of the board: at most this many goal lines, and the whole section within [boardGoalTokens] however many goals there are. */
     val boardGoalLines: Int = 4,
     val boardGoalTokens: Int = 150,
+    /**
+     * The "From the Director" section the channel reads: at most [directorMessageLines] messages per call, each cut to [directorMessageChars]. Questions, failures and
+     * finished goals show; routine progress is kept but stays quiet unless [directorShowProgress]. A question nobody has answered stays listed for [directorOpenQuestionDays].
+     */
+    val directorMessageLines: Int = 5,
+    val directorMessageChars: Int = 240,
+    val directorShowProgress: Boolean = false,
+    val directorOpenQuestionDays: Int = 14,
     /** At most this many lines in the "since last time" section. */
     val boardSinceLines: Int = 4,
     /** At most this many quiet-area lines before the rest are counted in one. */
@@ -230,6 +238,7 @@ data class HorizonPolicy(
                 alsoDueMaxLines = days("HORIZON_ALSO_DUE_MAX_LINES")?.toInt()?.takeIf { it > 0 } ?: base.alsoDueMaxLines,
                 boardTokenBudget = days("HORIZON_BOARD_TOKENS")?.toInt()?.takeIf { it > 0 } ?: base.boardTokenBudget,
                 zoomTokenBudget = days("HORIZON_ZOOM_TOKENS")?.toInt()?.takeIf { it > 0 } ?: base.zoomTokenBudget,
+                directorShowProgress = env["HORIZON_DIRECTOR_PROGRESS"]?.trim()?.lowercase()?.let { it == "true" || it == "1" } ?: base.directorShowProgress,
             )
         }
 

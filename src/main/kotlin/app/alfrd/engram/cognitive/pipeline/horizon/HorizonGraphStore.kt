@@ -4,6 +4,7 @@ import com.arcadedb.database.Database
 import com.arcadedb.graph.Vertex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -546,7 +547,7 @@ class ArcadeHorizonGraphStore(
         fromPhraseUid: String,
         toPhraseUid: String,
         strength: Double,
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Boolean = coroutineContext[DirectorContext]?.stamp.let { director -> withContext(Dispatchers.IO) {
         try {
             withHorizonWriteLock(db, lockTimeoutMs) {
                 var success = false
@@ -562,7 +563,7 @@ class ArcadeHorizonGraphStore(
                         success = true
                         return@transaction
                     }
-                    RelatedToEdges.createRelevantTo(from.modify(), to.modify(), strength, cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail)
+                    RelatedToEdges.createRelevantTo(from.modify(), to.modify(), strength, cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail, director = director)
                     success = true
                 }
                 success
@@ -574,14 +575,14 @@ class ArcadeHorizonGraphStore(
             logger.warn("markRelevant failed for userEmail=$userEmail from=$fromPhraseUid to=$toPhraseUid: ${e.message}")
             false
         }
-    }
+    } }
 
     override suspend fun markSuperseded(
         userEmail: String,
         cycleSeq: Long,
         newerPhraseUid: String,
         olderPhraseUid: String,
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Boolean = coroutineContext[DirectorContext]?.stamp.let { director -> withContext(Dispatchers.IO) {
         try {
             withHorizonWriteLock(db, lockTimeoutMs) {
                 var success = false
@@ -597,7 +598,7 @@ class ArcadeHorizonGraphStore(
                         success = true
                         return@transaction
                     }
-                    RelatedToEdges.createSupersedes(newer.modify(), older.modify(), cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail)
+                    RelatedToEdges.createSupersedes(newer.modify(), older.modify(), cycleSeq, System.currentTimeMillis(), ownerEmail = userEmail, director = director)
                     success = true
                 }
                 success
@@ -609,7 +610,7 @@ class ArcadeHorizonGraphStore(
             logger.warn("markSuperseded failed for userEmail=$userEmail newer=$newerPhraseUid older=$olderPhraseUid: ${e.message}")
             false
         }
-    }
+    } }
 
     override suspend fun stampNewAssertion(
         userEmail: String,
