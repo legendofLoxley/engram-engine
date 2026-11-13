@@ -438,7 +438,10 @@ class GoalRunnerTest {
     @Test
     fun `a major impact replans and stops at the cap with a failure message`() {
         val goal = approvedGoal("Review the open Williams items")
-        server.on("report_goal_step") { n -> FakeModelServer.Reply(stepJson(Triple("note", "Finding $n", "i1"), impact = "major")) }
+        runBlocking { repeat(2) { structure.createItem(user, 1, ItemKind.TASK, "Extra open Williams task number $it", projectUid = williams.uid) } }
+        // Each plan works a different open item, so the replan filter (below) leaves every step in place.
+        server.on("propose_goal_plan") { n -> FakeModelServer.Reply(planJson("Plan $n", refs = listOf("i$n"))) }
+        server.on("report_goal_step") { n -> FakeModelServer.Reply(stepJson(Triple("note", "Finding $n", "i$n"), impact = "major")) }
         val out = run(runner(config { copy(replanCap = 2) }))
         assertEquals(RunOutcome.PAUSED, out.outcome, out.reason)
         assertEquals(3, server.calls("propose_goal_plan"), "the first plan and exactly two replans")
@@ -447,6 +450,25 @@ class GoalRunnerTest {
         assertEquals(WorkState.WAITING, stored(goal.uid).workState)
         assertTrue(thread(goal).any { it.kind == DirectorMessageKind.FAILURE && it.text.contains("major") })
         assertEquals(0, server.calls("record_goal_qc"), "no close-out for a cycle that was stopped")
+    }
+
+    @Test
+    fun `a replan does not redo the open items a finished step already worked`() {
+        approvedGoal("Review the open Williams items")
+        server.on("propose_goal_plan") { n ->
+            FakeModelServer.Reply(if (n == 1) planJson("Step A", refs = listOf("i1")) else buildJsonObject {
+                put("steps", buildJsonArray {
+                    add(buildJsonObject { put("title", "Step B again"); put("kind", "review"); put("instructions", "Review i1 again"); put("items", buildJsonArray { add("i1") }) })
+                    add(buildJsonObject { put("title", "Step C"); put("kind", "review"); put("instructions", "Review i2"); put("items", buildJsonArray { add("i2") }) })
+                })
+            }.toString())
+        }
+        server.on("report_goal_step") { n -> FakeModelServer.Reply(stepJson(Triple("note", "Finding $n", "i${n}"), impact = if (n == 1) "major" else "none")) }
+        val out = run()
+        assertEquals(RunOutcome.COMPLETED, out.outcome, out.reason)
+        assertEquals(1, out.replans)
+        assertEquals(listOf("Step A", "Step C"), out.steps.map { it.title }, "the second plan's step on i1 was dropped, the one on i2 ran")
+        assertEquals(2, server.calls("report_goal_step"))
     }
 
     @Test

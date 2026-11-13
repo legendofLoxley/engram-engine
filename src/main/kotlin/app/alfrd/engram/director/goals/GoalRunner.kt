@@ -381,6 +381,9 @@ class GoalRunner(
                 is Yielded.Done -> r.value.also { accountPlan(it.usage) }.let { o -> o.plan ?: return failedCycle("plan_failed", "Cycle ${cycle.number} could not make a plan (${o.failure}).") }
             }
             planRejected = plan.rejected
+            // Open items a finished step has already worked this cycle: a replan does not do them again, whatever it says.
+            val worked = HashSet<String>()
+            fun withoutWorked(p: GoalPlan) = p.copy(steps = p.steps.map { it.copy(refs = it.refs - worked) }.filter { it.refs.isNotEmpty() || it.kind == StepKind.ASK }.mapIndexed { i, st -> st.copy(number = i + 1) })
             var index = 0
             var failures = 0
             val ranTitles = ArrayList<String>()
@@ -393,7 +396,7 @@ class GoalRunner(
                         GoalPrompts.ItemView(r, item, GoalEvidence.related(item, world.pool, world.df, clock(), config.evidencePerItem).map { scope.evidenceRef(it) to it })
                     }
                 }.take(config.stepItems)
-                val context = GoalPrompts.step(goal, step, views, stepLines, config.maxItemsPerStep, config.stepPromptChars, clock())
+                val context = GoalPrompts.step(goal, step, views, stepLines, config.maxItemsPerStep, config.stepPromptChars, clock(), config.stepItems)
                 context.shownRefs.forEach { r -> scope.resolve(r)?.let { refInfo.putIfAbsent(r, RefInfo(it.uid, it.kind.name.lowercase(), it.workState?.wire() ?: "note", it.text)) } }
                 val openShown = context.shownRefs.count { it.startsWith("i") }
                 val result = if (openShown == 0 && step.kind != StepKind.ASK) {
@@ -403,6 +406,7 @@ class GoalRunner(
                     is Yielded.Done -> r.value
                 }
                 usage += result.usage
+                if (result.outcome == StepOutcome.DONE) worked += context.shownRefs.filter { it.startsWith("i") }
                 val written = writeStep(step, result, scope, known, context.shownRefs)
                 ranTitles += step.title
                 stepLines += "step ${step.number} ${step.title}: ${result.summary.ifEmpty { result.failure ?: "" }}"
@@ -427,10 +431,10 @@ class GoalRunner(
                     replans++
                     mustStop(false)?.let { return yielded(it) }
                     val version = plan.version + 1
-                    plan = when (val r = yieldable { planner.plan(planPrompt(ranTitles, note), version, scope) }) {
+                    plan = withoutWorked(when (val r = yieldable { planner.plan(planPrompt(ranTitles, note), version, scope) }) {
                         is Yielded.Stopped -> return yielded(r.why)
                         is Yielded.Done -> r.value.also { accountPlan(it.usage) }.let { o -> o.plan ?: return failedCycle("plan_failed", "Cycle ${cycle.number} could not replan (${o.failure}).") }
-                    }
+                    })
                     index = 0
                     continue
                 }

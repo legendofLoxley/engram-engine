@@ -104,7 +104,7 @@ object GoalPrompts {
 
     val PLAN = """$RULES
 
-Plan the next piece of work for the goal. Write a short list of steps (at most the number you are given). Each step works a few of the project's OPEN items, named by their refs (i1, i2 ...), at most eight. Code gives every step the related closed items and notes of the project as evidence, so you never name evidence and never plan a step to find it. Read the DONE WHEN and plan so it can be checked from what your steps write. Skip anything the Director has already written (it is listed separately). A step is one of: review (work the named items against their evidence and write findings or proposals), propose (write new tasks), ask (write one question for the owner's channel; it needs no items). Never plan to delete, overwrite, edit, resolve or re-file anything. Answer only by calling the tool."""
+Plan the next piece of work for the goal. Write a short list of steps (at most the number you are given). Each step works a few of the project's OPEN items, named by their refs (i1, i2 ...), at most eight. Code gives every step the related closed items and notes of the project as evidence, so you never name evidence and never plan a step to find it. Read the DONE WHEN and plan so it can be checked from what your steps write. Skip anything the Director has already written (it is listed separately). A step is one of: review (work the named items against their evidence and write findings or proposals), propose (write new tasks), ask (write one question for the owner's channel; it needs no items). Do not plan a step to present, summarize or hand over the results: the close-out does that. Never plan to delete, overwrite, edit, resolve or re-file anything. Answer only by calling the tool."""
 
     val STEP = """$RULES
 
@@ -141,7 +141,7 @@ Close out the cycle. Compare what the cycle wrote with the goal's DONE WHEN and 
     /** The prompt of one step, and exactly what it was given: the refs a model may cite, and what was left out for room. */
     class StepContext(val prompt: String, val shownRefs: Set<String>, val leftOutItems: List<String>, val evidenceTrimmed: Int)
 
-    fun step(goal: ItemRecord, step: PlanStep, views: List<ItemView>, earlier: List<String>, maxItems: Int, budgetChars: Int, now: Long): StepContext {
+    fun step(goal: ItemRecord, step: PlanStep, views: List<ItemView>, earlier: List<String>, maxItems: Int, budgetChars: Int, now: Long, maxShown: Int = 8): StepContext {
         val header = buildString {
             appendLine("GOAL: ${GoalText.clean(goal.text, 600)}")
             appendLine("DONE WHEN: ${GoalText.clean(goal.doneWhen ?: "(none)", 800)}")
@@ -168,7 +168,7 @@ Close out the cycle. Compare what the cycle wrote with the goal's DONE WHEN and 
             var text = chunk(evidence)
             // Drop the weakest evidence (the last) until the item fits; an item with no evidence left that still does not fit is left out.
             while (used + text.length > budgetChars && evidence.isNotEmpty()) { evidence = evidence.dropLast(1); trimmed++; text = chunk(evidence) }
-            if (shown.size >= maxItems || used + text.length > budgetChars) { left += view.ref; trimmed += evidence.size; continue }
+            if (shown.size >= maxShown || used + text.length > budgetChars) { left += view.ref; trimmed += evidence.size; continue }
             shown += text; used += text.length; refs += view.ref; evidence.forEach { refs += it.first; seenEvidence += it.first }
         }
         val prompt = buildString {
