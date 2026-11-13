@@ -44,6 +44,17 @@ data class BoardProject(
     val hiddenItems: Int = 0,
 )
 
+/** One goal as the board reads it: open (not done or dropped) and not suppressed. */
+data class BoardGoal(
+    val uid: String,
+    val text: String,
+    /** True once the owner has approved it; false while it is only proposed. */
+    val approved: Boolean,
+    val state: WorkState?,
+    val evidenceAt: Long,
+    val pinned: Boolean = false,
+)
+
 data class BoardArea(val uid: String, val name: String, val pinned: Boolean, val focusWeight: Double)
 
 /**
@@ -71,6 +82,8 @@ data class BoardData(
     val truncated: Boolean = false,
     /** Suppressed items filed under no project. */
     val unfiledHidden: Int = 0,
+    /** Open goals. They are shown in the Goals section, never counted among the open items. */
+    val goals: List<BoardGoal> = emptyList(),
 )
 
 /** What a rendered board cost, and what it shows. */
@@ -300,6 +313,39 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
             }, areaUid = area.uid)
         }
 
+        // ── goals ────────────────────────────────────────────────────────────
+        // Running: approved and going. Waiting for approval: only proposed. Stalled: approved but paused, or open with no evidence for the stale window.
+        // Zero goals renders nothing; with many, the section is the counts plus as many lines as fit its own small budget.
+        class GoalView(val goal: BoardGoal, val bucket: Int)   // 0 stalled, 1 waiting for approval, 2 running
+        val goalViews = data.goals.map { g ->
+            val stalled = g.approved && (g.state == WorkState.WAITING || (now - g.evidenceAt > policy.staleEvidenceDays * 86_400_000L && g.evidenceAt > 0L))
+            GoalView(g, if (!g.approved) 1 else if (stalled) 0 else 2)
+        }.sortedWith(compareBy<GoalView> { it.bucket }.thenBy { it.goal.evidenceAt })
+        val goalHeader: String? = if (goalViews.isEmpty()) null else buildList {
+            goalViews.count { it.bucket == 2 }.takeIf { it > 0 }?.let { add("$it running") }
+            goalViews.count { it.bucket == 1 }.takeIf { it > 0 }?.let { add("$it waiting for approval") }
+            goalViews.count { it.bucket == 0 }.takeIf { it > 0 }?.let { add("$it stalled") }
+        }.joinToString(", ", "Goals: ", ".")
+        fun goalLine(v: GoalView, refs: Map<String, String>?): String {
+            val g = v.goal
+            val mark = when (v.bucket) { 0 -> "!"; 1 -> "?"; else -> "-" }
+            val words = when (v.bucket) {
+                0 -> if (g.state == WorkState.WAITING) "stalled, paused" else "stalled, no evidence since ${Instant.ofEpochMilli(g.evidenceAt).atZone(zone).toLocalDate()}"
+                1 -> "waiting for approval"
+                else -> "running"
+            }
+            return "  $mark ${handle(g.uid, "i", refs)}${q(g.text)}: $words"
+        }
+        // The most lines whose section fits the goal budget (measured with ref-width placeholders); the counts line is always there.
+        val goalShown: List<GoalView> = run {
+            var n = minOf(policy.boardGoalLines, goalViews.size)
+            fun moreLine(k: Int) = (goalViews.size - k).takeIf { it > 0 }?.let { "  - $it more goal${if (it == 1) "" else "s"}; open the project or set_focus on one." }
+            fun section(k: Int) = (listOfNotNull(goalHeader) + goalViews.take(k).map { goalLine(it, null) } + listOfNotNull(moreLine(k))).joinToString("\n")
+            while (n > 0 && HorizonBoards.tokens(section(n), policy) > policy.boardGoalTokens) n--
+            goalViews.take(n)
+        }
+        val moreGoals = goalViews.size - goalShown.size
+
         // ── since last time ──────────────────────────────────────────────────
         fun valueWords(field: String, v: String?): String = when {
             v == null -> "none"
@@ -336,7 +382,12 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
             sb.append("Board as of ${Instant.ofEpochMilli(data.asOf).atZone(zone).toLocalDate()} ${"%02d:%02d".format(Instant.ofEpochMilli(data.asOf).atZone(zone).hour, Instant.ofEpochMilli(data.asOf).atZone(zone).minute)}: ")
             sb.append("$totalProjects project${if (totalProjects == 1) "" else "s"} in ${data.areas.size} area${if (data.areas.size == 1) "" else "s"}, $totalOpen open item${if (totalOpen == 1) "" else "s"}")
             sb.append(if (data.truncated) " (at least; a scan hit its limit).\n" else ".\n")
-            if (totalOpen == 0 && blocks.isEmpty()) sb.append("Nothing is open.\n")
+            if (totalOpen == 0 && blocks.isEmpty() && goalHeader == null) sb.append("Nothing is open.\n")
+            if (goalHeader != null) {
+                sb.append(goalHeader).append('\n')
+                goalShown.forEach { sb.append(goalLine(it, refs)).append('\n') }
+                if (moreGoals > 0) sb.append("  - $moreGoals more goal${if (moreGoals == 1) "" else "s"}; open the project or set_focus on one.\n")
+            }
             if (blocks.isNotEmpty()) {
                 sb.append("Needs attention:\n")
                 blocks.forEach { sb.append(it.render(refs)).append('\n') }
@@ -388,7 +439,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
             chosen += next
         }
         return BoardPlan(
-            itemUids = (chosen.flatMap { it.itemUids } + sinceItemUids).distinct(),
+            itemUids = (goalShown.map { it.goal.uid } + chosen.flatMap { it.itemUids } + sinceItemUids).distinct(),
             policy = policy,
             blocks = chosen,
             total = totalProjects,

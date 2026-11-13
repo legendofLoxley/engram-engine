@@ -21,6 +21,8 @@ enum class ItemKind(val typeName: String) {
     TASK("Task"),
     EVENT("Event"),
     QUESTION("Question"),
+    /** What the owner wants worked on, in a sentence: a [GOAL] is proposed, then approved by the owner, then run by the Director. See [GoalApproval]. */
+    GOAL("Goal"),
 }
 
 /**
@@ -110,7 +112,19 @@ data class ItemExtras(
     val fromSource: Boolean = false,
     /** When the item's evidence clock starts, instead of now: a source's `last_edited`. Bounded by now at the write; null means now. */
     val evidenceAt: Long? = null,
+    /** A goal's check that anyone could apply to see it is met. Locked once the goal is approved. Ignored for other kinds. */
+    val doneWhen: String? = null,
+    /** A goal's condition for giving up. Ignored for other kinds. */
+    val stopWhen: String? = null,
+    /** A goal's budget, in the owner's words (a count of cycles, an hour limit). Ignored for other kinds. */
+    val budget: String? = null,
 )
+
+/** What approving a goal came to. */
+enum class GoalApproval { APPROVED, ALREADY_APPROVED, NOT_A_GOAL, NOT_FOUND, MISSING_QUOTE }
+
+/** What editing a goal's fields came to. `done_when` cannot change once a goal is approved: stop the goal and propose a new one. */
+enum class GoalEdit { EDITED, UNCHANGED, DONE_WHEN_LOCKED, NOT_A_GOAL, NOT_FOUND }
 
 /** Zoom levels a focus can carry: broad, one container, one item's neighborhood. */
 enum class FocusZoom {
@@ -193,6 +207,11 @@ data class ItemRecord(
     /** When anything last confirmed the item (see [HorizonStructureStore.touchEvidence]); null when never stamped, in which case [evidenceAt] falls back. */
     val lastEvidenceAt: Long? = null,
     val updatedAt: Long = 0L,
+    /** A goal only: `proposed` or `approved` (the owner's say-so). Null for every other kind. */
+    val approval: String? = null,
+    val doneWhen: String? = null,
+    val stopWhen: String? = null,
+    val budget: String? = null,
 ) {
     /** When the item was last confirmed: its stamp, else when it was last changed, else when it was made. */
     val evidenceAt: Long get() = lastEvidenceAt ?: updatedAt.takeIf { it > 0L } ?: createdAt
@@ -295,6 +314,18 @@ interface HorizonStructureStore {
      * The coarse `status` follows. A no-op when nothing would change. False for a fact, a container, or a target the user doesn't own.
      */
     suspend fun setState(userEmail: String, cycleSeq: Long, targetUid: String, state: WorkState, nudge: TimeValue? = null, waitingOn: String? = null): Boolean
+
+    /**
+     * The owner approves a proposed goal. [quote] is the owner's own words (the caller has already checked it against what they said) and is kept on the goal.
+     * Approval is the owner's say-so and nothing else sets it. A goal that is already approved is left as it is ([GoalApproval.ALREADY_APPROVED]).
+     */
+    suspend fun approveGoal(userEmail: String, cycleSeq: Long, targetUid: String, quote: String): GoalApproval
+
+    /**
+     * Changes a goal's `done_when`, `stop_when` or budget; a null argument leaves that field alone. Once the goal is approved `done_when` is locked: asking for a
+     * different one is refused as a whole ([GoalEdit.DONE_WHEN_LOCKED], nothing written), because the bar must not move after the work.
+     */
+    suspend fun editGoal(userEmail: String, cycleSeq: Long, targetUid: String, doneWhen: String? = null, stopWhen: String? = null, budget: String? = null): GoalEdit
 
     /**
      * Records that the item was confirmed just now ("yes, still live"): sets `lastEvidenceAt` and nothing else. True for a task, event or
@@ -437,6 +468,8 @@ interface HorizonStructureStore {
 }
 
 private const val MAX_WAITING_ON = 120
+private const val MAX_GOAL_FIELD = 500
+private const val MAX_GOAL_BUDGET = 200
 
 /** One `PROGRESS_OF` edge: [fromUid] is progress on [toUid]. */
 data class ProgressLink(val fromUid: String, val toUid: String, val createdAt: Long, val cycleSeq: Long, val writer: String)
@@ -553,6 +586,13 @@ class ArcadeHorizonStructureStore(
                     if (dueAt != null) { set(property, dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
                 }
                 if (kind == ItemKind.QUESTION) set("askedBy", askedBy)
+                if (kind == ItemKind.GOAL) {
+                    // A goal is always proposed when it is written; only the owner's approval (see approveGoal) makes it approved.
+                    set("approval", "proposed")
+                    extras.doneWhen?.trim()?.takeIf { it.isNotBlank() }?.let { set("doneWhen", it.take(MAX_GOAL_FIELD)) }
+                    extras.stopWhen?.trim()?.takeIf { it.isNotBlank() }?.let { set("stopWhen", it.take(MAX_GOAL_FIELD)) }
+                    extras.budget?.trim()?.takeIf { it.isNotBlank() }?.let { set("budget", it.take(MAX_GOAL_BUDGET)) }
+                }
                 if (ItemKinds.of(kind).carriesState) {
                     // The state is the item's own; `status` is its coarse open/resolved projection (indexed, and what older readers use).
                     val state = extras.state ?: WorkState.OPEN
@@ -664,8 +704,62 @@ class ArcadeHorizonStructureStore(
         mutate("setState", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
             if (!ItemKinds.isStateful(target.typeName)) return@mutate false
+            // A goal runs only once the owner has approved it.
+            if (target.typeName == ItemKind.GOAL.typeName && state == WorkState.ACTIVE && target.get("approval") != "approved") {
+                logger.warn("setState: goal {} is not approved; it cannot be marked running", targetUid)
+                return@mutate false
+            }
             applyState(userEmail, target, state, nudge, waitingOn)
             true
+        }
+
+    override suspend fun approveGoal(userEmail: String, cycleSeq: Long, targetUid: String, quote: String): GoalApproval =
+        mutate("approveGoal", GoalApproval.NOT_FOUND) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate GoalApproval.NOT_FOUND
+            if (target.typeName != ItemKind.GOAL.typeName) return@mutate GoalApproval.NOT_A_GOAL
+            if (quote.isBlank()) return@mutate GoalApproval.MISSING_QUOTE
+            if (target.get("approval") == "approved") return@mutate GoalApproval.ALREADY_APPROVED
+            val now = System.currentTimeMillis()
+            target.modify().apply {
+                set("approval", "approved")
+                set("approvedAt", now)
+                set("approvalQuote", quote.trim().take(MAX_GOAL_FIELD))
+                set("lastEvidenceAt", now)
+                set("updatedAt", now)
+                save()
+            }
+            recordChange(userEmail, target, "approval", "proposed", "approved")
+            GoalApproval.APPROVED
+        }
+
+    override suspend fun editGoal(userEmail: String, cycleSeq: Long, targetUid: String, doneWhen: String?, stopWhen: String?, budget: String?): GoalEdit =
+        mutate("editGoal", GoalEdit.NOT_FOUND) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate GoalEdit.NOT_FOUND
+            if (target.typeName != ItemKind.GOAL.typeName) return@mutate GoalEdit.NOT_A_GOAL
+            val newDone = doneWhen?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_FIELD)
+            val newStop = stopWhen?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_FIELD)
+            val newBudget = budget?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_BUDGET)
+            val oldDone = target.get("doneWhen") as? String
+            val oldStop = target.get("stopWhen") as? String
+            val oldBudget = target.get("budget") as? String
+            // The bar does not move after approval, whatever else is asked in the same call.
+            if (newDone != null && newDone != oldDone && target.get("approval") == "approved") return@mutate GoalEdit.DONE_WHEN_LOCKED
+            val changeDone = newDone != null && newDone != oldDone
+            val changeStop = newStop != null && newStop != oldStop
+            val changeBudget = newBudget != null && newBudget != oldBudget
+            if (!changeDone && !changeStop && !changeBudget) return@mutate GoalEdit.UNCHANGED
+            val now = System.currentTimeMillis()
+            target.modify().apply {
+                if (changeDone) set("doneWhen", newDone)
+                if (changeStop) set("stopWhen", newStop)
+                if (changeBudget) set("budget", newBudget)
+                set("updatedAt", now)
+                save()
+            }
+            if (changeDone) recordChange(userEmail, target, "doneWhen", oldDone, newDone)
+            if (changeStop) recordChange(userEmail, target, "stopWhen", oldStop, newStop)
+            if (changeBudget) recordChange(userEmail, target, "budget", oldBudget, newBudget)
+            GoalEdit.EDITED
         }
 
     override suspend fun setTiming(userEmail: String, cycleSeq: Long, targetUid: String, dueKind: DueKind?, nudge: TimeValue?): Boolean =
@@ -1239,6 +1333,10 @@ class ArcadeHorizonStructureStore(
             attention = attentionOf(),
             sourceQuote = get("sourceQuote") as? String,
             askedBy = if (kind == ItemKind.QUESTION) get("askedBy") as? String else null,
+            approval = if (kind == ItemKind.GOAL) (get("approval") as? String ?: "proposed") else null,
+            doneWhen = if (kind == ItemKind.GOAL) get("doneWhen") as? String else null,
+            stopWhen = if (kind == ItemKind.GOAL) get("stopWhen") as? String else null,
+            budget = if (kind == ItemKind.GOAL) get("budget") as? String else null,
             // SQL, not getVertices(IN, "ASSERTS"): ASSERTS edges are unidirectional, so incoming traversal is silently empty (see HorizonOwnership).
             channelSourced = db.query("sql", "SELECT count(*) AS n FROM ASSERTS WHERE @in.uid = :u AND @out.type = :t", mapOf("u" to (get("uid") as String), "t" to CHANNEL_SOURCED_SOURCE_TYPE))
                 .use { rs -> rs.hasNext() && (rs.next().getProperty<Number>("n")?.toLong() ?: 0L) > 0 },

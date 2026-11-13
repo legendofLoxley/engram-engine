@@ -71,6 +71,10 @@ data class RecordItem(
     val happenedAt: Long? = null,
     val happenedHasTime: Boolean = false,
     val waitingOn: String? = null,
+    /** A goal's check that anyone could apply to see it is met; locked once the goal is approved. Only meaningful for a goal. */
+    val doneWhen: String? = null,
+    val stopWhen: String? = null,
+    val budget: String? = null,
 ) : HorizonOperation { override val verb get() = "record_item" }
 
 @Serializable
@@ -89,6 +93,20 @@ data class SetState(
     val nudgeHasTime: Boolean = false,
     val waitingOn: String? = null,
 ) : HorizonOperation { override val verb get() = "set_state" }
+
+/** The owner approves a proposed goal. The quote is their own words; nothing else makes a goal approved. */
+@Serializable
+data class ApproveGoal(val targetUid: String, override val quote: String) : HorizonOperation { override val verb get() = "approve_goal" }
+
+/** Changes a goal's `done_when`, `stop_when` or budget. Once the goal is approved `done_when` cannot change: stop the goal and propose a new one. */
+@Serializable
+data class EditGoal(
+    val targetUid: String,
+    override val quote: String,
+    val doneWhen: String? = null,
+    val stopWhen: String? = null,
+    val budget: String? = null,
+) : HorizonOperation { override val verb get() = "edit_goal" }
 
 /** "Yes, still live": refreshes when the item was last confirmed, and changes nothing else. */
 @Serializable
@@ -368,9 +386,12 @@ object OperationParser {
                     "event" -> ItemKind.EVENT
                     "fact" -> ItemKind.FACT
                     "question" -> ItemKind.QUESTION
+                    "goal" -> ItemKind.GOAL
                     else -> return One.Rejected("unknown_item_kind")
                 }
-                if ((kind == ItemKind.FACT || kind == ItemKind.EVENT) && quote.endsWith("?")) return One.Rejected("question_detected")
+                if ((kind == ItemKind.FACT || kind == ItemKind.EVENT || kind == ItemKind.GOAL) && quote.endsWith("?")) return One.Rejected("question_detected")
+                val goalFields = listOf("done_when", "stop_when", "budget").map { obj.str(it)?.trim()?.takeIf { v -> v.isNotBlank() } }
+                if (kind != ItemKind.GOAL && goalFields.any { it != null }) return One.Rejected("not_for_a_goal_field")
                 val projectRaw = obj.str("project")?.trim()?.takeIf { it.isNotBlank() }
                 var projectUid: String? = null
                 var projectName: String? = null
@@ -387,12 +408,15 @@ object OperationParser {
                 val state = obj.str("state")?.let { WorkState.fromWire(it) ?: return One.Rejected("unknown_state") }
                 val dueKind = obj.str("due_kind")?.let { DueKind.fromWire(it) ?: return One.Rejected("unknown_due_kind") }
                 // The state and time fields belong to tasks, events and questions; a fact has only the moment it happened.
+                // A goal is written as proposed. It becomes approved by approve_goal and running by the Director, never by the way it is recorded.
+                if (kind == ItemKind.GOAL && state != null && state != WorkState.OPEN) return One.Rejected("goal_starts_proposed")
                 if (kind == ItemKind.FACT && (state != null || dueKind != null || obj.str("waiting_on") != null || obj.str("nudge") != null || obj.str("starts") != null)) return One.Rejected("not_for_a_fact")
                 One.Ok(
                     RecordItem(
                         kind = kind,
                         quote = quote,
-                        title = if (kind == ItemKind.TASK || kind == ItemKind.EVENT) acceptableTitle(obj.str("title"), quote) else null,
+                        title = if (kind == ItemKind.TASK || kind == ItemKind.EVENT || kind == ItemKind.GOAL) acceptableTitle(obj.str("title"), quote) else null,
+                        doneWhen = goalFields[0], stopWhen = goalFields[1], budget = goalFields[2],
                         projectUid = projectUid,
                         projectName = projectName,
                         dueAt = parseWhen(obj.str("due"), zone, endOfDayForDateOnly = kind != ItemKind.EVENT),
@@ -428,7 +452,9 @@ object OperationParser {
                 val item = snapshot.item(obj.str("item"))
                 // Only a task, event or question has a state (a plain fact or a project does not).
                 if (item == null || item.kind == ItemKind.FACT) return One.Rejected("not_resolvable")
-                val state = WorkState.fromWire(obj.str("state")) ?: return One.Rejected("unknown_state")
+                // A goal reads in its own words: running is active, paused is waiting, stopped is dropped.
+                val goalWord = if (item.kind == ItemKind.GOAL) when (obj.str("state")?.trim()?.lowercase()) { "running" -> WorkState.ACTIVE; "paused" -> WorkState.WAITING; "stopped" -> WorkState.DROPPED; else -> null } else null
+                val state = goalWord ?: WorkState.fromWire(obj.str("state")) ?: return One.Rejected("unknown_state")
                 if (quote.endsWith("?")) return One.Rejected("question_detected")
                 if (state == WorkState.DONE) {
                     // Finishing something is held to the same guard as resolve_item: a negated clause never closes real work.
@@ -452,9 +478,29 @@ object OperationParser {
                 if (quote.endsWith("?")) return One.Rejected("question_detected")
                 One.Ok(ConfirmItem(target, quote))
             }
+            "approve_goal" -> {
+                val item = snapshot.item(obj.str("item")) ?: return One.Rejected("unknown_ref")
+                if (item.kind != ItemKind.GOAL) return One.Rejected("not_a_goal")
+                // Approval is the owner's say-so: a question, or a clause that says no, is not one.
+                val clause = clauseContaining(utterance, quote)
+                if (quote.endsWith("?") || clause.trim().endsWith("?")) return One.Rejected("question_detected")
+                if (NEGATION_REGEX.containsMatchIn(clause)) return One.Rejected("negation_marker_detected")
+                One.Ok(ApproveGoal(item.uid, quote))
+            }
+            "edit_goal" -> {
+                val item = snapshot.item(obj.str("item")) ?: return One.Rejected("unknown_ref")
+                if (item.kind != ItemKind.GOAL) return One.Rejected("not_a_goal")
+                if (quote.endsWith("?")) return One.Rejected("question_detected")
+                val fields = listOf("done_when", "stop_when", "budget").map { obj.str(it)?.trim()?.takeIf { v -> v.isNotBlank() } }
+                if (fields.all { it == null }) return One.Rejected("nothing_to_change")
+                One.Ok(EditGoal(item.uid, quote, fields[0], fields[1], fields[2]))
+            }
             "correct_item" -> {
                 val ref = obj.str("item")
                 val item = snapshot.item(ref) ?: return One.Rejected("unknown_or_unsupported_ref")
+                // A correction writes a new item and closes the old one. A goal is not corrected that way: edit_goal changes what may change, and a goal
+                // whose bar must change is stopped and proposed again.
+                if (item.kind == ItemKind.GOAL) return One.Rejected("goal_uses_edit_goal")
                 if (quote.endsWith("?")) return One.Rejected("question_detected")
                 val title = if (item.kind == ItemKind.TASK || item.kind == ItemKind.EVENT) acceptableTitle(obj.str("title"), quote, item.text) else null
                 val dueKind = obj.str("due_kind")?.let { DueKind.fromWire(it) ?: return One.Rejected("unknown_due_kind") }

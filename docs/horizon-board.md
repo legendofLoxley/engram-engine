@@ -69,6 +69,22 @@ A casual mention fades by the selector's own function (`HorizonPolicy.nudgeStren
 Staleness is the existing rule, called from one place: `StateRules.stale` (open or active, due date passed, no evidence for more than `staleEvidenceDays`,
 default 14). A soft stale item is asked about; a hard one keeps its overdue alarm. The assembler and the board both call it.
 
+## Goals
+
+A goal is an item kind (`goal`) that the owner proposes and approves; the board shows them in their own section, after the one-line summary and before "Needs attention". Zero goals renders nothing.
+
+```
+Goals: 1 running, 1 waiting for approval, 1 stalled.
+  ! i4 "Review the open Williams items": stalled, no evidence since 2026-10-01
+  ? i7 "Propose project tags": waiting for approval
+  - i2 "Tidy the import": running
+```
+
+- Running: approved, and open or active. Waiting for approval: only proposed. Stalled: approved but paused (waiting), or with no evidence for the stale window. Stalled lines come first, then waiting for approval, then running.
+- The section is bounded on its own: the counts line, then at most `boardGoalLines` (4) goal lines, and the whole section within `boardGoalTokens` (150) tokens however many goals there are. What is left out is counted ("N more goals").
+- Goals are not counted among the open items.
+- A goal's state words: running is active, paused is waiting, done is done, stopped is dropped (`set_state` accepts both). Running needs approval.
+
 ## Settings
 
 | Setting | Default | Environment override |

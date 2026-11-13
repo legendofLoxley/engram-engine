@@ -105,6 +105,7 @@ class ArcadeBoardSource(
         val itemInfo = HashMap<String, Pair<String, String?>>()   // uid to (text, project uid)
         var newItems = 0
         for (spec in ItemKinds.stateful()) {
+            if (spec.kind == ItemKind.GOAL) continue   // goals have their own section, read below
             var seen = 0
             db.query("sql", "SELECT FROM ${spec.typeName} WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.boardScanLimit}", mapOf("e" to email)).use { rs ->
                 while (rs.hasNext()) {
@@ -140,6 +141,30 @@ class ArcadeBoardSource(
             if (seen >= policy.boardScanLimit) truncated = true
         }
 
+        // Goals: open ones, not suppressed, not under a done or silenced project. They appear in the Goals section and are not counted as open items.
+        val goals = mutableListOf<BoardGoal>()
+        db.query("sql", "SELECT FROM Goal WHERE ownerEmail = :e AND status = 'open' LIMIT ${policy.boardScanLimit}", mapOf("e" to email)).use { rs ->
+            var seen = 0
+            while (rs.hasNext()) {
+                val v = rs.next().toElement().asVertex()
+                seen++
+                val uid = v.get("uid") as? String ?: continue
+                val project = v.getVertices(Vertex.DIRECTION.OUT, "PART_OF").firstOrNull { it.typeName == "Project" }
+                if (project != null && (project.get("uid") as? String) !in projects) continue
+                if (attention(v) == "suppressed") continue
+                val createdAt = (v.get("createdAt") as? Number)?.toLong() ?: 0L
+                if (createdAt > sinceAt) newItems++
+                goals += BoardGoal(
+                    uid = uid, text = v.get("text") as? String ?: "", approved = v.get("approval") == "approved",
+                    state = WorkState.of(v.get("state") as? String, v.get("status") as? String),
+                    evidenceAt = (v.get("lastEvidenceAt") as? Number)?.toLong() ?: (v.get("updatedAt") as? Number)?.toLong() ?: createdAt,
+                    pinned = attention(v) == "pinned",
+                )
+                itemInfo[uid] = (v.get("text") as? String ?: "") to (project?.get("uid") as? String)
+            }
+            if (seen >= policy.boardScanLimit) truncated = true
+        }
+
         // Changes since this channel last read. A target that is no longer open (a task just marked done) is looked up by its uid so it can still be named.
         val log = ChangeLog(db)
         val records = log.since(email, sinceAt, policy.boardChangeScanLimit)
@@ -169,7 +194,7 @@ class ArcadeBoardSource(
             projects = projects.values.map { p ->
                 BoardProject(p.uid, p.name, p.areaUid, p.pinned, maxOf(nudges[p.uid] ?: 0.0, p.areaUid?.let { nudges[it] } ?: 0.0), p.dueAt, byProject[p.uid].orEmpty(), hiddenByProject[p.uid] ?: 0)
             },
-            unfiled = unfiled, changes = changes, newItems = newItems, truncated = truncated, unfiledHidden = unfiledHidden,
+            unfiled = unfiled, changes = changes, newItems = newItems, truncated = truncated, unfiledHidden = unfiledHidden, goals = goals,
         )
     }
 }

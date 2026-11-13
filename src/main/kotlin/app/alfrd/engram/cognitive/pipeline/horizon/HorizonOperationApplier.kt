@@ -238,6 +238,27 @@ class HorizonOperationApplier(
             }
             AppliedOperation(op, done, if (done) "$phrase: $label$nudgeNote$note" else "Could not change the state of $label")
         }
+        is ApproveGoal -> {
+            val label = labelOf(userEmail, op.targetUid)
+            val outcome = structure.approveGoal(userEmail, cycleSeq, op.targetUid, op.quote)
+            when (outcome) {
+                GoalApproval.APPROVED -> AppliedOperation(op, true, "Approved goal: $label")
+                GoalApproval.ALREADY_APPROVED -> AppliedOperation(op, true, "Already approved: $label")
+                GoalApproval.NOT_A_GOAL -> AppliedOperation(op, false, "Could not approve $label: it is not a goal")
+                GoalApproval.MISSING_QUOTE -> AppliedOperation(op, false, "Could not approve $label: approval needs the owner's own words")
+                GoalApproval.NOT_FOUND -> AppliedOperation(op, false, "Could not approve $label")
+            }
+        }
+        is EditGoal -> {
+            val label = labelOf(userEmail, op.targetUid)
+            when (structure.editGoal(userEmail, cycleSeq, op.targetUid, op.doneWhen, op.stopWhen, op.budget)) {
+                GoalEdit.EDITED -> AppliedOperation(op, true, "Changed goal: $label")
+                GoalEdit.UNCHANGED -> AppliedOperation(op, true, "Nothing to change on goal: $label")
+                GoalEdit.DONE_WHEN_LOCKED -> AppliedOperation(op, false, "Refused: the done-when of $label is locked because the goal is approved. Stop the goal and propose a new one to change it")
+                GoalEdit.NOT_A_GOAL -> AppliedOperation(op, false, "Could not change $label: it is not a goal")
+                GoalEdit.NOT_FOUND -> AppliedOperation(op, false, "Could not change $label")
+            }
+        }
         is ConfirmItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val done = structure.touchEvidence(userEmail, cycleSeq, op.targetUid)
@@ -295,6 +316,7 @@ class HorizonOperationApplier(
                 state = op.state, dueKind = op.dueKind, dueHasTime = op.dueHasTime,
                 starts = op.startsAt?.let { TimeValue(it, op.startsHasTime) }, nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) },
                 happened = op.happenedAt?.let { TimeValue(it, op.happenedHasTime) }, waitingOn = op.waitingOn,
+                doneWhen = op.doneWhen, stopWhen = op.stopWhen, budget = op.budget,
                 fromSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE,
                 evidenceAt = evidenceAt.takeIf { sourceType == CHANNEL_SOURCED_SOURCE_TYPE },
             )
@@ -324,6 +346,8 @@ class HorizonOperationApplier(
         userEmail: String, cycleSeq: Long, opKey: String, op: RecordItem, createdContainerUids: MutableMap<String, String>, zone: ZoneId,
         sourceType: String,
     ): AppliedOperation {
+        // A goal is the owner's say-so; a document cannot propose one for them.
+        if (op.kind == ItemKind.GOAL) return AppliedOperation(op, false, "Could not record a goal from a source: goals come from the owner's own words")
         val store = sources ?: return AppliedOperation(op, false, "Could not record from a source: no source store")
         // The chunk and the quote are checked on every path, a replay included: a replay is answered "already there" only for a quote
         // that is really in the chunk.

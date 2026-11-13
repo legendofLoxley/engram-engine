@@ -344,6 +344,10 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             "nudge" to str("For a waiting item: the date to check in on it, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
             "waiting_on" to str("For a waiting item: who or what it waits on, in a few words."),
             "happened" to str("When an event or fact took place, if known: ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+            "kind" to enumOf("task", "event", "fact", "question", "goal"),
+            "done_when" to str("For a goal: a check anyone could apply to see it is met. Locked once the goal is approved."),
+            "stop_when" to str("For a goal: when to give up on it."),
+            "budget" to str("For a goal: how much effort it may take, in the owner's words."),
         )
 
         private fun verbOf(variant: JsonObject): String? =
@@ -361,10 +365,26 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         /** `set_state`: move an item to open, active, waiting, done or dropped. `resolve_item` and `reopen_item` are this with done and open. */
         private val SET_STATE_VARIANT: JsonObject = variant("set_state", listOf("item", "state", "quote")) {
             mapOf(
-                "item" to str("Ref of a task, event or question."),
-                "state" to enumOf(*STATE_VALUES),
+                "item" to str("Ref of a task, event, question or goal. For a goal, running is active, paused is waiting and stopped is dropped."),
+                "state" to enumOf(*STATE_VALUES, "running", "paused", "stopped"),
                 "nudge" to str("For waiting: the date to check in, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
                 "waiting_on" to str("For waiting: who or what it waits on, in a few words. Waiting is accepted without it."),
+                "quote" to QUOTE,
+            )
+        }
+
+        /** `approve_goal`: the owner says a proposed goal may go ahead. The quote must be their words; nothing else makes a goal approved. */
+        private val APPROVE_GOAL_VARIANT: JsonObject = variant("approve_goal", listOf("item", "quote")) {
+            mapOf("item" to str("Ref of a proposed goal the owner approves."), "quote" to QUOTE)
+        }
+
+        /** `edit_goal`: change a goal's done-when, stop-when or budget. The done-when cannot change once the goal is approved. */
+        private val EDIT_GOAL_VARIANT: JsonObject = variant("edit_goal", listOf("item", "quote")) {
+            mapOf(
+                "item" to str("Ref of a goal."),
+                "done_when" to str("New done-when. Refused once the goal is approved: stop it and propose a new goal."),
+                "stop_when" to str("New stop-when."),
+                "budget" to str("New budget."),
                 "quote" to QUOTE,
             )
         }
@@ -416,7 +436,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         when (verbOf(v)) {
                             "record_item" -> add(OWNER_RECORD_VARIANT)
                             "correct_item" -> add(OWNER_CORRECT_VARIANT)
-                            "reopen_item" -> { add(v); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT) }
+                            "reopen_item" -> { add(v); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT); add(APPROVE_GOAL_VARIANT); add(EDIT_GOAL_VARIANT) }
                             else -> add(v)
                         }
                     }

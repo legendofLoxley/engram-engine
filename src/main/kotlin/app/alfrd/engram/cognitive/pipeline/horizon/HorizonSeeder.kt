@@ -67,6 +67,8 @@ class HorizonSeeder(
                 is ReopenItem -> nudge(op.targetUid, 1.0, "touched", label)
                 is SetState -> nudge(op.targetUid, 1.0, "touched", label)
                 is ConfirmItem -> nudge(op.targetUid, 1.0, "touched", label)
+                is ApproveGoal -> nudge(op.targetUid, 1.0, "touched", label)
+                is EditGoal -> nudge(op.targetUid, 1.0, "touched", label)
                 is FileItem -> { nudge(op.targetUid, 1.0, "touched", label); nudge(op.intoUid, 1.0, "touched", label) }
                 is SetAttention -> nudge(op.targetUid, 1.0, "touched", label)
                 is LinkItems -> { nudge(op.fromUid, 1.0, "touched", label); nudge(op.toUid, 1.0, "touched", label) }

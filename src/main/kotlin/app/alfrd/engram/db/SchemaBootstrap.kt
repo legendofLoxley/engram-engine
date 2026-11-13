@@ -192,6 +192,19 @@ object SchemaBootstrap {
                 vt.createProperty("resolvedAt", Type.LONG)      // nullable
             }
 
+            ensureVertex(schema, "Goal") { vt ->
+                vt.addSuperType("Phrase")
+                vt.createProperty("dueAt", Type.LONG)           // nullable, epoch millis
+                vt.createProperty("status", Type.STRING)        // coarse projection of `state`: open | resolved (done or dropped)
+                vt.createProperty("resolvedAt", Type.LONG)      // nullable
+                vt.createProperty("approval", Type.STRING)      // proposed | approved: the owner's say-so, set only by approving the goal
+                vt.createProperty("approvedAt", Type.LONG)      // nullable
+                vt.createProperty("approvalQuote", Type.STRING) // the owner's words that approved it
+                vt.createProperty("doneWhen", Type.STRING)      // a check anyone could apply; locked once approved
+                vt.createProperty("stopWhen", Type.STRING)
+                vt.createProperty("budget", Type.STRING)
+            }
+
             // Durable per-user cycle-sequence identity and a bounded, checkpointed record of
             // in-flight/completed conversational-cycle requests. See
             // app.alfrd.engram.cognitive.pipeline.horizon.CycleSequencer and RequestLedger. The
@@ -525,7 +538,7 @@ object SchemaBootstrap {
             ensureProperty(schema, "Event",   "resolvedAt",          Type.LONG)
             // Item state and time fields (additive: an item with no `state` reads from `status`, open -> open, resolved -> done).
             // `status` stays as the coarse open/resolved projection of `state` and is what the (ownerEmail, status) index serves.
-            for (type in listOf("Task", "Event", "Question")) {
+            for (type in listOf("Task", "Event", "Question", "Goal")) {
                 ensureProperty(schema, type, "state",          Type.STRING)   // open | active | waiting | done | dropped
                 ensureProperty(schema, type, "dueKind",        Type.STRING)   // hard | soft; absent reads as soft
                 ensureProperty(schema, type, "dueHasTime",     Type.BOOLEAN)  // the due carries a time of day as given (else date only)

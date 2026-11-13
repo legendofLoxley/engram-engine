@@ -18,7 +18,8 @@
                                 "task",
                                 "event",
                                 "fact",
-                                "question"
+                                "question",
+                                "goal"
                             ]
                         },
                         "quote": {
@@ -80,6 +81,18 @@
                         "happened": {
                             "type": "string",
                             "description": "When an event or fact took place, if known: ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."
+                        },
+                        "done_when": {
+                            "type": "string",
+                            "description": "For a goal: a check anyone could apply to see it is met. Locked once the goal is approved."
+                        },
+                        "stop_when": {
+                            "type": "string",
+                            "description": "For a goal: when to give up on it."
+                        },
+                        "budget": {
+                            "type": "string",
+                            "description": "For a goal: how much effort it may take, in the owner's words."
                         }
                     },
                     "required": [
@@ -150,7 +163,7 @@
                         },
                         "item": {
                             "type": "string",
-                            "description": "Ref of a task, event or question."
+                            "description": "Ref of a task, event, question or goal. For a goal, running is active, paused is waiting and stopped is dropped."
                         },
                         "state": {
                             "type": "string",
@@ -159,7 +172,10 @@
                                 "active",
                                 "waiting",
                                 "done",
-                                "dropped"
+                                "dropped",
+                                "running",
+                                "paused",
+                                "stopped"
                             ]
                         },
                         "nudge": {
@@ -195,6 +211,68 @@
                         "item": {
                             "type": "string",
                             "description": "Ref of a task, event or question the owner says is still live."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "approve_goal"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of a proposed goal the owner approves."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "edit_goal"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of a goal."
+                        },
+                        "done_when": {
+                            "type": "string",
+                            "description": "New done-when. Refused once the goal is approved: stop it and propose a new goal."
+                        },
+                        "stop_when": {
+                            "type": "string",
+                            "description": "New stop-when."
+                        },
+                        "budget": {
+                            "type": "string",
+                            "description": "New budget."
                         },
                         "quote": {
                             "type": "string",
