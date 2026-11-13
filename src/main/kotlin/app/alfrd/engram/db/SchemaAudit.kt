@@ -82,11 +82,14 @@ class SchemaAudit(private val db: Database, private val exampleLimit: Int = 5) {
         // ── 1. uid presence and duplicates ───────────────────────────────────
         val noUid = Acc("A1", "vertices with no uid", limit = exampleLimit)
         val dupUid = Acc("A2", "duplicate uids (distinct rows sharing a uid, within a uid family)", limit = exampleLimit)
-        val uidTypes = vertexTypes.filter { hasUidProperty(it) }
+        // A subtype of Source (Email) inherits `uid` rather than declaring it, so it is listed by name; read by exact type, so each row is seen once, as itself.
+        val uidTypes = vertexTypes.filter { hasUidProperty(it) || it.isSubTypeOf("Source") }
         val seen = HashMap<String, MutableMap<String, RID>>() // family -> uid -> first rid
         val dupReported = HashSet<String>()
         // Phrase and its subtypes share one uid index; every other type is its own family.
-        fun family(t: String) = if (t in phraseFamily) "Phrase" else t
+        // A Source and its subtype (Email) likewise share Source's uid index, so a uid used by both is a duplicate.
+        val sourceFamily = vertexTypes.filter { it.name == "Source" || it.isSubTypeOf("Source") }.map { it.name }
+        fun family(t: String) = if (t in phraseFamily) "Phrase" else if (t in sourceFamily) "Source" else t
 
         // ── 2. owner chain: User -TRUSTS-> Source -ASSERTS-> item ────────────
         val emailByUserRid = HashMap<RID, String>()

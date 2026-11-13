@@ -58,6 +58,8 @@ data class SourceInput(
     val suppliedBy: String? = null,
     val url: String? = null,
     val lastEditedAt: String? = null,
+    /** Email only: what the message says about itself (subject, sent time, Gmail ids, sender, recipients). The addresses become nodes and edges. */
+    val email: EmailGraph.Facts? = null,
 )
 
 data class SourceRecord(
@@ -89,6 +91,17 @@ data class IngestResult(
     /** False when this exact content was already there: nothing was written. */
     val created: Boolean,
     val chunksCreated: Int,
+    /**
+     * Email only: the Message-ID was already stored, but this text hashes differently from the stored one. Nothing was written (a Message-ID is one Email,
+     * and the first text stays the evidence); the caller can see that the body it offered was not kept.
+     */
+    val contentChanged: Boolean = false,
+)
+
+/** An Email as the graph holds it: its facts and the addresses on its edges, as stored. */
+data class EmailView(
+    val subject: String?, val sentAt: Long?, val gmailMessageId: String?, val gmailThreadId: String?,
+    val from: String?, val fromName: String?, val to: List<String>, val cc: List<String>, val bcc: List<String>,
 )
 
 /** The claimant, quote and date a linked source item was recorded with. [quote] is null for a link made before the quote was kept. */
@@ -138,15 +151,24 @@ class SourceStore(private val db: Database) {
         require(input.type in TYPES) { "unknown source type" }
         require(input.readMode in READ_MODES) { "readMode must be one of: ${READ_MODES.joinToString(", ")}" }
         require(input.locator.isNotBlank() && input.text.isNotBlank()) { "a source needs a locator and text" }
+        require(input.email == null || input.type == EMAIL) { "email facts belong to an email_message source" }
+        require((input.email?.recipients()?.size ?: 0) <= EmailGraph.MAX_RECIPIENTS) { "an email is stored with at most ${EmailGraph.MAX_RECIPIENTS} recipients" }
         val hash = input.fileSha256 ?: SourceChunker.contentHash(input.text)
         synchronized(LOCK) {
+            if (input.type == EMAIL) {
+                // A Message-ID is one Email whatever its text: the unique index is on (owner, type, locator), so the hash cannot make a second one. A row written
+                // before the subtype existed (a plain Source of this type) is found by the hash path below.
+                findEmail(userEmail, input.locator)?.let {
+                    return IngestResult(it.toRecord(), created = false, chunksCreated = 0, contentChanged = (it.get("contentHash") as? String) != hash)
+                }
+            }
             findSource(userEmail, input.type, input.locator, hash)?.let { return IngestResult(it.toRecord(), created = false, chunksCreated = 0) }
             val user = HorizonOwnership.findUserVertex(db, userEmail) ?: throw IllegalArgumentException("unknown user")
             val drafts = input.chunks ?: if (input.type == EMAIL) SourceChunker.chunkEmail(input.text, "message") else SourceChunker.chunkDocument(input.text)
             require(drafts.isNotEmpty()) { "nothing to chunk" }
             var sourceUid = ""
             db.transaction {
-                val source = db.newVertex("Source").apply {
+                val source = db.newVertex(if (input.type == EMAIL) EmailGraph.EMAIL else "Source").apply {
                     sourceUid = UUID.randomUUID().toString()
                     set("uid", sourceUid)
                     set("name", input.title.ifBlank { input.locator })
@@ -158,6 +180,12 @@ class SourceStore(private val db: Database) {
                     set("readMode", input.readMode)
                     set("ownerEmail", userEmail)
                     input.threadId?.let { set("threadId", it) }
+                    input.email?.let { f ->
+                        f.subject?.takeIf { it.isNotBlank() }?.let { set("subject", it.take(1000)) }
+                        f.sentAt?.let { set("sentAt", it) }
+                        f.gmailMessageId?.takeIf { it.isNotBlank() }?.let { set("gmailMessageId", it.take(200)) }
+                        (f.gmailThreadId ?: input.threadId)?.takeIf { it.isNotBlank() }?.let { set("gmailThreadId", it.take(200)) }
+                    }
                     input.suppliedBy?.let { set("suppliedBy", it); set("readByDirector", false) }
                     input.url?.let { set("url", it) }
                     input.lastEditedAt?.let { set("lastEditedAt", it) }
@@ -198,10 +226,66 @@ class SourceStore(private val db: Database) {
                     }
                     source.newEdge("CONTAINS", chunk, false).apply { set("position", index); save() }
                 }
+                input.email?.let { writeAddresses(userEmail, source, it, now) }
             }
             logger.info("source: stored a {} with {} chunk(s)", input.type, drafts.size)
             return IngestResult(requireNotNull(sourceByUid(userEmail, sourceUid)), created = true, chunksCreated = drafts.size)
         }
+    }
+
+    /**
+     * The Email's sender and recipients as nodes and edges, in the transaction that stores the message. One Email Address node per owner and address, found
+     * or made; one SENT_BY edge for the sender; one SENT_TO edge per recipient and kind (the same address in two kinds gets two edges, a repeat within a kind
+     * one). An address that is not `local@domain` is not recorded (the header said something that is not an address; the message is kept). Nothing here
+     * says whose an address is.
+     */
+    private fun writeAddresses(userEmail: String, email: com.arcadedb.graph.MutableVertex, facts: EmailGraph.Facts, now: Long) {
+        val nodes = HashMap<String, Vertex>()
+        var skipped = 0
+        fun node(address: String): Vertex = nodes.getOrPut(address) {
+            db.query("sql", "SELECT FROM ${EmailGraph.ADDRESS} WHERE ownerEmail = :o AND address = :a", mapOf("o" to userEmail, "a" to address)).use { rs ->
+                if (rs.hasNext()) rs.next().toElement().asVertex()
+                else db.newVertex(EmailGraph.ADDRESS).apply {
+                    set("uid", UUID.randomUUID().toString()); set("ownerEmail", userEmail); set("address", address)
+                    set("domain", EmailGraph.domainOf(address)); set("createdAt", now); save()
+                }
+            }
+        }
+        fun edge(type: String, party: EmailGraph.Party, kind: String?) {
+            val address = EmailGraph.normalize(party.address) ?: run { skipped++; return }
+            email.newEdge(type, node(address), true).apply {
+                set("ownerEmail", userEmail); set("createdAt", now)
+                party.name?.trim()?.takeIf { it.isNotEmpty() }?.let { set("displayName", it.take(200)) }
+                kind?.let { set("kind", it) }
+                save()
+            }
+        }
+        facts.from?.let { edge(EmailGraph.SENT_BY, it, null) }
+        val done = HashSet<Pair<String, String>>()
+        facts.recipients().forEach { (kind, party) ->
+            val address = EmailGraph.normalize(party.address)
+            if (address != null && !done.add(kind to address)) return@forEach
+            edge(EmailGraph.SENT_TO, party, kind)
+        }
+        if (skipped > 0) logger.info("source: {} address(es) in an email's headers were not addresses and were not recorded", skipped)
+    }
+
+    /** The Email for [locator] (its Message-ID), found by the unique (owner, type, locator) index; null when there is none. */
+    private fun findEmail(userEmail: String, locator: String): Vertex? =
+        db.query("sql", "SELECT FROM ${EmailGraph.EMAIL} WHERE ownerEmail = :o AND type = :t AND locator = :l", mapOf("o" to userEmail, "t" to EMAIL, "l" to locator))
+            .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null }
+
+    /** What the graph holds for an Email: its facts and the addresses on its edges. Null when [sourceUid] is not an Email of this user. */
+    fun emailView(userEmail: String, sourceUid: String): EmailView? {
+        val v = db.query("sql", "SELECT FROM ${EmailGraph.EMAIL} WHERE uid = :u AND ownerEmail = :o", mapOf("u" to sourceUid, "o" to userEmail))
+            .use { rs -> if (rs.hasNext()) rs.next().toElement().asVertex() else null } ?: return null
+        val by = v.getEdges(Vertex.DIRECTION.OUT, EmailGraph.SENT_BY).firstOrNull()
+        val sentTo = v.getEdges(Vertex.DIRECTION.OUT, EmailGraph.SENT_TO).map { (it.get("kind") as? String ?: "to") to (it.inVertex.get("address") as? String ?: "") }
+        fun of(kind: String) = sentTo.filter { it.first == kind }.map { it.second }.sorted()
+        return EmailView(
+            v.get("subject") as? String, (v.get("sentAt") as? Number)?.toLong(), v.get("gmailMessageId") as? String, v.get("gmailThreadId") as? String,
+            by?.inVertex?.get("address") as? String, by?.get("displayName") as? String, of("to"), of("cc"), of("bcc"),
+        )
     }
 
     /**

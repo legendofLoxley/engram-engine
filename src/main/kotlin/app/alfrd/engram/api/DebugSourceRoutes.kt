@@ -8,6 +8,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.HorizonOperationApplier
 import app.alfrd.engram.cognitive.pipeline.horizon.ItemKind
 import app.alfrd.engram.cognitive.pipeline.horizon.SourceCommitService
 import app.alfrd.engram.cognitive.pipeline.horizon.SourceItemDraft
+import app.alfrd.engram.db.EmailGraph
 import app.alfrd.engram.db.SourceInput
 import app.alfrd.engram.db.SourceStore
 import com.arcadedb.database.Database
@@ -20,6 +21,22 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 
 @Serializable
+data class DebugParty(val address: String, val name: String? = null)
+
+/** What an email says about itself, as a caller supplies it. Only for `type = email_message`. */
+@Serializable
+data class DebugEmailBody(
+    val subject: String? = null, val sentAt: Long? = null, val gmailMessageId: String? = null, val gmailThreadId: String? = null,
+    val from: DebugParty? = null, val to: List<DebugParty> = emptyList(), val cc: List<DebugParty> = emptyList(), val bcc: List<DebugParty> = emptyList(),
+)
+
+@Serializable
+data class DebugEmailView(
+    val subject: String?, val sentAt: Long?, val gmailMessageId: String?, val gmailThreadId: String?,
+    val from: String?, val fromName: String?, val to: List<String>, val cc: List<String>, val bcc: List<String>,
+)
+
+@Serializable
 data class DebugSourceBody(
     val type: String,
     val locator: String,
@@ -27,6 +44,7 @@ data class DebugSourceBody(
     val text: String,
     val readMode: String = "full",
     val threadId: String? = null,
+    val email: DebugEmailBody? = null,
 )
 
 @Serializable
@@ -47,6 +65,8 @@ data class DebugChunk(
 data class DebugSourceView(
     val uid: String, val type: String, val locator: String, val title: String, val readMode: String, val threadId: String?,
     val contentHash: String, val chunks: List<DebugChunk>,
+    /** Set for an Email source: its facts and the addresses on its SENT_BY and SENT_TO edges. */
+    val email: DebugEmailView? = null,
 )
 
 /**
@@ -85,7 +105,15 @@ fun Application.configureDebugSourceRoutes(
                     val report = try {
                         commit.commit(
                             email,
-                            SourceInput(req.source.type, req.source.locator, req.source.title, req.source.text, req.source.readMode, req.source.threadId),
+                            SourceInput(
+                                req.source.type, req.source.locator, req.source.title, req.source.text, req.source.readMode, req.source.threadId,
+                                email = req.source.email?.let { e ->
+                                    EmailGraph.Facts(
+                                        e.subject, e.sentAt, e.gmailMessageId, e.gmailThreadId, e.from?.let { EmailGraph.Party(it.address, it.name) },
+                                        e.to.map { EmailGraph.Party(it.address, it.name) }, e.cc.map { EmailGraph.Party(it.address, it.name) }, e.bcc.map { EmailGraph.Party(it.address, it.name) },
+                                    )
+                                },
+                            ),
                             req.items.mapIndexed { i, it -> SourceItemDraft(kinds[i]!!, it.text, it.quote, it.chunk, it.claimant) },
                             req.writer,
                         )
@@ -100,7 +128,8 @@ fun Application.configureDebugSourceRoutes(
                     val email = call.userOrRefuse(call.request.queryParameters["syntheticUserId"]) ?: return@get
                     call.respond(HttpStatusCode.OK, store.sources(email).map { s ->
                         DebugSourceView(s.uid, s.type, s.locator, s.title, s.readMode, s.threadId, s.contentHash,
-                            store.chunks(email, s.uid).map { DebugChunk(it.ordinal, it.location, it.text.length, it.text, it.page, it.printedPage, it.section, it.kind, it.extractor, it.ocrConfidence) })
+                            store.chunks(email, s.uid).map { DebugChunk(it.ordinal, it.location, it.text.length, it.text, it.page, it.printedPage, it.section, it.kind, it.extractor, it.ocrConfidence) },
+                            store.emailView(email, s.uid)?.let { DebugEmailView(it.subject, it.sentAt, it.gmailMessageId, it.gmailThreadId, it.from, it.fromName, it.to, it.cc, it.bcc) })
                     })
                 }
                 get("/items/{uid}/provenance") {

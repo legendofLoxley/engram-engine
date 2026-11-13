@@ -111,6 +111,38 @@ class DebugSourceRoutesTest {
     }
 
     @Test
+    fun `an email with its sender and recipients is committed as an Email with address nodes, and the same Message-ID again adds nothing`() = withDb { manager ->
+        val body = """
+            {"syntheticUserId":"sources-route-2","source":{"type":"email_message","locator":"<m7@x.org>","title":"Re: Venue","threadId":"t-7",
+             "text":"The venue costs 3,000 euros.\n\nOn Mon, 2 Mar 2026 at 09:00, Ana <a@x.org> wrote:\n> Is the venue booked?",
+             "email":{"subject":"Re: Venue","sentAt":1700000000000,"gmailMessageId":"g-7","from":{"address":"Ana@X.org","name":"Ana"},
+                      "to":[{"address":"sam@x.org"}],"cc":[{"address":"lee@x.org"}],"bcc":[]}},
+             "items":[{"kind":"fact","text":"Venue costs 3,000 euros","quote":"The venue costs 3,000 euros.","chunk":0}]}
+        """.trimIndent()
+        testApplication {
+            application { module(manager) }
+            suspend fun post(): JsonObject = Json.parseToJsonElement(client.post("/debug/sources/commit") {
+                header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody(body)
+            }.bodyAsText()).jsonObject
+            suspend fun get(path: String) = Json.parseToJsonElement(client.get(path) { header(HttpHeaders.Authorization, auth) }.bodyAsText())
+
+            assertEquals("true", post()["sourceCreated"]!!.jsonPrimitive.content)
+            val s = get("/debug/sources?syntheticUserId=sources-route-2").jsonArray.single().jsonObject
+            assertEquals("email_message", s["type"]!!.jsonPrimitive.content)
+            val e = s["email"]!!.jsonObject
+            assertEquals("Re: Venue", e["subject"]!!.jsonPrimitive.content)
+            assertEquals("ana@x.org", e["from"]!!.jsonPrimitive.content); assertEquals("Ana", e["fromName"]!!.jsonPrimitive.content)
+            assertEquals(listOf("sam@x.org"), e["to"]!!.jsonArray.map { it.jsonPrimitive.content })
+            assertEquals(listOf("lee@x.org"), e["cc"]!!.jsonArray.map { it.jsonPrimitive.content })
+            assertEquals(1L, n(manager, "Email")); assertEquals(3L, n(manager, "EmailAddress")); assertEquals(1L, n(manager, "SENT_BY")); assertEquals(2L, n(manager, "SENT_TO"))
+
+            val before = listOf("Source", "Email", "EmailAddress", "Chunk", "SENT_BY", "SENT_TO", "QUOTES").map { n(manager, it) }
+            assertEquals("false", post()["sourceCreated"]!!.jsonPrimitive.content)
+            assertEquals(before, listOf("Source", "Email", "EmailAddress", "Chunk", "SENT_BY", "SENT_TO", "QUOTES").map { n(manager, it) })
+        }
+    }
+
+    @Test
     fun `a bad item kind or a quote that is not in the chunk is refused and writes nothing`() = withDb { manager ->
         testApplication {
             application { module(manager) }
