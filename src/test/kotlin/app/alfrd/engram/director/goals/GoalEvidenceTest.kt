@@ -99,7 +99,7 @@ class GoalEvidenceTest {
 
     @Test
     fun `at most the item limit is shown and the rest are named as left out`() {
-        val ctx = GoalPrompts.step(goal, step, views(8, 0), emptyList(), 3, 12_000, now)
+        val ctx = GoalPrompts.step(goal, step, views(8, 0), emptyList(), 5, 12_000, now, 3)
         assertEquals(3, ctx.shownRefs.count { it.startsWith("i") })
         assertEquals(5, ctx.leftOutItems.size)
         assertTrue(ctx.prompt.contains("open items i4"))

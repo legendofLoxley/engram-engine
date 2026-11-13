@@ -52,7 +52,7 @@ per channel (a pure read writes nothing). The messages are a model's words from 
 each message is one quoted line (whitespace collapsed, quote marks softened) and cannot pass for the section. A question is answered when a later message says it answers it; **how the channel answers is not built in this phase**.
 
 **Crowding.** The board names the owner's own flagged items before any the Director wrote, however many it wrote or however overdue; the Director fills only the lines the owner's leave. A link
-from a Director note to an owner item in the scope leaves the item and the board as they are; the Horizon surfaces the item as reactivated by that note (and names the note), until the cycle is retracted.
+from a Director note to an owner item in the scope leaves the item and the board as they are; the Horizon lifts it only by the selector's spread, capped at `directorLinkMaxActivation` (0.12). A link the Director wrote never counts as a reactivation (fresh evidence), so it cannot put an owner's item among the top.
 A correction (`correct_item`) of a Director item is the owner's own statement: a new item in their words, not stamped, and the Director's original is closed (and keeps its stamp).
 
 ## Retracting a cycle (`retract_cycle`)

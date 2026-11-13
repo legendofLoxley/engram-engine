@@ -148,7 +148,7 @@ Token budget and wall-clock both matter. Most discovery waste comes from over-se
 - For pass/fail counts, use the canonical one-liner in `src/test/kotlin/SKILL.md`. Do not improvise alternative grep pipelines.
 - **On the box (arx-box), compile only**: `./gradlew compileKotlin compileTestKotlin --rerun-tasks`, under the 4 GiB free-RAM guard (stop if available memory falls below 4 GiB). Do not run the full suite there.
 - **The full suite runs on the cloud agent.** A task is not done until the cloud suite is green.
-- **The owner's Windows PC is not a valid test environment.** The same code gave 73 failures there, from POSIX permissions, line endings and symlinks. Do not use it to verify anything.
+- A full run on the owner's Windows PC gave 73 failures on code the cloud suite passes; many are POSIX permission, symlink and line-ending problems. Do not use the PC to verify a change.
 - Report numbers in the form `N tests, M failures` (e.g. `206 tests, 0 failures`). Do not paraphrase.
 
 ## Planning

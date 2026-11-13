@@ -92,7 +92,7 @@ data class GoalRunnerConfig(
 /** What a goal may spend: wall-clock minutes of runner work and model tokens, summed over all its cycles. */
 data class GoalBudget(val minutes: Int, val tokens: Long) {
     companion object {
-        private val MINUTES = Regex("""(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)\b""", RegexOption.IGNORE_CASE)
+        private val MINUTES = Regex("""(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m(?!\s*tokens?))\b""", RegexOption.IGNORE_CASE)
         private val HOURS = Regex("""(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b""", RegexOption.IGNORE_CASE)
         private val TOKENS = Regex("""(\d[\d,]*(?:\.\d+)?)\s*(k|m)?\s*tokens?\b""", RegexOption.IGNORE_CASE)
 

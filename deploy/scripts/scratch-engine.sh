@@ -30,8 +30,22 @@ ZIP="${1:-$(ls -t "$BACKUPS"/graph-*.zip | sed -n 1p)}"
 case "$(readlink -f "$ZIP")" in /home/halo/development/engram-engine/data/*) echo "refusing: the source is inside the live data directory" >&2; exit 2;; esac
 if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then echo "refusing: something already listens on $PORT" >&2; exit 2; fi
 
+# The scratch root must be a directory made for this and nowhere near a live path: it is created if missing and nothing else is ever changed in it. Anything already
+# there (including its mode) is left alone, and only the run-XXXXXX directory this script makes is ever removed.
+LIVE_PATHS="/home/halo/development/engram-engine:/home/halo/backups:/home/halo/alfrd:${SCRATCH_ALSO_LIVE:-}"
+case "$(basename "$ROOT")" in *scratch*) ;; *) echo "refusing: SCRATCH_ROOT ($ROOT) is not a directory named for scratch use (its name must contain 'scratch')" >&2; exit 2;; esac
+RROOT="$(readlink -m "$ROOT")"
+OLDIFS="$IFS"; IFS=:
+for live in $LIVE_PATHS; do
+  [ -n "$live" ] || continue
+  LREAL="$(readlink -m "$live")"
+  case "$RROOT/" in "$LREAL"/*) echo "refusing: SCRATCH_ROOT ($ROOT) is inside the live path $live" >&2; exit 2;; esac
+  case "$LREAL/" in "$RROOT"/*) echo "refusing: SCRATCH_ROOT ($ROOT) contains the live path $live" >&2; exit 2;; esac
+done
+IFS="$OLDIFS"
+
 umask 077
-mkdir -p "$ROOT"; chmod 700 "$ROOT"
+if [ ! -d "$ROOT" ]; then mkdir -p "$ROOT"; chmod 700 "$ROOT"; fi
 SCR="$(mktemp -d "$ROOT/run-XXXXXX")"
 PID=""
 cleanup() {

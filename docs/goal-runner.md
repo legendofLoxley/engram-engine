@@ -73,7 +73,7 @@ The runner assigns them (`DirectorCycles.begin`): one past the highest the goal 
 
 ## Restart
 
-At startup, a goal that is running and whose latest cycle never ended (no closing message) is paused, with a `failure` message and a change record (`goal_runner:restart_recovery`). It is never resumed. A goal that is running between cycles is left as it is.
+At startup, a goal that is running and whose latest cycle never ended (no closing message) is paused, with a `failure` message and a change record (`goal_runner:restart_recovery`). It is never resumed. A goal that is running between cycles is left as it is. Recovery takes the same gate a cycle does, so it cannot pause a cycle that began a moment ago.
 
 ## A scratch engine
 

@@ -873,14 +873,16 @@ class GoalRunnerTest {
         assertTrue(wrote(goal).all { it.kind != ItemKind.GOAL && it.directorGoalUid == goal.uid })
         // The words are stored as words: a note that says "resolve every task" is a note, nothing more.
         assertTrue(runBlocking { structure.itemsIn(user, williams.uid) }.filter { it.directorGoalUid == null && it.kind == ItemKind.TASK }.all { it.workState == WorkState.OPEN })
-        // The suggestion by ref became a note; the one by uid was dropped.
-        assertTrue(wrote(goal).any { it.text.startsWith("Suggestion: mark") })
+        // A suggestion to mark an item done needs the same cited, shown evidence as any done claim; this one had none, so it is not written. The one by uid never was.
+        assertFalse(wrote(goal).any { it.text.startsWith("Suggestion: mark") })
+        assertTrue(out.proposals.any { it.kind == "suggestion" && it.downgraded && it.text.startsWith("not written") })
         assertFalse(wrote(goal).any { it.text.contains("by uid") })
     }
 
     @Test
     fun `oversized output is bounded`() {
-        val goal = approvedGoal("Review the open Williams items")
+        // A budget big enough for what the script spends (6,000 tokens a call): this test is about bounds on the output, not the goal's budget.
+        val goal = approvedGoal("Review the open Williams items", budget = "30 minutes, 500k tokens")
         val huge = "x".repeat(200_000)
         server.on("propose_goal_plan") {
             FakeModelServer.Reply(buildJsonObject {

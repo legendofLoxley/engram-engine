@@ -307,6 +307,7 @@ class StepResult(
 object GoalStepValidator {
     const val MAX_TEXT = 400
     const val MAX_SUPPORT = 3
+    private val NAMED_REF = Regex("""\bi\d+\b""", RegexOption.IGNORE_CASE)
     private val ALLOWED = mapOf("task" to ItemKind.TASK, "note" to ItemKind.FACT, "question" to ItemKind.QUESTION)
     private val SUGGESTED = mapOf("done" to WorkState.DONE, "dropped" to WorkState.DROPPED, "waiting" to WorkState.WAITING, "active" to WorkState.ACTIVE)
 
@@ -324,11 +325,15 @@ object GoalStepValidator {
             if (o == null || kind == null || text.isEmpty() || text.length > MAX_TEXT || items.size >= maxItems) { discarded++; continue }
             // A ref counts only if the step was shown it: the open items and evidence it was given, nothing else in the project.
             fun shown(r: String?) = r?.trim()?.lowercase()?.takeIf { it in shownRefs && scope.resolve(it) != null }
-            val ref = shown(str(o, "about"))
+            var ref = shown(str(o, "about"))
             val support = (o["support"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }.mapNotNull(::shown).filter { it != ref }.distinct().take(MAX_SUPPORT)
             val flag = (o["no_evidence_found"] as? JsonPrimitive)?.let { it.content.equals("true", ignoreCase = true) } ?: false
             var finalText = text
             if (kind == ItemKind.QUESTION) { val (shaped, cutIt) = GoalAsk.shape(text); finalText = shaped; if (cutIt) askCut++ }
+            // A claim in the words with no `about` field is still a claim about the open item it names: leaving the field out must not skip the check.
+            if (ref == null && kind != ItemKind.QUESTION && GoalClaims.inferClaim(finalText) != null) {
+                ref = NAMED_REF.findAll(finalText).map { it.value.lowercase() }.firstOrNull { it in shownRefs && scope.resolveOpen(it) != null }
+            }
             items += StepItem(kind, finalText, ref, support, Disposition.of(str(o, "disposition")) ?: (if (ref != null) GoalClaims.inferClaim(finalText) else null), flag)
         }
         val suggestions = ArrayList<StepSuggestion>()

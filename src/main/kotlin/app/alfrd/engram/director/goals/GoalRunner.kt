@@ -23,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import org.slf4j.LoggerFactory
@@ -142,7 +143,10 @@ class GoalRunner(
      * A goal a cycle was running when the process died is paused, with a visible message and a change record (actor `director`). Never resumed: the owner decides.
      * A goal that is running but between cycles (its last cycle ended) is left as it is. Returns the goals it paused.
      */
-    suspend fun recoverAfterRestart(): List<String> {
+    suspend fun recoverAfterRestart(): List<String> = gate.withLock { recoverLocked() }
+
+    // Under the same gate as a cycle: a cycle that began a moment ago has no closing message yet and must not be mistaken for one a crash left behind.
+    private suspend fun recoverLocked(): List<String> {
         val paused = ArrayList<String>()
         for (goal in structure.listGoals(email)) {
             if (goal.approval != "approved" || goal.workState != WorkState.ACTIVE) continue

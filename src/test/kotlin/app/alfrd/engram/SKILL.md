@@ -1,7 +1,7 @@
 Testing Skill — engram-engine
 Scope: everything under src/test/kotlin/.
 Running the suite
-Full suite: ./gradlew test --rerun-tasks (cloud agent only; on the box, compile only, under the 4 GiB free-RAM guard; a task is not done until the cloud suite is green; the owner's Windows PC is not a valid test environment)
+Full suite: ./gradlew test --rerun-tasks (cloud agent only; on the box, compile only, under the 4 GiB free-RAM guard; a task is not done until the cloud suite is green. A full run on the owner's Windows PC gave 73 failures on code the cloud suite passes; many are POSIX permission, symlink and line-ending problems. Do not use the PC to verify a change.)
 Single class: ./gradlew test --tests "app.alfrd.engram.<fqcn>" --rerun-tasks
 Compile check only: ./gradlew compileKotlin compileTestKotlin --rerun-tasks
 Always pass --rerun-tasks. Gradle incremental compilation has caused stale-class bugs in this repo.
