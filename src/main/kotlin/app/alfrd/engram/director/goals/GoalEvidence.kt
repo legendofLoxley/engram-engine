@@ -15,7 +15,8 @@ import kotlin.math.ln
  *  - **shared meaningful words** with the open item, each weighted by how rare it is in the project's evidence (a word in every item says nothing);
  *  - **shared concepts** (the `about` links the two items have in common);
  *  - **recency**, a small bonus that only breaks ties between items that are related at all.
- * An item that shares no word and no concept is not evidence, however recent, and neither is one whose relevance is below the minimum ([GoalRunnerConfig.minEvidenceScore]).
+ * An item that shares no word and no concept is not evidence, however recent, and neither is one whose relevance is below the minimum ([GoalRunnerConfig.minEvidenceScore]),
+ * nor one that shares fewer than [GoalRunnerConfig.minSharedWords] words without sharing a concept that is not common in the project.
  * Words that appear in more than a quarter of the project's items are ignored (they connect everything to everything).
  */
 object GoalEvidence {
@@ -63,7 +64,7 @@ object GoalEvidence {
      * Up to [limit] items of [pool] that bear on [item], best first, each with at least [minRelevance] of relevance. Pure: the same inputs give the same list.
      * Nothing qualifying gives an empty list, which the step is told plainly ("no evidence found").
      */
-    fun related(item: ItemRecord, pool: List<ItemRecord>, df: Map<String, Int>, now: Long, limit: Int, ignore: Set<String> = emptySet(), minRelevance: Double = 0.0): List<Scored> {
+    fun related(item: ItemRecord, pool: List<ItemRecord>, df: Map<String, Int>, now: Long, limit: Int, ignore: Set<String> = emptySet(), minRelevance: Double = 0.0, minSharedWords: Int = 1, conceptEvidence: Boolean = true): List<Scored> {
         val mine = words(item.text, ignore)
         val myAbout = concepts(item) - ignore
         if (mine.isEmpty() && myAbout.isEmpty()) return emptyList()
@@ -71,8 +72,11 @@ object GoalEvidence {
             val shared = mine.intersect(words(candidate.text, ignore))
             val sharedAbout = myAbout.intersect(concepts(candidate))
             if (shared.isEmpty() && sharedAbout.isEmpty()) return@mapNotNull null
+            // The bar: enough shared words, or a shared concept that is not common in the project (common ones were ignored above). With concepts off, words only.
+            val concepts = if (conceptEvidence) sharedAbout else emptySet()
+            if (shared.size < minSharedWords && concepts.isEmpty()) return@mapNotNull null
             // A shared word and a shared concept weigh the same, each by how rare it is in the project's evidence.
-            val relevance = 3.0 * (shared + sharedAbout).sumOf { 1.0 / ln(2.0 + (df[it] ?: 1)) }
+            val relevance = 3.0 * (shared + concepts).sumOf { 1.0 / ln(2.0 + (df[it] ?: 1)) }
             if (relevance < minRelevance) return@mapNotNull null
             val ageDays = ((now - candidate.evidenceAt).coerceAtLeast(0)) / 86_400_000.0
             Scored(candidate, relevance, relevance + 0.5 * exp(-ageDays / 180.0))

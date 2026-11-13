@@ -47,11 +47,13 @@ data class StepReport(
     val items: Int = 0, val evidence: Int = 0, val promptChars: Int = 0, val leftOut: List<String> = emptyList(), val evidenceTrimmed: Int = 0,
     /** Proposals written as "unclassifiable, no supporting evidence" because their claim did not stand, questions cut for length or list shape, and why a failed step failed. */
     val downgraded: Int = 0, val askCut: Int = 0, val failureReason: String? = null, val error: String? = null,
+    /** Done or dropped claims that passed the structural check and are held for the verifier (written, or downgraded, after the cycle's steps). */
+    val held: Int = 0,
 )
 
 /** One thing the Director wrote, with the open item it concerns and the evidence lines it cites, by ref. */
 @Serializable
-data class Proposal(val kind: String, val text: String, val about: String? = null, val support: List<String> = emptyList(), val disposition: String? = null, val downgraded: Boolean = false)
+data class Proposal(val kind: String, val text: String, val about: String? = null, val support: List<String> = emptyList(), val disposition: String? = null, val downgraded: Boolean = false, val quote: String? = null)
 
 /** What a ref in a report stands for, so a reader can check each cited line against the graph. */
 @Serializable
@@ -75,9 +77,12 @@ data class RunReport(
     val messages: List<String> = emptyList(),
     val planRejected: List<String> = emptyList(),
     val refs: Map<String, RefInfo> = emptyMap(),
+    /** The verifier pass: how many done or dropped claims it checked, kept and downgraded, what it cost, and what it decided for each. */
+    val verifier: VerifierReport = VerifierReport(),
+    val claimChecks: List<ClaimCheck> = emptyList(),
 )
 
-private data class Written(val applied: Int, val refused: Int, val covered: Int, val downgraded: Int = 0) { val attempted get() = applied + refused }
+private data class Written(val applied: Int, val refused: Int, val covered: Int, val downgraded: Int = 0, val held: Int = 0) { val attempted get() = applied + refused }
 
 private sealed interface Yielded<out T> {
     data class Done<T>(val value: T) : Yielded<T>
@@ -112,6 +117,7 @@ class GoalRunner(
     private val planner: GoalPlanDirector,
     private val stepper: GoalStepExecutor,
     private val qc: GoalQcDirector,
+    private val verifier: GoalVerifier,
     val config: GoalRunnerConfig,
     private val resources: ResourceProbe,
     private val slots: SlotProbe,
@@ -260,6 +266,12 @@ class GoalRunner(
         val directorLines: List<String>, val known: Set<String>, val common: Set<String>,
     )
 
+    /** A done or dropped claim that passed the structural check and waits for the verifier: the item or suggestion, what it is about, and the lines it cited (all shown with that item). */
+    private class PendingClaim(
+        val stepKind: StepKind, val aboutRef: String, val about: ItemRecord, val disposition: Disposition,
+        val item: StepItem?, val suggestion: StepSuggestion?, val cited: List<Pair<String, ItemRecord>>,
+    )
+
     // ── The cycle's state ────────────────────────────────────────────────────
 
     private inner class Cycle(val goal: ItemRecord, val cycle: DirectorCycle, val budget: GoalBudget, val prior: Pair<Long, Long>, val startedAt: Long) {
@@ -276,6 +288,9 @@ class GoalRunner(
         var looksMet: String? = null
         var planRejected: List<String> = emptyList()
         var questionsSent = 0
+        val pending = ArrayList<PendingClaim>()
+        val claimChecks = ArrayList<ClaimCheck>()
+        var verifierReport = VerifierReport()
 
         fun elapsed() = clock() - startedAt
         fun spent(): String? = when {
@@ -286,7 +301,8 @@ class GoalRunner(
 
         fun report(outcome: RunOutcome, reason: String) = RunReport(
             outcome, reason, goal.uid, cycle.number, stepReports, planMillis, planTokens, planCompletion, qcMillis, qcTokens, qcCompletion,
-            elapsed(), usage.tokens, replans, stepReports.sumOf { it.downgraded }, looksMet, proposals, sentMessages, planRejected, refInfo,
+            elapsed(), usage.tokens, replans, stepReports.sumOf { it.downgraded } + verifierReport.downgraded, looksMet, proposals, sentMessages, planRejected, refInfo,
+            verifierReport, claimChecks,
         )
 
         suspend fun seq() = cycleSeq()
@@ -401,7 +417,7 @@ class GoalRunner(
                 val step = plan.steps[index]
                 val views = step.refs.mapNotNull { r ->
                     scope.resolveOpen(r)?.let { item ->
-                        GoalPrompts.ItemView(r, item, GoalEvidence.related(item, world.pool, world.df, clock(), config.evidencePerItem, world.common, config.minEvidenceScore).map { GoalPrompts.EvidenceLine(scope.evidenceRef(it.item), it.item, it.relevance) })
+                        GoalPrompts.ItemView(r, item, GoalEvidence.related(item, world.pool, world.df, clock(), config.evidencePerItem, world.common, config.minEvidenceScore, config.minSharedWords, config.conceptEvidence).map { GoalPrompts.EvidenceLine(scope.evidenceRef(it.item), it.item, it.relevance) })
                     }
                 }.take(config.stepItems)
                 val context = GoalPrompts.step(goal, step, views, stepLines, config.maxItemsPerStep, config.stepPromptChars, clock(), config.stepItems)
@@ -428,7 +444,7 @@ class GoalRunner(
                     step.number, step.title, step.kind.label, result.outcome.name.lowercase(), result.usage.millis, result.usage.tokens, result.usage.completionTokens,
                     written.applied, written.refused, written.covered, result.discarded, impact.name.lowercase(), note,
                     items = openShown, evidence = context.shownRefs.count { it.startsWith("e") }, promptChars = context.prompt.length, leftOut = context.leftOutItems, evidenceTrimmed = context.evidenceTrimmed,
-                    downgraded = written.downgraded, askCut = result.askCut, failureReason = result.reason, error = result.error,
+                    downgraded = written.downgraded, askCut = result.askCut, failureReason = result.reason, error = result.error, held = written.held,
                 )
                 if (failures >= 3 || (failures >= 2 && failures == stepReports.size)) {
                     return failedCycle("model_failed", "Cycle ${cycle.number} stopped: the model gave no usable answer for $failures steps.")
@@ -449,64 +465,128 @@ class GoalRunner(
                 }
                 index++
             }
+            verifyClaims(scope, known)?.let { return it }
             return qcAndClose(scope)
         }
 
         fun accountPlan(u: CallUsage) { usage += u; planMillis += u.millis; planTokens += u.tokens; planCompletion += u.completionTokens }
 
+        /** Counts of one batch of writes. */
+        inner class Tally { var applied = 0; var refused = 0; var covered = 0; var downgraded = 0; var held = 0 }
+
+        /** Writes one note (a fact) linked to the open item it concerns; null if the graph refused it. */
+        suspend fun note(t: Tally, sequence: Long, text: String, about: ItemRecord?, support: List<ItemRecord> = emptyList(), kind: ItemKind = ItemKind.FACT): String? {
+            val made = writer.apply(email, cycle, sequence, listOf(RecordItem(kind, text)), zone).single()
+            val uid = made.resultUid
+            if (!made.applied || uid == null) { t.refused++; return null }
+            t.applied++
+            for (target in listOfNotNull(about) + support) {
+                if (!writer.apply(email, cycle, sequence, listOf(LinkItems(uid, target.uid, text)), zone).single().applied) t.refused++
+            }
+            return uid
+        }
+
+        /** The claim does not stand: write what is true (nothing supports it) and keep the model's reasoning as a note, plainly labelled as unverified. */
+        suspend fun writeDowngrade(t: Tally, sequence: Long, item: StepItem, why: String?, scope: ScopeMap, known: MutableSet<String>) {
+            val about = scope.resolve(item.aboutRef)
+            val label = about?.text?.let { GoalText.clean(it, 80) } ?: "an item"
+            val headline = "Unclassifiable, no supporting evidence for \"$label\"."
+            t.downgraded++
+            if (known.add(ItemWords.normalize(headline))) note(t, sequence, headline, about)
+            // Every downgraded claim keeps its own reasoning, plainly labelled as unverified.
+            val reasoning = "Unverified reasoning (proposed ${item.disposition?.label ?: "a state"}; $why): ${GoalText.clean(item.text, 300)}"
+            if (known.add(ItemWords.normalize(reasoning))) note(t, sequence, reasoning, about) else t.covered++
+            proposals += Proposal("fact", headline, item.aboutRef, emptyList(), "unclassifiable", downgraded = true)
+        }
+
+        /** Writes an item whose claim stands, with its links; sends it to the channel when it is a question of an ask step. */
+        suspend fun writeItem(t: Tally, sequence: Long, stepKind: StepKind, item: StepItem, scope: ScopeMap, known: MutableSet<String>, quote: String? = null) {
+            if (!known.add(ItemWords.normalize(item.text))) { t.covered++; return } // the graph already says this
+            val about = scope.resolve(item.aboutRef)
+            val support = item.supportRefs.mapNotNull { scope.resolve(it) }
+            val uid = note(t, sequence, item.text, about, support, item.kind) ?: return
+            proposals += Proposal(item.kind.name.lowercase(), item.text, item.aboutRef, item.supportRefs, item.disposition?.label, quote = quote)
+            sourceOf[uid] = (listOfNotNull(about?.let { "About: ${it.text}" }) + support.map { "Supporting line: ${it.text}" } + listOfNotNull(quote?.let { "Verified quote: $it" })).joinToString("\n").ifEmpty { "(no source line was cited)" }
+            if (stepKind == StepKind.ASK && item.kind == ItemKind.QUESTION && questionsSent < MAX_QUESTIONS_PER_CYCLE) {
+                questionsSent++
+                writer.send(email, cycle, DirectorMessageKind.QUESTION, PromptText.excerpt(item.text, GoalAsk.MAX + 10), uid)
+                sentMessages += item.text
+            }
+        }
+
+        /** Writes a suggestion that stands: a note in the Director's words, linked to the item. */
+        suspend fun writeSuggestion(t: Tally, sequence: Long, s: StepSuggestion, target: ItemRecord, claim: Disposition, quote: String? = null) {
+            val out = writer.suggestStateChange(email, cycle, sequence, target.uid, s.state, s.reason, zone)
+            if (out.all { it.applied }) { t.applied++; proposals += Proposal("suggestion", "mark \"${target.text.take(80)}\" ${s.state.wire()} — ${s.reason}", s.targetRef, s.supportRefs, claim.label, quote = quote) } else t.refused++
+        }
+
+        /** The lines a claim cited that were shown with its open item: the only ones that can support it, and the only ones the verifier is shown. */
+        fun citedLines(aboutRef: String, supportRefs: List<String>, scope: ScopeMap, context: GoalPrompts.StepContext): List<Pair<String, ItemRecord>> {
+            val allowed = context.evidenceFor[aboutRef] ?: emptySet()
+            return supportRefs.filter { it in allowed }.distinct().mapNotNull { r -> scope.resolve(r)?.let { r to it } }
+        }
+
         suspend fun writeStep(step: PlanStep, result: StepResult, scope: ScopeMap, known: MutableSet<String>, context: GoalPrompts.StepContext): Written {
-            var applied = 0; var refused = 0; var covered = 0; var downgraded = 0
+            val t = Tally()
             val sequence = seq()
             val shown = GoalClaims.Shown(context.evidenceFor, scope, config.minEvidenceScore)
-
-            /** Writes one note (a fact) linked to the open item it concerns; false if the graph refused it. */
-            suspend fun note(text: String, about: ItemRecord?, support: List<ItemRecord> = emptyList(), kind: ItemKind = ItemKind.FACT): String? {
-                val made = writer.apply(email, cycle, sequence, listOf(RecordItem(kind, text)), zone).single()
-                val uid = made.resultUid
-                if (!made.applied || uid == null) { refused++; return null }
-                applied++
-                for (target in listOfNotNull(about) + support) {
-                    if (!writer.apply(email, cycle, sequence, listOf(LinkItems(uid, target.uid, text)), zone).single().applied) refused++
-                }
-                return uid
-            }
-
             for (item in result.items) {
                 val verdict = GoalClaims.check(item.disposition, item.aboutRef, item.supportRefs, item.noEvidenceFound, shown)
-                if (!verdict.stands) {
-                    // The claim does not stand: write what is true (nothing supports it) and keep the model's reasoning as a note, plainly labelled as unverified.
-                    val about = scope.resolve(item.aboutRef)
-                    val label = about?.text?.let { GoalText.clean(it, 80) } ?: "an item"
-                    val headline = "Unclassifiable, no supporting evidence for \"$label\"."
-                    downgraded++
-                    if (known.add(ItemWords.normalize(headline))) note(headline, about)
-                    // Every downgraded claim keeps its own reasoning, plainly labelled as unverified.
-                    val reasoning = "Unverified reasoning (proposed ${item.disposition?.label ?: "a state"}; ${verdict.why}): ${GoalText.clean(item.text, 300)}"
-                    if (known.add(ItemWords.normalize(reasoning))) note(reasoning, about) else covered++
-                    proposals += Proposal("fact", headline, item.aboutRef, emptyList(), "unclassifiable", downgraded = true)
-                    continue
+                if (!verdict.stands) { writeDowngrade(t, sequence, item, verdict.why, scope, known); continue }
+                // A done or dropped claim that stands structurally is held for the verifier; nothing about it is written until the verifier has answered.
+                val claim = item.disposition
+                if ((claim == Disposition.DONE || claim == Disposition.DROPPED) && item.aboutRef != null) {
+                    val about = scope.resolveOpen(item.aboutRef)
+                    if (about != null) { pending += PendingClaim(step.kind, item.aboutRef, about, claim, item, null, citedLines(item.aboutRef, item.supportRefs, scope, context)); t.held++; continue }
                 }
-                if (!known.add(ItemWords.normalize(item.text))) { covered++; continue } // the graph already says this
-                val about = scope.resolve(item.aboutRef)
-                val support = item.supportRefs.mapNotNull { scope.resolve(it) }
-                val uid = note(item.text, about, support, item.kind) ?: continue
-                proposals += Proposal(item.kind.name.lowercase(), item.text, item.aboutRef, item.supportRefs, item.disposition?.label)
-                sourceOf[uid] = (listOfNotNull(about?.let { "About: ${it.text}" }) + support.map { "Supporting line: ${it.text}" }).joinToString("\n").ifEmpty { "(no source line was cited)" }
-                if (step.kind == StepKind.ASK && item.kind == ItemKind.QUESTION && questionsSent < MAX_QUESTIONS_PER_CYCLE) {
-                    questionsSent++
-                    writer.send(email, cycle, DirectorMessageKind.QUESTION, PromptText.excerpt(item.text, GoalAsk.MAX + 10), uid)
-                    sentMessages += item.text
-                }
+                writeItem(t, sequence, step.kind, item, scope, known)
             }
             for (s in result.suggestions) {
                 val target = scope.resolveOpen(s.targetRef) ?: continue
                 val claim = when (s.state) { WorkState.DONE -> Disposition.DONE; WorkState.DROPPED -> Disposition.DROPPED; WorkState.WAITING -> Disposition.WAITING; else -> Disposition.LIVE }
                 val verdict = GoalClaims.check(claim, s.targetRef, s.supportRefs, s.noEvidenceFound, shown)
-                if (!verdict.stands) { downgraded++; proposals += Proposal("suggestion", "not written: mark \"${target.text.take(60)}\" ${s.state.wire()} (${verdict.why})", s.targetRef, emptyList(), claim.label, downgraded = true); continue }
-                val out = writer.suggestStateChange(email, cycle, sequence, target.uid, s.state, s.reason, zone)
-                if (out.all { it.applied }) { applied++; proposals += Proposal("suggestion", "mark \"${target.text.take(80)}\" ${s.state.wire()} — ${s.reason}", s.targetRef, s.supportRefs, claim.label) } else refused++
+                if (!verdict.stands) { t.downgraded++; proposals += Proposal("suggestion", "not written: mark \"${target.text.take(60)}\" ${s.state.wire()} (${verdict.why})", s.targetRef, emptyList(), claim.label, downgraded = true); continue }
+                if (claim == Disposition.DONE || claim == Disposition.DROPPED) { pending += PendingClaim(step.kind, s.targetRef, target, claim, null, s, citedLines(s.targetRef, s.supportRefs, scope, context)); t.held++; continue }
+                writeSuggestion(t, sequence, s, target, claim)
             }
-            return Written(applied, refused, covered, downgraded)
+            return Written(t.applied, t.refused, t.covered, t.downgraded, t.held)
+        }
+
+        /**
+         * The verifier pass, after the steps and before the close-out: one call per held done or dropped claim, on the strong model. A claim is kept (written as the step
+         * wrote it, with the verified quote on its source) only if code accepts the answer ([GoalVerification.judge]); every other claim is written as unclassifiable with the
+         * step's reasoning kept as an unverified note. Returns a report only when the cycle must stop (yield) in the middle; claims not yet checked are then not written.
+         */
+        suspend fun verifyClaims(scope: ScopeMap, known: MutableSet<String>): RunReport? {
+            if (pending.isEmpty()) return null
+            val t = Tally()
+            val sequence = seq()
+            var millis = 0L; var tokens = 0L; var completion = 0L; var failed = 0
+            var kept = 0; var down = 0
+            for ((i, p) in pending.withIndex()) {
+                mustStop(false)?.let { return yielded(it) }
+                val claim = ClaimToVerify("c${i + 1}", p.disposition, p.about.text, p.cited.map { (ref, item) -> CitedLine(ref, item.workState?.wire() ?: "note", GoalVerification.lineText(item)) })
+                val answer = if (claim.lines.isEmpty()) VerifierAnswer(null, CallUsage.NONE, "no cited line was shown with this item") else when (val r = yieldable { verifier.verify(claim) }) {
+                    is Yielded.Stopped -> return yielded(r.why)
+                    is Yielded.Done -> r.value
+                }
+                usage += answer.usage; millis += answer.usage.millis; tokens += answer.usage.tokens; completion += answer.usage.completionTokens
+                if (answer.verdict == null) failed++
+                val check = GoalVerification.judge(claim, answer).copy(about = p.aboutRef)
+                claimChecks += check
+                if (check.kept) {
+                    kept++
+                    if (p.item != null) writeItem(t, sequence, p.stepKind, p.item, scope, known, check.quote)
+                    else if (p.suggestion != null) writeSuggestion(t, sequence, p.suggestion, p.about, p.disposition, check.quote)
+                } else {
+                    down++
+                    if (p.item != null) writeDowngrade(t, sequence, p.item, check.why, scope, known)
+                    else if (p.suggestion != null) proposals += Proposal("suggestion", "not written: mark \"${p.about.text.take(60)}\" ${p.suggestion.state.wire()} (${check.why})", p.aboutRef, emptyList(), p.disposition.label, downgraded = true)
+                }
+                verifierReport = VerifierReport(i + 1, kept, down, millis, tokens, completion, failed)
+            }
+            pending.clear()
+            return null
         }
 
         suspend fun qcAndClose(scope: ScopeMap): RunReport {
@@ -532,9 +612,11 @@ class GoalRunner(
                 writer.apply(email, cycle, sequence, listOf(RecordItem(ItemKind.FACT, "Left unclear by the goal: ${outcome.unclear}")), zone)
             }
             unsupported.forEach { (_, p) -> writer.apply(email, cycle, sequence, listOf(RecordItem(ItemKind.FACT, "Check this: its source does not support \"${p.first.text.take(160)}\"")), zone) }
-            val counts = "${stepReports.count { it.outcome == "done" }} of ${stepReports.size} steps done, ${mine.size} items written"
+            val v = verifierReport
+            val counts = "${stepReports.count { it.outcome == "done" }} of ${stepReports.size} steps done, ${mine.size} items written. " +
+                (if (v.claims == 0) "Verifier: no done or dropped claims to check" else "Verifier: ${v.claims} done or dropped claims checked, ${v.kept} kept, ${v.downgraded} downgraded to unclassifiable, ${v.millis / 1000} s and ${v.tokens} tokens")
             if (looksMet == "yes") {
-                end(DirectorMessageKind.FINISHED, "The done-when looks met after cycle ${cycle.number} ($counts): ${outcome.summary} Only you can close the goal.", "completed")
+                end(DirectorMessageKind.FINISHED, "The done-when looks met after cycle ${cycle.number} ($counts). Only you can close the goal. ${outcome.summary}", "completed")
             } else {
                 end(DirectorMessageKind.PROGRESS, "Cycle ${cycle.number}: $counts. Goal looks met: $looksMet. ${outcome.summary}", "completed")
             }

@@ -48,6 +48,7 @@ fun bootstrapGoalRunner(
         planner = GoalPlanDirector(LocalLlmClient(baseUrl = config.planUrl), config),
         stepper = GoalStepExecutor(LocalLlmClient(baseUrl = config.stepUrl), config),
         qc = GoalQcDirector(LocalLlmClient(baseUrl = config.planUrl), config),
+        verifier = GoalVerifier(LocalLlmClient(baseUrl = config.planUrl), config),
         config = config, resources = SystemResourceProbe(), slots = LlamaSlotProbe(), activity = ConversationActivity.shared,
         hermesBusy = { hermesActive.activeByKind().values.sum() },
         cycleSeq = { markers.read(email)?.lastCycleSeq ?: 0L },

@@ -73,7 +73,7 @@ class GoalRunnerAttackTest {
     private fun runner(cfg: GoalRunnerConfig = config(), act: ConversationActivity = activity) = GoalRunner(
         email = user, structure = structure, messages = messages, writer = writer, cycles = cycles,
         planner = GoalPlanDirector(LocalLlmClient(baseUrl = server.baseUrl), cfg), stepper = GoalStepExecutor(LocalLlmClient(baseUrl = server.baseUrl), cfg),
-        qc = GoalQcDirector(LocalLlmClient(baseUrl = server.baseUrl), cfg), config = cfg, resources = resources, slots = LlamaSlotProbe(), activity = act,
+        qc = GoalQcDirector(LocalLlmClient(baseUrl = server.baseUrl), cfg), verifier = GoalVerifier(LocalLlmClient(baseUrl = server.baseUrl), cfg), config = cfg, resources = resources, slots = LlamaSlotProbe(), activity = act,
         hermesBusy = { 0 }, cycleSeq = { ++seq }, clock = { now }, zone = ZoneOffset.UTC,
     )
 
