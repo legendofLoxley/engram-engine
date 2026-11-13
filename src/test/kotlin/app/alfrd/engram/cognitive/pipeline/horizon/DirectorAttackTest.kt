@@ -157,7 +157,7 @@ class DirectorAttackTest {
     // ── A link the Director writes, and what it does to the owner's item ─────
 
     @Test
-    fun `a link from a Director note to an owner item leaves the item and the board alone, and raises it in the Horizon only as a labeled reactivation that a retract ends`() {
+    fun `a link from a Director note to an owner item leaves the item and the board alone, and lifts it in the Horizon by no more than the ceiling`() {
         val db = dbManager.getDatabase()
         val assembler = ArcadeHorizonAssembler(db)
         fun view(cycle: Long): HorizonItem? =
@@ -174,11 +174,11 @@ class DirectorAttackTest {
         assertEquals(itemBefore, stored(ownerTaskIn.uid), "the owner's item is untouched: state, dates, attention, evidence, words")
         assertEquals(boardBefore, boardItem(seq + 1), "the board reads no relevance links, so the item sits where it did")
         assertEquals(changesBefore, ChangeLog(db).forTarget(user, ownerTaskIn.uid), "no change record was written for the owner's item")
-        // What it does do, said plainly: the Horizon surfaces the item as reactivated by the link, and names the Director's note as the reason.
-        val after = view(seq)!!
-        val reason = after.surfacing as SurfacingReason.ActiveReactivation
-        assertEquals(note, reason.info.triggeringPhraseUid)
-        assertTrue(after.score > scoreBefore, "the link raises it in the Horizon (${scoreBefore} to ${after.score})")
+        // What it does do, said plainly: the selector's spread lifts the item by no more than the Director-link ceiling, and the link never counts as fresh evidence
+        // (a reactivation at full strength put the owner's item among the top, however the Director's note was worded).
+        val after = view(seq)
+        assertFalse(after?.surfacing is SurfacingReason.ActiveReactivation, "a Director link is not a reactivation: ${after?.surfacing}")
+        assertTrue((after?.score ?: 0.0) - scoreBefore <= HorizonPolicy().directorLinkMaxActivation + 1e-9, "lifted by at most the ceiling (${scoreBefore} to ${after?.score})")
         // Retracting the cycle ends it: the note is resolved, and a link from a resolved item does not surface its target.
         assertTrue(runBlocking { structure.retractDirectorCycle(user, ++seq, theGoal.uid, 1) }.retracted.isNotEmpty())
         val retracted = view(seq)

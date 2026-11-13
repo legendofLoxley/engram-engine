@@ -37,6 +37,11 @@ data class DirectorMessage(
     val answersUid: String?,
     val createdAt: Long,
     val retracted: Boolean = false,
+    /** What the cycle that sent it used, when it is a goal runner's end-of-cycle message; 0 otherwise. Summed per goal to enforce the goal's budget. */
+    val usageTokens: Long = 0L,
+    val usageMillis: Long = 0L,
+    /** How the cycle that sent this closing message ended (`completed`, `yielded`, `failed`, `paused`); null for every other message. A closing message also has a change record (`running` to this). */
+    val closedAs: String? = null,
 )
 
 /**
@@ -46,7 +51,13 @@ data class DirectorMessage(
  */
 interface DirectorMessageStore {
     /** Writes a message; null when the goal is not one of the owner's goals, the text is blank, or [answersUid] names nothing the owner has. */
-    suspend fun post(userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String? = null): DirectorMessage?
+    suspend fun post(userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L, closedAs: String? = null): DirectorMessage?
+
+    /** The highest cycle number any message of this goal carries (0 when there is none). Retracted messages count: a retracted cycle's number is never reused. */
+    suspend fun latestCycle(userEmail: String, goalUid: String): Int = 0
+
+    /** Everything the goal's cycles have used so far, summed over their messages (retracted ones included: the time and tokens were spent). */
+    suspend fun usage(userEmail: String, goalUid: String): Pair<Long, Long> = 0L to 0L
 
     /** Every message of a goal's thread, oldest first, retracted ones included (marked). */
     suspend fun thread(userEmail: String, goalUid: String): List<DirectorMessage>
@@ -69,7 +80,7 @@ class ArcadeDirectorMessageStore(
     private val logger = LoggerFactory.getLogger(ArcadeDirectorMessageStore::class.java)
     private val changeLog = ChangeLog(db)
 
-    override suspend fun post(userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String?): DirectorMessage? {
+    override suspend fun post(userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String?, usageTokens: Long, usageMillis: Long, closedAs: String?): DirectorMessage? {
         val body = text.trim().take(MAX_TEXT)
         if (userEmail.isBlank() || body.isBlank() || cycle < 1) return null
         return write("post") {
@@ -86,13 +97,25 @@ class ArcadeDirectorMessageStore(
                 set("text", body)
                 if (answersUid != null) set("answersUid", answersUid)
                 set("createdAt", now)
+                if (usageTokens > 0) set("usageTokens", usageTokens)
+                if (usageMillis > 0) set("usageMillis", usageMillis)
+                if (closedAs != null) set("closedAs", closedAs)
                 save()
             }
+            // The end of a cycle is a change: the cycle was running and now it is not, and the record says how. Actor director, cause the outcome.
+            if (closedAs != null) changeLog.append(userEmail, vertex, "state", "running", closedAs, cause = "goal_runner:cycle_$closedAs", actor = "director", changedAt = now)
             vertex.newEdge("MESSAGE_FOR", goal, false).save()
             if (answers != null) vertex.newEdge("ANSWERS", answers, false).save()
             vertex.toMessage()
         }
     }
+
+    override suspend fun latestCycle(userEmail: String, goalUid: String): Int = threadAll(userEmail, goalUid).maxOfOrNull { it.cycle } ?: 0
+
+    override suspend fun usage(userEmail: String, goalUid: String): Pair<Long, Long> =
+        threadAll(userEmail, goalUid).let { all -> all.sumOf { it.usageTokens } to all.sumOf { it.usageMillis } }
+
+    private suspend fun threadAll(userEmail: String, goalUid: String): List<DirectorMessage> = thread(userEmail, goalUid)
 
     override suspend fun thread(userEmail: String, goalUid: String): List<DirectorMessage> = read("thread") {
         db.query("sql", "SELECT FROM $TYPE WHERE ownerEmail = :e AND goalUid = :g", mapOf("e" to userEmail, "g" to goalUid)).use { rs ->
@@ -148,6 +171,9 @@ class ArcadeDirectorMessageStore(
         answersUid = get("answersUid") as? String,
         createdAt = (get("createdAt") as? Number)?.toLong() ?: 0L,
         retracted = get("retractedAt") != null,
+        usageTokens = (get("usageTokens") as? Number)?.toLong() ?: 0L,
+        usageMillis = (get("usageMillis") as? Number)?.toLong() ?: 0L,
+        closedAs = get("closedAs") as? String,
     )
 
     private suspend fun <T> write(op: String, body: () -> T?): T? = withContext(Dispatchers.IO) {

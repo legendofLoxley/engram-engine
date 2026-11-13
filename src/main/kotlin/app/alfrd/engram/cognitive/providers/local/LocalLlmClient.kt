@@ -7,7 +7,7 @@ import app.alfrd.engram.cognitive.providers.LlmTimeoutError
 import app.alfrd.engram.cognitive.providers.ToolCall
 import app.alfrd.engram.cognitive.providers.ToolDefinition
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.encodeToString
@@ -57,7 +57,9 @@ class LocalLlmClient(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     private val http: HttpClient = HttpClient.newHttpClient()
 
-    override suspend fun doComplete(request: LlmRequest): LlmResponse = withContext(Dispatchers.IO) {
+    // runInterruptible, not withContext: the call below blocks on the HTTP response, and only an interrupt lets a cancelled caller (the goal runner yielding to
+    // a conversation) stop waiting and close the connection, which is also what tells llama.cpp to stop generating.
+    override suspend fun doComplete(request: LlmRequest): LlmResponse = runInterruptible(Dispatchers.IO) {
         val startMs = System.currentTimeMillis()
 
         val messages = buildList {

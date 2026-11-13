@@ -102,6 +102,8 @@ class DirectorTick(
     private val integrity: IntegrityCheck? = null,
     /** Where the zoomed-out board gets its facts; the tick's prompt carries the same board the owner's tool does. */
     private val board: app.alfrd.engram.cognitive.pipeline.horizon.BoardSource? = null,
+    /** The goal runner, when there is one. After each tick it may start a cycle of an approved goal in the background (only if it is switched on and the box is idle). */
+    private val goalRunner: app.alfrd.engram.director.goals.GoalRunner? = null,
 ) {
     init {
         require(!interval.isNegative && !interval.isZero) { "interval must be positive" }
@@ -124,6 +126,7 @@ class DirectorTick(
     fun start(scope: CoroutineScope): Job = scope.launch {
         while (isActive) {
             tickOnce()
+            goalRunner?.maybeStart(scope)
             delay(interval.toMillis())
         }
     }
@@ -256,6 +259,7 @@ fun bootstrapDirectorTick(
     env: Map<String, String> = System.getenv(),
     probe: SelfStateProbe = SystemProbe(),
     start: Boolean = true,
+    goalRunner: app.alfrd.engram.director.goals.GoalRunner? = null,
 ): DirectorTickStartup {
     val raw = env[DirectorTick.ENV_IDENTITY]?.trim().orEmpty()
     if (raw.isEmpty()) return DirectorTickStartup.Disabled("${DirectorTick.ENV_IDENTITY} is not set", misconfigured = false).also { bootLog.info("director-tick: not running: {}", it.reason) }
@@ -281,6 +285,7 @@ fun bootstrapDirectorTick(
         hermes = { hermesActive.activeByKind() },
         budgets = { budgetDefaults(notionStartup) },
         board = app.alfrd.engram.cognitive.pipeline.horizon.ArcadeBoardSource(db),
+        goalRunner = goalRunner,
         integrity = if (env[IntegrityCheck.ENV_DISABLE]?.trim()?.lowercase() in setOf("off", "false", "0")) null else IntegrityCheck(db, dir.resolve(IntegrityCheck.FILE_NAME)),
     )
     if (start) tick.start(scope)

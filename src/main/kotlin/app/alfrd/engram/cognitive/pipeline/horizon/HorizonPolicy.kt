@@ -25,6 +25,11 @@ data class HorizonPolicy(
     val about: Double = 0.65,
     /** Multiplies a `relevant_to` edge's own recorded strength. */
     val relevantTo: Double = 1.0,
+    /**
+     * The most activation a link the Director wrote can give to the item on its far end. A Director link may point at an owner's item, and one cycle can write
+     * many; without a ceiling the Director could lift the owner's items past the owner's own signals and reorder the Horizon. The owner's links are not capped.
+     */
+    val directorLinkMaxActivation: Double = 0.12,
     /** Applied once per hop after the first, so far-away things fade faster than near ones. */
     val hopDecay: Double = 0.6,
     /** A step that would carry less than this is not taken — bounds the walk. */

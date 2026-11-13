@@ -2,6 +2,35 @@
 
 Guidance for Claude Code (and similar agents) working in this repository.
 
+## Jacob's identity on the Arx dev box is real user data
+
+Since 2026-10-04 the Hermes WebUI at `localhost:8788` talks to the dev engine (port 8082) as the
+identity `owner-jacob` (engine email `debug+owner-jacob@test.alfrd.internal`). That is Jacob's own
+working memory, not test data. The previous identity, `webui-dev`, is kept untouched as test history.
+
+- **Never send a turn as `owner-jacob`**: not through `/debug/converse`, the runner adapter, the
+  activity or assignment debug routes, or the WebUI. Do not pass it as `syntheticUserId` or `userEmail`.
+- **Never reset, purge, edit or delete its data.**
+- **Use your own `debug+<label>` identity for all verification**, with a label that identifies you
+  or the task (for example `debug+std-ctx-verify-1`). Leave your identities in place afterwards.
+- **Do not call `DELETE /debug/converse/purge` on the dev engine.** It deletes every user whose
+  email ends in `@test.alfrd.internal`, and `owner-jacob` is one of them, because the adapter can
+  only send a synthetic id. The notes cannot make that route safe; only not calling it does.
+  (A code guard that exempts protected identities is a recommended follow-up.)
+- Where it is set: the `ENGRAM_SYNTHETIC_USER_ID=` line in `deploy/scripts/run-runner-adapter.sh`,
+  run by `hermes-runner-adapter.service` (enabled, so it survives restarts and reboots; the data
+  lives in `data/dev/engram-db`). To revert to the old identity, change that line back to
+  `webui-dev` and run `sudo systemctl restart hermes-runner-adapter.service`.
+
+## Building on the box
+
+- Build in a git worktree, never in the live checkout.
+- Never write over the running jar. Build under another name and keep the old jar.
+- Before any deploy, take a graph backup (see `docs/graph-backup-restore.md`) and keep a rollback jar.
+- Compare vertex and edge counts and the constraint rule count before and after the restart.
+- A scratch engine (a restore of a backup, to try something without touching a live file) is started only with `deploy/scripts/scratch-engine.sh`. It sets its own home directory (`-Duser.home`; the JVM ignores `$HOME`), tick directory, tokens, port and every path that defaults to the home directory. Never start one by hand without all of them (the env block is in `docs/goal-runner.md`).
+- Merging to `master` auto-deploys the hosted app (`.do/app.yaml`). That is a separate step from deploying to the box.
+
 ## Observability
 
 Production logs (DigitalOcean App Platform deployment, `master` branch, auto-deployed
@@ -117,7 +146,9 @@ Token budget and wall-clock both matter. Most discovery waste comes from over-se
 
 - Always use `--rerun-tasks` when verifying a fix (see Coroutine Pitfall 3).
 - For pass/fail counts, use the canonical one-liner in `src/test/kotlin/SKILL.md`. Do not improvise alternative grep pipelines.
-- Never declare a task done without running the full suite (`./gradlew test --rerun-tasks`) at the end — not just the new test class.
+- **On the box (arx-box), compile only**: `./gradlew compileKotlin compileTestKotlin --rerun-tasks`, under the 4 GiB free-RAM guard (stop if available memory falls below 4 GiB). Do not run the full suite there.
+- **The full suite runs on the cloud agent.** A task is not done until the cloud suite is green.
+- A full run on the owner's Windows PC gave 73 failures on code the cloud suite passes; many are POSIX permission, symlink and line-ending problems. Do not use the PC to verify a change.
 - Report numbers in the form `N tests, M failures` (e.g. `206 tests, 0 failures`). Do not paraphrase.
 
 ## Planning

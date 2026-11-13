@@ -5,6 +5,7 @@ import java.time.ZoneId
 import java.util.UUID
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -139,7 +140,14 @@ class DirectorWriter(
 ) {
     private val logger = LoggerFactory.getLogger(DirectorWriter::class.java)
 
+    /** The only public way to write: under a cycle the runner issued ([DirectorCycles.begin]). The caller cannot name a cycle number. */
     suspend fun apply(
+        userEmail: String, cycle: DirectorCycle, cycleSeq: Long, operations: List<HorizonOperation>,
+        zone: ZoneId = ZoneId.systemDefault(), requestId: String = "director-${UUID.randomUUID()}",
+    ): List<AppliedOperation> = apply(userEmail, cycle.goalUid, cycle.number, cycleSeq, operations, zone, requestId)
+
+    /** Tests of the stamp itself name a number; production code cannot (it is `internal`). */
+    internal suspend fun apply(
         userEmail: String, goalUid: String, cycle: Int, cycleSeq: Long, operations: List<HorizonOperation>,
         zone: ZoneId = ZoneId.systemDefault(), requestId: String = "director-${UUID.randomUUID()}",
     ): List<AppliedOperation> {
@@ -166,6 +174,11 @@ class DirectorWriter(
      * touched, so the owner (or the channel) decides. Refused, like any write, when the goal is not in a state the Director may write for.
      */
     suspend fun suggestStateChange(
+        userEmail: String, cycle: DirectorCycle, cycleSeq: Long, targetUid: String, suggested: WorkState, reason: String,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): List<AppliedOperation> = suggestStateChange(userEmail, cycle.goalUid, cycle.number, cycleSeq, targetUid, suggested, reason, zone)
+
+    internal suspend fun suggestStateChange(
         userEmail: String, goalUid: String, cycle: Int, cycleSeq: Long, targetUid: String, suggested: WorkState, reason: String,
         zone: ZoneId = ZoneId.systemDefault(),
     ): List<AppliedOperation> {
@@ -181,12 +194,40 @@ class DirectorWriter(
 
     /** Sends the channel a message about a goal, as a node (see [DirectorMessageStore]). Null when there is nothing to send it from: no message store, or a goal the Director may not speak for. */
     suspend fun send(
-        userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String? = null,
+        userEmail: String, cycle: DirectorCycle, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L, closedAs: String? = null,
+    ): DirectorMessage? = send(userEmail, cycle.goalUid, cycle.number, kind, text, answersUid, usageTokens, usageMillis, closedAs)
+
+    internal suspend fun send(
+        userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L, closedAs: String? = null,
     ): DirectorMessage? {
         val store = messages ?: return null
         val goal = structure.getItem(userEmail, goalUid) ?: return null
         // A message may be sent for any approved goal, running or not: a finished or stopped goal is exactly when one is wanted.
         if (goal.kind != ItemKind.GOAL || goal.approval != "approved") return null
-        return store.post(userEmail, goalUid, cycle, kind, text, answersUid)
+        return store.post(userEmail, goalUid, cycle, kind, text, answersUid, usageTokens, usageMillis, closedAs)
+    }
+}
+
+/** One cycle of one goal, as the runner numbered it. Only [DirectorCycles.begin] makes one, so a caller of [DirectorWriter] cannot pick a number. */
+class DirectorCycle internal constructor(val goalUid: String, val number: Int)
+
+/**
+ * Numbers a goal's cycles: 1, 2, 3 ..., never reused, never lowered. The next number is one past the highest the goal has ever carried on a message or on an
+ * item it wrote (retracted ones included), and the cycle is recorded on a quiet message the moment it begins, so even a cycle that writes nothing and is
+ * interrupted has used its number. Serialised per goal so two starts cannot take the same one.
+ */
+class DirectorCycles(private val structure: HorizonStructureStore, private val messages: DirectorMessageStore) {
+    private val locks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+    suspend fun begin(userEmail: String, goalUid: String): DirectorCycle? {
+        val lock = locks.computeIfAbsent("$userEmail/$goalUid") { kotlinx.coroutines.sync.Mutex() }
+        return lock.withLock {
+            val goal = structure.getItem(userEmail, goalUid)?.takeIf { it.kind == ItemKind.GOAL && it.approval == "approved" } ?: return@withLock null
+            val fromItems = structure.directorItems(userEmail, goalUid).maxOfOrNull { it.directorCycle ?: 0 } ?: 0
+            val number = maxOf(messages.latestCycle(userEmail, goalUid), fromItems) + 1
+            // The start is the record that the number is taken. If it cannot be written, there is no cycle.
+            messages.post(userEmail, goal.uid, number, DirectorMessageKind.PROGRESS, "Cycle $number started.") ?: return@withLock null
+            DirectorCycle(goalUid, number)
+        }
     }
 }

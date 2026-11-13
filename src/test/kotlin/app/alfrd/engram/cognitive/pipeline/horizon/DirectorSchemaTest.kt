@@ -65,6 +65,10 @@ class DirectorSchemaTest {
         assertTrue(linked.all { it.applied }, linked.joinToString { it.summary })
         val m = runBlocking { writer.send(user, goal.uid, 1, DirectorMessageKind.QUESTION, "Is Williams Ltd the same client as Williams & Co?", made[2].resultUid) }
         assertTrue(m != null)
+        // Phase C: a cycle's closing message carries what it used and how it ended; the numbers and the word are optional properties and pass every constraint.
+        val closing = runBlocking { writer.send(user, goal.uid, 1, DirectorMessageKind.PROGRESS, "Cycle 1: done", null, usageTokens = 1234, usageMillis = 5678, closedAs = "completed") }
+        assertTrue(closing != null && closing.closedAs == "completed" && closing.usageTokens == 1234L && closing.usageMillis == 5678L)
+        assertEquals(1234L to 5678L, runBlocking { messages.usage(user, goal.uid) })
         val retracted = runBlocking { applier.apply(user, ++seq, "owner-1", listOf(RetractCycle(goal.uid, 1, "take it back")), ZoneOffset.UTC) }
         assertTrue(retracted.single().applied, retracted.single().summary)
 

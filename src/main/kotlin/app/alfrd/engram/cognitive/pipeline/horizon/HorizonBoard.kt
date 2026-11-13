@@ -147,13 +147,18 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
 
     private class Stats(val project: BoardProject?, val unfiled: List<BoardItem>?, val unfiledHidden: Int, val flags: List<Flags>, val changedItems: Int, val pressure: Double, val projectDueSoon: Boolean) {
         val items: List<BoardItem> get() = project?.items ?: unfiled.orEmpty()
-        val open: Int get() = flags.size
+
+        /** What the Director wrote here. Listed, and counted on its own, but never part of the owner's counts or of what ranks the node: one cycle cannot reorder the board. */
+        val directorFlags: List<Flags> get() = flags.filter { it.item.byDirector }
+        val ownerFlags: List<Flags> get() = flags.filter { !it.item.byDirector }
+        val directorOpen: Int get() = directorFlags.size
+        val open: Int get() = ownerFlags.size
         val hidden: Int get() = project?.hiddenItems ?: unfiledHidden
-        val active: Int get() = flags.count { it.item.state == WorkState.ACTIVE }
-        val waiting: Int get() = flags.count { it.item.state == WorkState.WAITING }
-        val urgent: Int get() = flags.count { it.urgentMark } + if (projectDueSoon) 1 else 0
-        val waitingDue: Int get() = flags.count { it.waitingDue }
-        val stale: List<Flags> get() = flags.filter { it.staleSoft }
+        val active: Int get() = ownerFlags.count { it.item.state == WorkState.ACTIVE }
+        val waiting: Int get() = ownerFlags.count { it.item.state == WorkState.WAITING }
+        val urgent: Int get() = ownerFlags.count { it.urgentMark } + if (projectDueSoon) 1 else 0
+        val waitingDue: Int get() = ownerFlags.count { it.waitingDue }
+        val stale: List<Flags> get() = ownerFlags.filter { it.staleSoft }
         val pinnedItems: List<Flags> get() = flags.filter { it.item.pinned }
     }
 
@@ -163,7 +168,9 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
         fun endOfDay(d: LocalDate) = d.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         val hardEnd = endOfDay(today.plusDays(policy.alsoDueHardDays))
         val softEnd = endOfDay(today.plusDays(policy.alsoDueSoftDays))
-        val changedByContainer = data.changes.groupBy { it.containerUid }.mapValues { (_, v) -> v.map { it.targetUid }.distinct().size }
+        // A change to something the Director wrote is not a change to the owner's world, so it adds no pressure to the project it sits in.
+        val directorUids = (data.projects.flatMap { it.items } + data.unfiled).filter { it.byDirector }.map { it.uid }.toSet()
+        val changedByContainer = data.changes.filter { it.targetUid !in directorUids }.groupBy { it.containerUid }.mapValues { (_, v) -> v.map { it.targetUid }.distinct().size }
 
         fun flagsOf(i: BoardItem): Flags {
             val canBeOverdue = StateRules.canBeOverdue(i.state)
@@ -184,14 +191,15 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
 
         fun statsOf(project: BoardProject?, unfiled: List<BoardItem>?, containerUid: String?, pinnedNode: Boolean, focus: Double, dueAt: Long?): Stats {
             val flags = (project?.items ?: unfiled.orEmpty()).map(::flagsOf)
+            val ownerFlags = flags.filter { !it.item.byDirector }
             val changed = changedByContainer[containerUid] ?: 0
             val projectDueSoon = dueAt != null && policy.urgency(dueAt, now, policy.projectUrgencyHalfDays, false) >= policy.breakthroughUrgency
             val signals = listOf(
-                policy.boardWeightOverdue * (if (flags.any { it.hardOverdue }) 1.0 else if (flags.any { it.softOverdue }) 0.7 else 0.0),
-                policy.boardWeightDueSoon * (if (flags.any { it.dueSoon } || projectDueSoon) 1.0 else 0.0),
-                policy.boardWeightWaitingDue * (if (flags.any { it.waitingDue }) 1.0 else 0.0),
+                policy.boardWeightOverdue * (if (ownerFlags.any { it.hardOverdue }) 1.0 else if (ownerFlags.any { it.softOverdue }) 0.7 else 0.0),
+                policy.boardWeightDueSoon * (if (ownerFlags.any { it.dueSoon } || projectDueSoon) 1.0 else 0.0),
+                policy.boardWeightWaitingDue * (if (ownerFlags.any { it.waitingDue }) 1.0 else 0.0),
                 policy.boardWeightChanged * (if (changed > 0) minOf(1.0, 0.5 + 0.1 * changed) else 0.0),
-                policy.boardWeightStale * (if (flags.any { it.staleSoft }) 1.0 else 0.0),
+                policy.boardWeightStale * (if (ownerFlags.any { it.staleSoft }) 1.0 else 0.0),
                 policy.boardWeightFocused * focus.coerceIn(0.0, 1.0),
                 policy.boardWeightPinned * (if (pinnedNode) 1.0 else 0.0),
             )
@@ -275,6 +283,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
 
         fun nodeCounts(s: Stats): String = buildList {
             add("${s.open} open")
+            if (s.directorOpen > 0) add("+${s.directorOpen} from the Director")
             if (s.hidden > 0) add("${s.hidden} hidden")
             if (s.urgent > 0) add("!${s.urgent}")
             if (s.waitingDue > 0) add("~${s.waitingDue}")

@@ -121,6 +121,7 @@ fun Application.configureDebugConverseRoutes(
             route("/debug") {
 
                 post("/converse") {
+                app.alfrd.engram.director.goals.ConversationActivity.shared.touch()
                     val traceId = UUID.randomUUID().toString()
                     MDC.put("traceId", traceId)
                     try {
