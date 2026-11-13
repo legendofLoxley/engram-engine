@@ -117,7 +117,7 @@ object HorizonItemsRenderer {
         // observation/interpretation/tool-result distinction must survive regardless of which
         // SurfacingReason branch fired, so this is appended unconditionally, never folded into the
         // `when (surfacing)` above.
-        val provenanceNote = (provenanceAnnotation(item.provenance, item.actorMetadata) ?: sourcedAnnotation(item))?.let { " [$it]" } ?: ""
+        val provenanceNote = (provenanceAnnotation(item.provenance, item.actorMetadata) ?: sourcedAnnotation(item) ?: directorAnnotation(item))?.let { " [$it]" } ?: ""
         val uid = item.sourceRefs.firstOrNull()?.phraseUid
         val ref = uid?.let { refs[it] }
         val evidenceDate = item.lastEvidenceAt?.let { java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate() }
@@ -224,6 +224,7 @@ object HorizonItemsRenderer {
         val fromOutside = item.category == HorizonItemCategory.ENVIRONMENT_EVENT || item.actorMetadata != null ||
             item.surfacing is SurfacingReason.Peripheral || item.surfacing is SurfacingReason.RecentActorEvidence
         if (item.provenance == ProvenanceKind.CHANNEL_SOURCED) return "From documents supplied by a channel"
+        if (item.provenance == ProvenanceKind.DIRECTOR) return "Written by the Director"
         return if (fromOutside) "Reported from outside this conversation" else "Not filed under any project"
     }
 
@@ -361,7 +362,16 @@ object HorizonItemsRenderer {
             "tool result, $outcomeWord — self-reported, not independently verified"
         }
         ProvenanceKind.CHANNEL_SOURCED -> null // needs the document's name; see [sourcedAnnotation]
+        ProvenanceKind.DIRECTOR -> null // needs the goal and cycle; see [directorAnnotation]
         ProvenanceKind.EXPLICIT_USER_STATEMENT, ProvenanceKind.ENVIRONMENT_SIGNAL, ProvenanceKind.MODEL_INFERENCE -> null
+    }
+
+    /** An item the Director wrote while working a goal: said to be the Director's own writing, with the goal and cycle, plainly not the owner's statement. */
+    private fun directorAnnotation(item: HorizonItem): String? {
+        if (item.provenance != ProvenanceKind.DIRECTOR) return null
+        val note = item.director
+        val where = if (note == null) "" else ", goal ${note.goalUid.take(8)} cycle ${note.cycle}"
+        return "written by the Director$where — not the owner's statement; the owner adopts, corrects or drops it with the usual verbs"
     }
 
     /**

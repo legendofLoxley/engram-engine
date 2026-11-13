@@ -39,13 +39,15 @@ object DirectorPromptRenderer {
      * The same situation and Horizon as [render], opened with [CHANNEL_PREAMBLE] instead of the Director's policy. Used only by the owner's
      * Horizon tool: the channel reading it is Claude and stays itself; alfrd is the memory behind it.
      */
-    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null, omitted: Int = 0): String = buildString {
+    fun renderForChannel(state: SelfState, horizon: AssembleOutcome, zone: ZoneId, now: Instant, refs: Map<String, String> = emptyMap(), board: RenderedBoard? = null, omitted: Int = 0, directorMessages: String? = null): String = buildString {
         append(CHANNEL_PREAMBLE)
         append("\n\n")
         append(situation(state, zone, "alfrd's situation:"))
         append("\n\n")
         append(horizonSection(horizon, zone, now, "alfrd's memory of the owner", refs, board, omitted))
         append('\n')
+        // What the Director has sent the channel since this channel last read (see DirectorMessageDigest); nothing at all when there is nothing to say.
+        if (!directorMessages.isNullOrBlank()) { append('\n'); append(directorMessages); append('\n') }
     }
 
     fun situation(s: SelfState, zone: ZoneId, heading: String = "Your situation:"): String = buildString {

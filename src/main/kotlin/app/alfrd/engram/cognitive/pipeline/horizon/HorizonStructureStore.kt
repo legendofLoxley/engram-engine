@@ -118,6 +118,11 @@ data class ItemExtras(
     val stopWhen: String? = null,
     /** A goal's budget, in the owner's words (a count of cycles, an hour limit). Ignored for other kinds. */
     val budget: String? = null,
+    /**
+     * For a goal: the stopped goal this one replaces. [HorizonStructureStore.createItem] checks that goal (it is a goal, it is stopped, nothing has replaced it
+     * yet) and writes the supersedes link in the same transaction as the new goal, so a replacement cannot exist without its link. Ignored for other kinds.
+     */
+    val replaces: String? = null,
 )
 
 /** What approving a goal came to. */
@@ -218,6 +223,9 @@ data class ItemRecord(
     val doneWhen: String? = null,
     val stopWhen: String? = null,
     val budget: String? = null,
+    /** Set only on what the Director wrote: the goal it was working and which cycle of it (see [DirectorStamp]). Null for everything else, whoever wrote it. */
+    val directorGoalUid: String? = null,
+    val directorCycle: Int? = null,
 ) {
     /** When the item was last confirmed: its stamp, else when it was last changed, else when it was made. */
     val evidenceAt: Long get() = lastEvidenceAt ?: updatedAt.takeIf { it > 0L } ?: createdAt
@@ -430,6 +438,19 @@ interface HorizonStructureStore {
     suspend fun progressBy(userEmail: String, fromUid: String): List<ProgressLink>
 
     /** Records the wall-clock time of the user's latest turn, only ever moving it forward. False for an unknown user. */
+    /**
+     * What the Director wrote for [goalUid], in [cycle] when given (else in every cycle), oldest first. Read only. Items only: the messages it sent are
+     * kept apart (see [DirectorMessageStore]).
+     */
+    suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int? = null): List<ItemRecord> = emptyList()
+
+    /**
+     * Retracts everything the Director wrote for [goalUid] in [cycle]: each item is set to dropped, with a change record (cause `retract_cycle`), and nothing is
+     * deleted. An item that is already dropped is left as it is and counted. Links the Director wrote stay where they are; they start at an item that is now
+     * dropped, and a link from a dropped item is not evidence about anything. Idempotent: a second call finds everything already dropped.
+     */
+    suspend fun retractDirectorCycle(userEmail: String, cycleSeq: Long, goalUid: String, cycle: Int): RetractOutcome = RetractOutcome(emptyList(), 0)
+
     suspend fun touchLastActive(userEmail: String, atMillis: Long): Boolean
 
     // ── Reads ────────────────────────────────────────────────────────────────
@@ -479,6 +500,9 @@ private const val MAX_GOAL_FIELD = 500
 private const val MAX_GOAL_BUDGET = 200
 
 /** One `PROGRESS_OF` edge: [fromUid] is progress on [toUid]. */
+/** What retracting one goal cycle came to: the items now dropped by it, and how many were already dropped. */
+data class RetractOutcome(val retracted: List<ItemText>, val alreadyDropped: Int)
+
 data class ProgressLink(val fromUid: String, val toUid: String, val createdAt: Long, val cycleSeq: Long, val writer: String)
 
 /** An item's identity and words, nothing more — see [HorizonStructureStore.scanItemTexts]. */
@@ -494,6 +518,9 @@ class ArcadeHorizonStructureStore(
 
     /** Who and what is making the change in progress; set by [mutate] on the writing thread, under the Horizon write lock. */
     private val changeContext = ThreadLocal<ChangeContext?>()
+
+    /** The Director's goal and cycle when the change in progress is one of its writes; set by [mutate] like [changeContext]. */
+    private val directorStamp = ThreadLocal<DirectorStamp?>()
 
     /** Records one tracked change in the writing transaction (see [ChangeTracking]); nothing is written when [old] and [new] are the same. */
     private fun recordChange(owner: String, target: Vertex, field: String, old: String?, new: String?) {
@@ -560,6 +587,24 @@ class ArcadeHorizonStructureStore(
                 logger.warn("createItem: no User vertex for email=$userEmail — skipping")
                 return@mutate null
             }
+            // The Director's own Source is used under the Director's stamp and only then, and the stamp is used only with that Source: nothing the owner's paths write
+            // can be asserted by the Director, and nothing the Director writes can be asserted by anyone else.
+            val stamp = directorStamp.get()
+            if ((sourceType == DIRECTOR_SOURCE_TYPE) != (stamp != null)) {
+                logger.warn("createItem: the Director's source and the Director's stamp go together; refusing")
+                return@mutate null
+            }
+            // A replacement for a stopped goal carries the link to it: both are checked before anything is written, and the link is written with the goal.
+            val replaced: Vertex? = if (kind == ItemKind.GOAL && extras.replaces != null) {
+                val old = HorizonOwnership.findPhraseOwnedByUser(db, userEmail, extras.replaces)
+                val oldState = old?.let { WorkState.of(it.get("state") as? String, it.get("status") as? String) }
+                val alreadyReplaced = old?.getEdges(Vertex.DIRECTION.IN, "RELATED_TO")?.any { it.get("relationType") == "supersedes" } == true
+                if (old == null || old.typeName != ItemKind.GOAL.typeName || oldState != WorkState.DROPPED || alreadyReplaced) {
+                    logger.warn("createItem: {} is not a stopped goal that nothing has replaced; refusing the replacement", extras.replaces)
+                    return@mutate null
+                }
+                old
+            } else null
             val namespacedKey = opKey?.let { "$userEmail|$it" }
             if (namespacedKey != null) {
                 findOwnedItemByOpKey(userEmail, namespacedKey)?.let { existing ->
@@ -617,17 +662,21 @@ class ArcadeHorizonStructureStore(
                 }
                 // Facts happened too: the time something took place, when it is known.
                 extras.happened?.let { set("happenedAt", it.at); if (it.hasTime) set("happenedHasTime", true) }
+                // What the Director writes says so on the item itself, from the moment it exists: which goal, which cycle. Nothing else ever sets these.
+                if (stamp != null) { set("directorGoalUid", stamp.goalUid); set("directorCycle", stamp.cycle) }
                 save()
             }
             source.newEdge("ASSERTS", vertex, false).apply {
                 set("context", sourceType)
                 set("timestamp", now)
-                // A document's words filed by a channel carry no trust from the owner: only their own adoption would.
-                set("scores", if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE) "[]" else """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
+                // A document's words filed by a channel, and the Director's own writing, carry no trust from the owner: only their own adoption would.
+                set("scores", if (sourceType == CHANNEL_SOURCED_SOURCE_TYPE || stamp != null) "[]" else """[{"type":"trust","perspective":"user","value":${DatabaseEngramClient.TRUST_SCORE}}]""")
                 set("cycleSeq", cycleSeq)
+                if (stamp != null) { set("directorGoalUid", stamp.goalUid); set("directorCycle", stamp.cycle) }
                 save()
             }
             if (project != null) newPartOf(vertex, project, cycleSeq, userEmail)
+            replaced?.let { RelatedToEdges.createSupersedes(vertex.modify(), it.modify(), cycleSeq, now, ownerEmail = userEmail) }
             vertex.toItemRecord()
         }
     }
@@ -674,6 +723,7 @@ class ArcadeHorizonStructureStore(
                 set("cycleSeq", cycleSeq)
                 set("ownerEmail", userEmail)
                 set("strength", 1.0)
+                directorStamp.get()?.let { set("directorGoalUid", it.goalUid); set("directorCycle", it.cycle) }
                 save()
             }
             true
@@ -1045,6 +1095,43 @@ class ArcadeHorizonStructureStore(
             out.sortedBy { it.createdAt }
         }
 
+    override suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int?): List<ItemRecord> = read("directorItems", emptyList()) {
+        val sql = "SELECT FROM Phrase WHERE ownerEmail = :e AND directorGoalUid = :g" + if (cycle != null) " AND directorCycle = :c" else ""
+        val params = mutableMapOf<String, Any>("e" to userEmail, "g" to goalUid).apply { if (cycle != null) put("c", cycle) }
+        db.query("sql", sql, params).use { rs ->
+            val out = mutableListOf<ItemRecord>()
+            while (rs.hasNext()) out += rs.next().toElement().asVertex().toItemRecord()
+            out.sortedBy { it.createdAt }
+        }
+    }
+
+    override suspend fun retractDirectorCycle(userEmail: String, cycleSeq: Long, goalUid: String, cycle: Int): RetractOutcome =
+        mutate("retractDirectorCycle", RetractOutcome(emptyList(), 0)) {
+            val targets = mutableListOf<Vertex>()
+            db.query("sql", "SELECT FROM Phrase WHERE ownerEmail = :e AND directorGoalUid = :g AND directorCycle = :c", mapOf("e" to userEmail, "g" to goalUid, "c" to cycle)).use { rs ->
+                while (rs.hasNext()) targets += rs.next().toElement().asVertex()
+            }
+            val dropped = mutableListOf<ItemText>()
+            var already = 0
+            for (target in targets.sortedBy { (it.get("createdAt") as? Number)?.toLong() ?: 0L }) {
+                val uid = target.get("uid") as? String ?: continue
+                val text = target.get("text") as? String ?: ""
+                if (ItemKinds.isStateful(target.typeName)) {
+                    val current = WorkState.of(target.get("state") as? String, target.get("status") as? String)
+                    if (current == WorkState.DROPPED) { already++; continue }
+                    applyState(userEmail, target, WorkState.DROPPED, null, null)
+                } else {
+                    // A note has no state of its own. Retracting it writes the same words a task gets (dropped, resolved, when), which the readers honour, and the same change record.
+                    if (target.get("state") == WorkState.DROPPED.wire()) { already++; continue }
+                    val now = System.currentTimeMillis()
+                    target.modify().apply { set("state", WorkState.DROPPED.wire()); set("status", WorkState.DROPPED.status); set("resolvedAt", now); set("updatedAt", now); save() }
+                    recordChange(userEmail, target, "state", null, WorkState.DROPPED.wire())
+                }
+                dropped += ItemText(uid, text)
+            }
+            RetractOutcome(dropped, already)
+        }
+
     override suspend fun touchLastActive(userEmail: String, atMillis: Long): Boolean =
         mutate("touchLastActive", false) {
             val userVertex = HorizonOwnership.findUserVertex(db, userEmail) ?: return@mutate false
@@ -1214,16 +1301,17 @@ class ArcadeHorizonStructureStore(
         // The caller's ChangeContext (the verb being applied), else this operation's own name, becomes the cause of any change recorded in body.
         val caller = coroutineContext[ChangeContext]
         val context = ChangeContext(caller?.cause ?: op.replace(Regex("([A-Z])")) { "_" + it.value.lowercase() }, caller?.actor)
-        return mutateIn(context, op, failure, body)
+        return mutateIn(context, coroutineContext[DirectorContext]?.stamp, op, failure, body)
     }
 
-    private suspend fun <T> mutateIn(context: ChangeContext, op: String, failure: T, body: () -> T): T = withContext(Dispatchers.IO) {
+    private suspend fun <T> mutateIn(context: ChangeContext, director: DirectorStamp?, op: String, failure: T, body: () -> T): T = withContext(Dispatchers.IO) {
         try {
             withHorizonWriteLock(db, lockTimeoutMs) {
                 var result: T = failure
                 db.transaction {
                     changeContext.set(context)
-                    try { result = body() } finally { changeContext.remove() }
+                    directorStamp.set(director)
+                    try { result = body() } finally { changeContext.remove(); directorStamp.remove() }
                 }
                 result
             } ?: run {
@@ -1342,9 +1430,9 @@ class ArcadeHorizonStructureStore(
             uid = get("uid") as String,
             kind = kind,
             text = get("text") as? String ?: "",
-            status = if (!spec.carriesState) null else get("status") as? String,
+            status = if (!spec.carriesState) retractedStatus() else get("status") as? String,
             dueAt = (get(spec.dueProperty ?: "dueAt") as? Number)?.toLong(),
-            state = if (!spec.carriesState) null else WorkState.fromWire(get("state") as? String),
+            state = if (!spec.carriesState) retractedState() else WorkState.fromWire(get("state") as? String),
             dueKind = DueKind.fromWire(get("dueKind") as? String),
             dueHasTime = get("dueHasTime") == true,
             startsAt = (get("startsAt") as? Number)?.toLong(),
@@ -1368,11 +1456,17 @@ class ArcadeHorizonStructureStore(
             doneWhen = if (kind == ItemKind.GOAL) get("doneWhen") as? String else null,
             stopWhen = if (kind == ItemKind.GOAL) get("stopWhen") as? String else null,
             budget = if (kind == ItemKind.GOAL) get("budget") as? String else null,
+            directorGoalUid = get("directorGoalUid") as? String,
+            directorCycle = (get("directorCycle") as? Number)?.toInt(),
             // SQL, not getVertices(IN, "ASSERTS"): ASSERTS edges are unidirectional, so incoming traversal is silently empty (see HorizonOwnership).
             channelSourced = db.query("sql", "SELECT count(*) AS n FROM ASSERTS WHERE @in.uid = :u AND @out.type = :t", mapOf("u" to (get("uid") as String), "t" to CHANNEL_SOURCED_SOURCE_TYPE))
                 .use { rs -> rs.hasNext() && (rs.next().getProperty<Number>("n")?.toLong() ?: 0L) > 0 },
         )
     }
+
+    /** A fact has no state of its own; a retracted one (see [retractDirectorCycle]) is the one exception, and reads as dropped. */
+    private fun Vertex.retractedStatus(): String? = (get("status") as? String)?.takeIf { it == "resolved" }
+    private fun Vertex.retractedState(): WorkState? = if (retractedStatus() != null) WorkState.fromWire(get("state") as? String) else null
 
     private fun Vertex.attentionOf(): AttentionDirective? =
         AttentionDirective.entries.firstOrNull { it.name.equals(get("attention") as? String, ignoreCase = true) }

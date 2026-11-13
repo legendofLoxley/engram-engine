@@ -348,6 +348,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             "done_when" to str("For a goal: a check anyone could apply to see it is met. Frozen once the goal is approved."),
             "stop_when" to str("For a goal: when to give up on it. Frozen once the goal is approved."),
             "budget" to str("For a goal: how much effort it may take, in the owner's words. Frozen once the goal is approved."),
+            "replaces" to str("For a goal only: ref of a STOPPED goal this one replaces. The new goal is written with its link to the old one in the same step (no separate link_items), serves the same project unless you give another, and is proposed like any goal. A goal that is not stopped, or already has a replacement, cannot be replaced."),
         )
 
         private fun verbOf(variant: JsonObject): String? =
@@ -400,6 +401,18 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             )
         }
 
+        /**
+         * `retract_cycle`: the owner takes back everything one cycle of a goal wrote (the Director's items and notes become dropped, its messages too). Nothing is deleted,
+         * and each item keeps a change record. The cycle number is the one the "From the Director" lines and the Director's items name.
+         */
+        private val RETRACT_CYCLE_VARIANT: JsonObject = variant("retract_cycle", listOf("item", "cycle", "quote")) {
+            mapOf(
+                "item" to str("Ref of the goal whose cycle is retracted."),
+                "cycle" to buildJsonObject { put("type", "integer"); put("minimum", 1); put("description", "Which cycle of the goal (1 for the first) to retract.") },
+                "quote" to QUOTE,
+            )
+        }
+
         /** `confirm_item`: "yes, still live" - refreshes when the item was last confirmed and changes nothing else. */
         private val CONFIRM_ITEM_VARIANT: JsonObject = variant("confirm_item", listOf("item", "quote")) {
             mapOf("item" to str("Ref of a task, event or question the owner says is still live."), "quote" to QUOTE)
@@ -447,7 +460,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         when (verbOf(v)) {
                             "record_item" -> add(OWNER_RECORD_VARIANT)
                             "correct_item" -> add(OWNER_CORRECT_VARIANT)
-                            "reopen_item" -> { add(OWNER_REOPEN_VARIANT); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT); add(APPROVE_GOAL_VARIANT); add(EDIT_GOAL_VARIANT) }
+                            "reopen_item" -> { add(OWNER_REOPEN_VARIANT); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT); add(APPROVE_GOAL_VARIANT); add(EDIT_GOAL_VARIANT); add(RETRACT_CYCLE_VARIANT) }
                             "file_item" -> add(OWNER_FILE_VARIANT)
                             else -> add(v)
                         }

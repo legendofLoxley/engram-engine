@@ -168,6 +168,8 @@ class HorizonOperationApplier(
     private val graph: HorizonGraphStore,
     /** Needed only for a [RecordItem] that names a chunk; without it such an operation is refused. */
     private val sources: SourceStore? = null,
+    /** Needed only for a [RetractCycle], which also retracts the cycle's messages; without it only the items are. */
+    private val directorMessages: DirectorMessageStore? = null,
 ) {
     private val logger = LoggerFactory.getLogger(HorizonOperationApplier::class.java)
 
@@ -183,10 +185,12 @@ class HorizonOperationApplier(
         chunkSourceType: String = DatabaseEngramClient.SOURCE_TYPE,
     ): List<AppliedOperation> {
         val createdContainerUids = mutableMapOf<String, String>()
+        // Under the Director's stamp, the change records name the Director (goal and cycle) as the actor instead of the owner.
+        val director = kotlin.coroutines.coroutineContext[DirectorContext]?.stamp
         return operations.mapIndexed { index, op ->
             try {
                 // The verb is the cause of any change this operation records (see ChangeRecords).
-                kotlinx.coroutines.withContext(ChangeContext(op.verb)) {
+                kotlinx.coroutines.withContext(ChangeContext(op.verb, director?.actor)) {
                     applyOne(userEmail, cycleSeq, (op as? RecordItem)?.itemKey ?: "$requestId:$index", op, createdContainerUids, zone, sourceType, chunkSourceType)
                 }
             } catch (e: Exception) {
@@ -270,6 +274,21 @@ class HorizonOperationApplier(
                 GoalEdit.NOT_FOUND -> AppliedOperation(op, false, "Could not change $label")
             }
         }
+        is RetractCycle -> {
+            val goal = structure.getItem(userEmail, op.goalUid)?.takeIf { it.kind == ItemKind.GOAL }
+            if (goal == null) AppliedOperation(op, false, "Could not retract: that is not a goal")
+            else {
+                val label = "\"${goal.text}\""
+                val items = structure.retractDirectorCycle(userEmail, cycleSeq, op.goalUid, op.cycle)
+                val messages = directorMessages?.retractCycle(userEmail, op.goalUid, op.cycle) ?: 0
+                if (items.retracted.isEmpty() && items.alreadyDropped == 0 && messages == 0) {
+                    AppliedOperation(op, false, "Nothing to retract: the Director wrote nothing for goal $label in cycle ${op.cycle}")
+                } else {
+                    val already = if (items.alreadyDropped > 0) ", ${items.alreadyDropped} already dropped" else ""
+                    AppliedOperation(op, true, "Retracted cycle ${op.cycle} of goal $label: ${items.retracted.size} item(s) dropped, $messages message(s) dropped$already. Nothing was deleted")
+                }
+            }
+        }
         is ConfirmItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val done = structure.touchEvidence(userEmail, cycleSeq, op.targetUid)
@@ -315,26 +334,33 @@ class HorizonOperationApplier(
         sourceType: String = DatabaseEngramClient.SOURCE_TYPE,
         /** For an item filed from a source: when the source says it was last edited, which is when the item's evidence starts (bounded by now at the write). */
         evidenceAt: Long? = null,
-    ): AppliedOperation = duplicateOf(userEmail, opKey, op, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE, editedAt = evidenceAt) } ?: run {
+    ): AppliedOperation = duplicateOf(userEmail, opKey, op, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE, directorGoalUid = kotlin.coroutines.coroutineContext[DirectorContext]?.stamp?.goalUid)?.let { existing -> applyDuplicate(userEmail, cycleSeq, op, existing, zone, scopedToSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE, editedAt = evidenceAt) } ?: run {
+            // A replacement for a stopped goal: the goal it replaces must be stopped (the store checks again, with the link, in one transaction).
+            val replaced = if (op.kind == ItemKind.GOAL && op.replacesUid != null) structure.getItem(userEmail, op.replacesUid) else null
+            if (op.kind == ItemKind.GOAL && op.replacesUid != null && (replaced == null || replaced.kind != ItemKind.GOAL || replaced.workState != WorkState.DROPPED)) {
+                return@run AppliedOperation(op, false, "Refused: only a stopped goal can be replaced. Stop it first (set_state stopped), then propose the replacement")
+            }
             val stated = op.projectUid ?: op.projectName?.let { createdContainerUids[OperationParser.normalizeName(it)] }
             // The model rarely files an item even when the message plainly names its project, and an unfiled
             // item is outside every focus. So when it didn't file it and wasn't unsure, file it where its own
             // words say it belongs — only when that is unambiguous. See [ProjectInference].
-            val inferred = if (stated == null && !op.askWhichProject) {
+            val inferred = if (stated == null && !op.askWhichProject && replaced == null) {
                 ProjectInference.infer("${op.quote} ${op.title ?: ""}", structure.listContainers(userEmail, ContainerKind.PROJECT))
             } else null
-            val projectUid = stated ?: inferred?.uid
+            // A replacement serves the same project as the goal it replaces unless the owner names another.
+            val projectUid = stated ?: inferred?.uid ?: replaced?.projectUid
             val extras = ItemExtras(
                 state = op.state, dueKind = op.dueKind, dueHasTime = op.dueHasTime,
                 starts = op.startsAt?.let { TimeValue(it, op.startsHasTime) }, nudge = op.nudgeAt?.let { TimeValue(it, op.nudgeHasTime) },
                 happened = op.happenedAt?.let { TimeValue(it, op.happenedHasTime) }, waitingOn = op.waitingOn,
-                doneWhen = op.doneWhen, stopWhen = op.stopWhen, budget = op.budget,
+                doneWhen = op.doneWhen, stopWhen = op.stopWhen, budget = op.budget, replaces = replaced?.uid,
                 fromSource = sourceType == CHANNEL_SOURCED_SOURCE_TYPE,
                 evidenceAt = evidenceAt.takeIf { sourceType == CHANNEL_SOURCED_SOURCE_TYPE },
             )
             val record = structure.createItem(userEmail, cycleSeq, op.kind, op.title ?: op.quote, op.dueAt, projectUid, askedBy = "user", opKey = opKey, sourceQuote = op.quote, sourceType = sourceType, extras = extras)
             if (record == null) {
-                AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"")
+                val why = if (replaced != null) " (the goal it replaces must be stopped and not already replaced)" else ""
+                AppliedOperation(op, false, "Could not record ${op.kind.name.lowercase()} \"${op.quote}\"$why")
             } else {
                 op.about.forEach { structure.linkAbout(userEmail, cycleSeq, record.uid, it) }
                 val basis = if (op.chunkUid != null) "from the source's words" else "from what you said"
@@ -344,7 +370,8 @@ class HorizonOperationApplier(
                     op.state != null && op.state != WorkState.OPEN -> " (${op.state.wire()}${op.waitingOn?.let { " on $it" } ?: ""})"
                     else -> ""
                 }
-                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed$stateNote", record.uid, record.text)
+                val replacing = replaced?.let { " — replaces the stopped goal \"${it.text}\", linked in the same step" } ?: ""
+                AppliedOperation(op, true, "Recorded ${op.kind.name.lowercase()}: \"${record.text}\"$filed$stateNote$replacing", record.uid, record.text)
             }
         
     }
@@ -396,7 +423,7 @@ class HorizonOperationApplier(
      * longer wording, comparing the label and the user's own words on each side. A retry of the same request finds
      * the item it made the first time (by its key) and is never mistaken for a duplicate of it.
      */
-    private suspend fun duplicateOf(userEmail: String, opKey: String, op: RecordItem, scopedToSource: Boolean = false): ItemRecord? {
+    private suspend fun duplicateOf(userEmail: String, opKey: String, op: RecordItem, scopedToSource: Boolean = false, directorGoalUid: String? = null): ItemRecord? {
         if (op.kind != ItemKind.TASK && op.kind != ItemKind.EVENT) return null
         if (structure.itemByOpKey(userEmail, opKey) != null) return null
         val incoming = listOfNotNull(op.title, op.quote).map { SalientTokenPropagator.salientTokens(it) }.filter { it.size >= MIN_DUPLICATE_WORDS }
@@ -412,6 +439,9 @@ class HorizonOperationApplier(
             existing.kind == op.kind && existing.status == "open" &&
                 // The owner saying the same thing as a document's item is their adoption, not a duplicate of it: it is recorded as theirs.
                 (op.chunkUid != null || !existing.channelSourced) &&
+                // The Director only ever matches what it wrote for the same goal (never the owner's items: a "duplicate" is a write to the existing item), and the owner saying
+                // the same thing as the Director is recorded as the owner's own, never folded into the Director's item.
+                existing.directorGoalUid == directorGoalUid &&
                 (sameDocument == null || sources!!.sourceUidsOfItem(userEmail, existing.uid).any { it in sameDocument }) &&
                 listOfNotNull(existing.text, existing.sourceQuote).map { SalientTokenPropagator.salientTokens(it) }.any { theirs ->
                     incoming.any { ours -> similarEnough(ours, theirs) }

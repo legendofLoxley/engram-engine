@@ -28,6 +28,8 @@ data class BoardItem(
     val pinned: Boolean,
     val evidenceAt: Long,
     val createdAt: Long,
+    /** True for something the Director wrote for a goal: its line says so, so it never reads as the owner's. */
+    val byDirector: Boolean = false,
 )
 
 /** A project and the open items filed under it. Suppressed items and items of a done or silenced project are never here. */
@@ -246,7 +248,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
                 if (f.waitingDue) add("waiting" + (i.waitingOn?.let { " on $it" } ?: "") + ", check-in date reached")
                 if (i.pinned && f.urgentMark.not() && !f.waitingDue && i.dueAt == null) add("pinned")
             }.joinToString(", ")
-            return "  $mark ${handle(i.uid, "i", refs)}${q(i.text)}" + if (detail.isNotEmpty()) ": $detail" else ""
+            return "  $mark ${handle(i.uid, "i", refs)}${q(i.text)}" + (if (i.byDirector) " [from the Director]" else "") + if (detail.isNotEmpty()) ": $detail" else ""
         }
 
         fun staleLine(s: Stats, refs: Map<String, String>?): String {

@@ -7,6 +7,8 @@ import app.alfrd.engram.cognitive.pipeline.horizon.AppliedOperation
 import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeBoardSource
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeCycleSequencer
+import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeDirectorMessageStore
+import app.alfrd.engram.cognitive.pipeline.horizon.DirectorMessageDigest
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPolicy
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonAssembler
 import app.alfrd.engram.cognitive.pipeline.horizon.ArcadeHorizonGraphStore
@@ -478,6 +480,8 @@ fun bootstrapOwnerHorizon(
     val graph = ArcadeHorizonGraphStore(db)
     val assembler = ArcadeHorizonAssembler(db)
     val tick = (tickStartup as? DirectorTickStartup.Running)?.tick
+    val policy = HorizonPolicy.fromEnvironment()
+    val directorMessages = ArcadeDirectorMessageStore(db)
     val service = OwnerHorizonService(
         email = email,
         db = db,
@@ -487,10 +491,11 @@ fun bootstrapOwnerHorizon(
             notion = { notionState(notionStartup) },
             hermes = { hermesActive.activeByKind() },
             budgets = { budgetDefaults(notionStartup) },
-            board = ArcadeBoardSource(db, HorizonPolicy.fromEnvironment()),
+            board = ArcadeBoardSource(db, policy),
+            directorMessages = DirectorMessageDigest(directorMessages, structure, policy),
         ),
         sequencer = ArcadeCycleSequencer(db),
-        applier = HorizonOperationApplier(structure, graph, sourceStore),
+        applier = HorizonOperationApplier(structure, graph, sourceStore, directorMessages),
         snapshots = ViewSnapshotBuilder(structure),
         seeder = HorizonSeeder(structure),
         propagator = SalientTokenPropagator(graph, assembler),

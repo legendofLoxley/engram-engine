@@ -845,6 +845,7 @@ class ArcadeHorizonAssembler(
             askedBy = state?.askedBy,
             container = state?.container,
             documentSource = if (c.sourceType == CHANNEL_SOURCED_SOURCE_TYPE) documentNote(c.phraseUid) else null,
+            director = if (c.sourceType == DIRECTOR_SOURCE_TYPE) directorNote(c.phraseUid) else null,
             state = state?.workState?.wire(),
             dueKind = if (state?.dueAt != null) (state.dueKind ?: DueKind.SOFT).wire() else null,
             dueHasTime = state?.dueHasTime == true,
@@ -914,8 +915,22 @@ class ArcadeHorizonAssembler(
         null
     }
 
+    /** The goal and cycle the Director stamped on an item it wrote; null when they cannot be read (the item is still shown as the Director's). */
+    private fun directorNote(phraseUid: String): DirectorNote? = try {
+        db.query("sql", "SELECT directorGoalUid, directorCycle FROM Phrase WHERE uid = :u LIMIT 1", mapOf("u" to phraseUid)).use { rs ->
+            if (!rs.hasNext()) return@use null
+            val row = rs.next().toMap()
+            val goal = row["directorGoalUid"] as? String ?: return@use null
+            DirectorNote(goal, (row["directorCycle"] as? Number)?.toInt() ?: 0)
+        }
+    } catch (e: Exception) {
+        logger.warn("directorNote: could not read the Director's stamp: {}", e::class.java.simpleName)
+        null
+    }
+
     private fun provenanceFor(sourceType: String): ProvenanceKind = when (sourceType) {
         CHANNEL_SOURCED_SOURCE_TYPE -> ProvenanceKind.CHANNEL_SOURCED
+        DIRECTOR_SOURCE_TYPE -> ProvenanceKind.DIRECTOR
         ENVIRONMENT_SOURCE_TYPE -> ProvenanceKind.ENVIRONMENT_SIGNAL
         ACTOR_OBSERVATION_SOURCE_TYPE -> ProvenanceKind.ACTOR_OBSERVATION
         ACTOR_INTERPRETATION_SOURCE_TYPE -> ProvenanceKind.ACTOR_INTERPRETATION

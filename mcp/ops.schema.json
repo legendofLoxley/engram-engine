@@ -93,6 +93,10 @@
                         "budget": {
                             "type": "string",
                             "description": "For a goal: how much effort it may take, in the owner's words. Frozen once the goal is approved."
+                        },
+                        "replaces": {
+                            "type": "string",
+                            "description": "For a goal only: ref of a STOPPED goal this one replaces. The new goal is written with its link to the old one in the same step (no separate link_items), serves the same project unless you give another, and is proposed like any goal. A goal that is not stopped, or already has a replacement, cannot be replaced."
                         }
                     },
                     "required": [
@@ -286,6 +290,37 @@
                     "required": [
                         "verb",
                         "item",
+                        "quote"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "verb": {
+                            "type": "string",
+                            "enum": [
+                                "retract_cycle"
+                            ]
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Ref of the goal whose cycle is retracted."
+                        },
+                        "cycle": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Which cycle of the goal (1 for the first) to retract."
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": "The user's own words, verbatim from their message."
+                        }
+                    },
+                    "required": [
+                        "verb",
+                        "item",
+                        "cycle",
                         "quote"
                     ],
                     "additionalProperties": false

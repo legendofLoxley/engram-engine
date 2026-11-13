@@ -4,6 +4,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.AssembleOutcome
 import app.alfrd.engram.cognitive.pipeline.horizon.BoardComposer
 import app.alfrd.engram.cognitive.pipeline.horizon.BoardPlan
 import app.alfrd.engram.cognitive.pipeline.horizon.BoardSource
+import app.alfrd.engram.cognitive.pipeline.horizon.DirectorMessageDigest
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonPolicy
 import app.alfrd.engram.cognitive.pipeline.horizon.RenderedBoard
 import app.alfrd.engram.cognitive.pipeline.horizon.HorizonAssembler
@@ -38,6 +39,8 @@ class StandingContext(
     private val board: BoardSource? = null,
     /** Where the focused-view size budget (`zoomTokenBudget`) comes from; the board's policy when there is a board, else the environment's. */
     private val policy: HorizonPolicy = board?.policy ?: HorizonPolicy.fromEnvironment(),
+    /** Where the channel's "From the Director" section comes from; null where there is none (the tick, which is the Director itself, never reads it). */
+    private val directorMessages: DirectorMessageDigest? = null,
 ) {
     data class Rendered(val text: String, val outcome: AssembleOutcome, val state: SelfState, val board: RenderedBoard? = null)
 
@@ -82,7 +85,8 @@ class StandingContext(
             marker = marker,
             changes = changes,
         )
-        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs, shownBoard, omitted)
+        val fromDirector = if (forChannel) directorMessages?.section(email, channel, now.toEpochMilli()) else null
+        val text = if (forChannel) DirectorPromptRenderer.renderForChannel(state, outcome, zone, now, refs, shownBoard, omitted, fromDirector)
         else DirectorPromptRenderer.render(state, outcome, zone, now, refs, shownBoard, omitted)
         return Rendered(text, outcome, state, shownBoard)
     }

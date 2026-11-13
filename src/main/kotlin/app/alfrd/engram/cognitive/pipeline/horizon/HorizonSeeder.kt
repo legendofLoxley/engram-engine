@@ -72,7 +72,7 @@ class HorizonSeeder(
                 is FileItem -> { nudge(op.targetUid, 1.0, "touched", label); nudge(op.intoUid, 1.0, "touched", label) }
                 is SetAttention -> nudge(op.targetUid, 1.0, "touched", label)
                 is LinkItems -> { nudge(op.fromUid, 1.0, "touched", label); nudge(op.toUid, 1.0, "touched", label) }
-                is CreateContainer, is SetFocus, is ReleaseFocus, is HoldForChoice -> Unit // a pin is not a nudge; a held feeling touches nothing
+                is CreateContainer, is SetFocus, is ReleaseFocus, is HoldForChoice, is RetractCycle -> Unit // a pin is not a nudge; a held feeling touches nothing; a retraction is not attention
             }
             touched += nudged.size - before
         }
