@@ -169,7 +169,7 @@ class ChangeRecordsTest {
 
     @Test
     fun `only the opted-in fields can be recorded`() {
-        assertEquals(setOf("state", "dueAt", "dueKind", "waitingOn", "nudgeAt", "attention", "approval", "doneWhen", "stopWhen", "budget"), ChangeTracking.FIELDS)
+        assertEquals(setOf("state", "dueAt", "dueKind", "waitingOn", "nudgeAt", "attention", "approval", "doneWhen", "stopWhen", "budget", "sentence"), ChangeTracking.FIELDS)
         assertEquals(setOf("PART_OF", "FOCUSES_ON"), ChangeTracking.EDGES)
         val log = ChangeLog(db)
         val v = db.query("sql", "SELECT FROM User LIMIT 1").use { it.next().toElement().asVertex() }

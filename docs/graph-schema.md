@@ -31,7 +31,7 @@ constraint can never be saved again, not even to change another field.
 | `readonly:Phrase.sourceQuote` | the user's own words are written once, with the item |
 | `state-vocabulary:Task/Event/Question/Goal` | `state` is one of `open, active, waiting, done, dropped` when it is set (absent is allowed: older rows) |
 | `approval-vocabulary:Goal` | `Goal.approval` is `proposed` or `approved` |
-| `mandatory:Goal.approval` | a goal is never written without an approval: it is `proposed` when made, and only the owner's approval (a quoted `approve_goal`) makes it `approved` |
+| `mandatory:Goal.approval` | a goal is never written without an approval: it is `proposed` when made, and only the owner's approval (a quoted `approve_goal`) makes it `approved`. An approved goal is **frozen**: its sentence, `doneWhen`, `stopWhen`, `budget` and project do not change, and a done or stopped goal is final (see `horizon-board.md`, "The rules for a goal"). Those rules are enforced in code, not by a constraint, because a constraint cannot tell a first write from a later one. |
 
 Left out on purpose:
 

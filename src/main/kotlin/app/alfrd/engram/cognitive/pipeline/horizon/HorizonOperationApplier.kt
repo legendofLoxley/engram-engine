@@ -216,12 +216,12 @@ class HorizonOperationApplier(
         is ResolveItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val done = structure.resolve(userEmail, cycleSeq, op.targetUid, resolved = true)
-            AppliedOperation(op, done, if (done) "Marked done: $label" else "Could not mark $label done")
+            AppliedOperation(op, done, if (done) "Marked done: $label" else finalGoalMessage(userEmail, op.targetUid, label) ?: "Could not mark $label done")
         }
         is ReopenItem -> {
             val label = labelOf(userEmail, op.targetUid)
             val done = structure.resolve(userEmail, cycleSeq, op.targetUid, resolved = false)
-            AppliedOperation(op, done, if (done) "Reopened: $label" else "Could not reopen $label")
+            AppliedOperation(op, done, if (done) "Reopened: $label" else finalGoalMessage(userEmail, op.targetUid, label) ?: "Could not reopen $label")
         }
         is SetState -> {
             val label = labelOf(userEmail, op.targetUid)
@@ -237,10 +237,13 @@ class HorizonOperationApplier(
                 WorkState.ACTIVE -> "Marked in progress"
                 WorkState.WAITING -> "Marked waiting" + (op.waitingOn?.let { " on $it" } ?: "")
             }
+            // A done or stopped goal is final, which is the more basic reason than "not approved", so it is said first.
+            val final = if (done) null else finalGoalMessage(userEmail, op.targetUid, label)
             AppliedOperation(
                 op, done,
                 when {
                     done -> "$phrase: $label$nudgeNote$note"
+                    final != null -> final
                     unapprovedGoal -> "Refused: $label is not approved, so it cannot run. The owner approves it first (approve_goal, with their own words)"
                     else -> "Could not change the state of $label"
                 },
@@ -259,10 +262,10 @@ class HorizonOperationApplier(
         }
         is EditGoal -> {
             val label = labelOf(userEmail, op.targetUid)
-            when (structure.editGoal(userEmail, cycleSeq, op.targetUid, op.doneWhen, op.stopWhen, op.budget)) {
+            when (structure.editGoal(userEmail, cycleSeq, op.targetUid, op.doneWhen, op.stopWhen, op.budget, op.text)) {
                 GoalEdit.EDITED -> AppliedOperation(op, true, "Changed goal: $label")
                 GoalEdit.UNCHANGED -> AppliedOperation(op, true, "Nothing to change on goal: $label")
-                GoalEdit.DONE_WHEN_LOCKED -> AppliedOperation(op, false, "Refused: the done-when of $label is locked because the goal is approved. Stop the goal and propose a new one to change it")
+                GoalEdit.FROZEN -> AppliedOperation(op, false, "Refused: $label: $GOAL_FROZEN_RULE")
                 GoalEdit.NOT_A_GOAL -> AppliedOperation(op, false, "Could not change $label: it is not a goal")
                 GoalEdit.NOT_FOUND -> AppliedOperation(op, false, "Could not change $label")
             }
@@ -277,7 +280,8 @@ class HorizonOperationApplier(
             val label = labelOf(userEmail, op.targetUid)
             val into = labelOf(userEmail, op.intoUid)
             val done = structure.file(userEmail, cycleSeq, op.targetUid, op.intoUid)
-            AppliedOperation(op, done, if (done) "Filed $label under $into" else "Could not file $label under $into")
+            val frozen = !done && structure.getItem(userEmail, op.targetUid)?.let { it.kind == ItemKind.GOAL && it.approval == "approved" } == true
+            AppliedOperation(op, done, if (done) "Filed $label under $into" else if (frozen) "Refused: $label: $GOAL_FROZEN_RULE" else "Could not file $label under $into")
         }
         is SetFocus -> {
             val label = labelOf(userEmail, op.targetUid)
@@ -484,6 +488,10 @@ class HorizonOperationApplier(
         const val MIN_DUPLICATE_WORDS = 2
         const val DUPLICATE_SIMILARITY = 0.75
     }
+
+    /** The refusal for a state change to a done or stopped goal, which is final; null when the item is not such a goal (so the usual wording applies). */
+    private suspend fun finalGoalMessage(userEmail: String, uid: String, label: String): String? =
+        structure.getItem(userEmail, uid)?.takeIf { it.kind == ItemKind.GOAL && it.workState?.closed == true }?.let { "Refused: $label: $GOAL_FROZEN_RULE" }
 
     private suspend fun labelOf(userEmail: String, uid: String): String {
         structure.getContainer(userEmail, uid)?.let { return "\"${it.name}\"" }

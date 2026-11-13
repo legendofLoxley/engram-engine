@@ -139,15 +139,16 @@ class OwnerHorizonGoalsTest {
 
         // The bar does not move, however it is asked.
         val easier = c.send("Make it easier: done when half are reviewed.", """[{"verb":"edit_goal","item":"$ref","done_when":"half are reviewed","quote":"Make it easier"}]""")
-        assertFalse(easier.applied(0)); assertTrue("locked" in easier.reasonOf(0) && "propose a new one" in easier.reasonOf(0), easier.toString())
+        assertFalse(easier.applied(0)); assertTrue("frozen" in easier.reasonOf(0) && "link_items" in easier.reasonOf(0), easier.toString())
         val corrected = c.send("Change the goal to something easier.", """[{"verb":"correct_item","item":"$ref","title":"Something easier","quote":"Change the goal to something easier"}]""")
         assertEquals("goal_uses_edit_goal", corrected.reasonOf(0))
         assertEquals("every open item has a proposal", goalRow("Review the Williams items").get("doneWhen"))
         val count = manager.getDatabase().query("sql", "SELECT count(*) AS n FROM Goal").use { it.next().getProperty<Number>("n").toLong() }
         assertEquals(1L, count, "no second goal was written by the correction")
 
-        // stop_when and the budget may still change, and a stopped goal leaves the board.
-        assertTrue(c.send("Give it five cycles.", """[{"verb":"edit_goal","item":"$ref","budget":"5 cycles","quote":"Give it five cycles"}]""").applied(0))
+        // stop_when and the budget are frozen with the rest; a stopped goal leaves the board.
+        val budget = c.send("Give it five cycles.", """[{"verb":"edit_goal","item":"$ref","budget":"5 cycles","quote":"Give it five cycles"}]""")
+        assertFalse(budget.applied(0)); assertTrue("frozen" in budget.reasonOf(0), budget.toString())
         val stopped = c.send("Stop the Williams review.", """[{"verb":"set_state","item":"$ref","state":"stopped","quote":"Stop the Williams review"}]""")
         assertTrue(stopped.applied(0), stopped.toString())
         assertFalse("Goals:" in stopped.horizon(), stopped.horizon())
@@ -162,5 +163,44 @@ class OwnerHorizonGoalsTest {
         val r = c.send(null, """[{"verb":"record_item","source":"$id","kind":"goal","quote":"Review everything about Williams"}]""", page)
         assertFalse(r.applied(0), r.toString())
         assertEquals(0L, manager.getDatabase().query("sql", "SELECT count(*) AS n FROM Goal").use { it.next().getProperty<Number>("n").toLong() })
+    }
+
+    @Test
+    fun `a proposed goal can be re-worded, an approved one is frozen and reads as approved, and a stopped one stays stopped`() = app { c ->
+        val said = "I want the Williams items reviewed."
+        val first = c.send(said, """[{"verb":"record_item","kind":"goal","quote":"I want the Williams items reviewed","title":"Review the Williams items"}]""")
+        assertTrue(first.applied(0), first.toString())
+        val ref = refOfGoal(first.refs(), "Review the Williams items")
+
+        // While proposed: the sentence can be changed (from the owner's words), and so can the rest.
+        val reworded = c.send("Make it every Williams item, with five cycles.", """[{"verb":"edit_goal","item":"$ref","title":"Review every Williams item","budget":"5 cycles","quote":"every Williams item, with five cycles"}]""")
+        assertTrue(reworded.applied(0), reworded.toString())
+        assertEquals("proposed", goalRow("Review every Williams item").get("approval"))
+        assertEquals("5 cycles", goalRow("Review every Williams item").get("budget"))
+        val invented = c.send("Make it every Williams item.", """[{"verb":"edit_goal","item":"$ref","title":"Rebuild the entire firewall","quote":"every Williams item"}]""")
+        assertEquals("title_not_in_quote", invented.reasonOf(0))
+
+        // Approved but not started: the board says approved, not running, and everything about its meaning is frozen.
+        val approved = c.send("Yes, go ahead with the Williams review.", """[{"verb":"approve_goal","item":"$ref","quote":"go ahead with the Williams review"}]""")
+        assertTrue(approved.applied(0), approved.toString())
+        assertTrue("Goals: 1 approved." in approved.horizon() && "approved, not started" in approved.horizon(), approved.horizon())
+        assertFalse("running" in approved.horizon().lines().first { it.startsWith("Goals:") }, approved.horizon())
+        for ((label, fields) in listOf("sentence" to """"title":"Review every Williams item now"""", "stop_when" to """"stop_when":"never"""", "budget" to """"budget":"50 cycles"""")) {
+            val frozen = c.send("Change the $label: every Williams item now.", """[{"verb":"edit_goal","item":"$ref",$fields,"quote":"every Williams item now"}]""")
+            assertFalse(frozen.applied(0), label)
+            assertTrue("frozen" in frozen.reasonOf(0) && "stop it, propose a new goal, and link it to the old one with link_items" in frozen.reasonOf(0), frozen.reasonOf(0))
+        }
+        assertEquals("Review every Williams item", goalRow("Review every Williams item").get("text"))
+
+        // It still starts and stops; stopped, it is final.
+        assertTrue(c.send("Run it.", """[{"verb":"set_state","item":"$ref","state":"running","quote":"Run it"}]""").applied(0))
+        val stopped = c.send("Stop the Williams review.", """[{"verb":"set_state","item":"$ref","state":"stopped","quote":"Stop the Williams review"}]""")
+        assertTrue(stopped.applied(0), stopped.toString())
+        assertEquals("approved", goalRow("Review every Williams item").get("approval"))
+        // A just-stopped goal can still be named (so that an item can be reopened), and reopening a goal is refused with the same rule.
+        val reopen = c.send("Bring it back.", """[{"verb":"reopen_item","item":"$ref","quote":"Bring it back"}]""")
+        assertFalse(reopen.applied(0), reopen.toString())
+        assertTrue("link_items" in reopen.reasonOf(0) && "propose a new goal" in reopen.reasonOf(0), reopen.reasonOf(0))
+        assertEquals("dropped", goalRow("Review every Williams item").get("state"))
     }
 }

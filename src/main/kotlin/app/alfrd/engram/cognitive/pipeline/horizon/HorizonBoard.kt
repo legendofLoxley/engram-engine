@@ -316,13 +316,18 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
         // ── goals ────────────────────────────────────────────────────────────
         // Running: approved and going. Waiting for approval: only proposed. Stalled: approved but paused, or open with no evidence for the stale window.
         // Zero goals renders nothing; with many, the section is the counts plus as many lines as fit its own small budget.
-        class GoalView(val goal: BoardGoal, val bucket: Int)   // 0 stalled, 1 waiting for approval, 2 running
+        class GoalView(val goal: BoardGoal, val bucket: Int)   // 0 stalled, 1 waiting for approval, 2 approved but not started, 3 running
         val goalViews = data.goals.map { g ->
-            val stalled = g.approved && (g.state == WorkState.WAITING || (now - g.evidenceAt > policy.staleEvidenceDays * 86_400_000L && g.evidenceAt > 0L))
-            GoalView(g, if (!g.approved) 1 else if (stalled) 0 else 2)
+            // Running means active and nothing else. An approved goal that has not been started is approved, not running; one that is paused, or running with no
+            // evidence for the stale window, is stalled.
+            val running = g.approved && g.state == WorkState.ACTIVE
+            val paused = g.approved && g.state == WorkState.WAITING
+            val quiet = now - g.evidenceAt > policy.staleEvidenceDays * 86_400_000L && g.evidenceAt > 0L
+            GoalView(g, when { !g.approved -> 1; paused || (running && quiet) -> 0; running -> 3; else -> 2 })
         }.sortedWith(compareBy<GoalView> { it.bucket }.thenBy { it.goal.evidenceAt })
         val goalHeader: String? = if (goalViews.isEmpty()) null else buildList {
-            goalViews.count { it.bucket == 2 }.takeIf { it > 0 }?.let { add("$it running") }
+            goalViews.count { it.bucket == 3 }.takeIf { it > 0 }?.let { add("$it running") }
+            goalViews.count { it.bucket == 2 }.takeIf { it > 0 }?.let { add("$it approved") }
             goalViews.count { it.bucket == 1 }.takeIf { it > 0 }?.let { add("$it waiting for approval") }
             goalViews.count { it.bucket == 0 }.takeIf { it > 0 }?.let { add("$it stalled") }
         }.joinToString(", ", "Goals: ", ".")
@@ -332,6 +337,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
             val words = when (v.bucket) {
                 0 -> if (g.state == WorkState.WAITING) "stalled, paused" else "stalled, no evidence since ${Instant.ofEpochMilli(g.evidenceAt).atZone(zone).toLocalDate()}"
                 1 -> "waiting for approval"
+                2 -> "approved, not started"
                 else -> "running"
             }
             return "  $mark ${handle(g.uid, "i", refs)}${q(g.text)}: $words"
@@ -354,7 +360,7 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
         }
         fun fieldWords(field: String): String = when (field) {
             "dueAt" -> "due date"; "dueKind" -> "hard or soft"; "waitingOn" -> "waiting on"; "nudgeAt" -> "check-in date"; "PART_OF" -> "filing"; "FOCUS" -> "focus"
-            "FOCUSES_ON" -> "focus"; else -> field
+            "FOCUSES_ON" -> "focus"; "doneWhen" -> "done-when"; "stopWhen" -> "stop-when"; "sentence" -> "sentence"; else -> field
         }
         val sinceLines: List<(Map<String, String>?) -> String> = data.changes.groupBy { it.targetUid }.values
             .sortedByDescending { group -> group.maxOf { it.at } }

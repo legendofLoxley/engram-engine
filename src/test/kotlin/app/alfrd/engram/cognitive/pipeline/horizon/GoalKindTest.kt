@@ -152,21 +152,21 @@ class GoalKindTest {
     // ── done_when is locked after approval ───────────────────────────────────
 
     @Test
-    fun `done_when can change while the goal is proposed and cannot after it is approved`() {
+    fun `a proposed goal can be edited, and an approved one is frozen`() {
         val g = goal(extras = ItemExtras(doneWhen = "All items reviewed"))
         assertEquals(GoalEdit.EDITED, runBlocking { structure.editGoal(user, 2, g.uid, doneWhen = "All open items have a proposal") })
         assertEquals("All open items have a proposal", stored(g.uid).doneWhen)
 
         runBlocking { structure.approveGoal(user, 3, g.uid, "approved") }
-        assertEquals(GoalEdit.DONE_WHEN_LOCKED, runBlocking { structure.editGoal(user, 4, g.uid, doneWhen = "Something easier") })
+        assertEquals(GoalEdit.FROZEN, runBlocking { structure.editGoal(user, 4, g.uid, doneWhen = "Something easier") })
         assertEquals("All open items have a proposal", stored(g.uid).doneWhen)
         // the refusal is whole: nothing else in the same call is written
-        assertEquals(GoalEdit.DONE_WHEN_LOCKED, runBlocking { structure.editGoal(user, 4, g.uid, doneWhen = "Something easier", stopWhen = "Never") })
+        assertEquals(GoalEdit.FROZEN, runBlocking { structure.editGoal(user, 4, g.uid, doneWhen = "Something easier", stopWhen = "Never") })
         assertNull(stored(g.uid).stopWhen)
-        // the same words are not a change; stop_when and budget may still change
+        // the same words are not a change; but stop_when and the budget are frozen with the rest
         assertEquals(GoalEdit.UNCHANGED, runBlocking { structure.editGoal(user, 5, g.uid, doneWhen = "All open items have a proposal") })
-        assertEquals(GoalEdit.EDITED, runBlocking { structure.editGoal(user, 6, g.uid, stopWhen = "Five cycles", budget = "5 cycles") })
-        assertEquals("Five cycles", stored(g.uid).stopWhen)
+        assertEquals(GoalEdit.FROZEN, runBlocking { structure.editGoal(user, 6, g.uid, stopWhen = "Five cycles", budget = "5 cycles") })
+        assertNull(stored(g.uid).stopWhen)
     }
 
     @Test
@@ -177,8 +177,8 @@ class GoalKindTest {
         }
         assertTrue(results[0].applied)
         assertFalse(results[1].applied)
-        assertTrue(results[1].summary.contains("locked"), results[1].summary)
-        assertTrue(results[1].summary.contains("propose a new one"), results[1].summary)
+        assertTrue(results[1].summary.contains("frozen"), results[1].summary)
+        assertTrue(results[1].summary.contains("stop it, propose a new goal, and link it to the old one with link_items"), results[1].summary)
         assertEquals("All reviewed", stored(g.uid).doneWhen)
 
         // correct_item would write a new goal and close the old one; the parser refuses it for a goal

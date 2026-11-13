@@ -75,19 +75,19 @@ class GoalGuardsTest {
     // ── Change records ───────────────────────────────────────────────────────
 
     @Test
-    fun `approving a goal and changing what it is judged by leave change records`() {
+    fun `editing a proposed goal and approving it leave change records, and a refused change to an approved one writes none`() {
         val g = goal(doneWhen = "All reviewed")
-        assertEquals(GoalEdit.EDITED, runBlocking { structure.editGoal(user, 2, g.uid, doneWhen = "All have a proposal") })
+        assertEquals(GoalEdit.EDITED, runBlocking { structure.editGoal(user, 2, g.uid, doneWhen = "All have a proposal", stopWhen = "Five cycles", budget = "5 cycles", text = "Review all the Williams items") })
         assertEquals(GoalApproval.APPROVED, runBlocking { structure.approveGoal(user, 3, g.uid, "yes, go ahead") })
-        assertEquals(GoalEdit.EDITED, runBlocking { structure.editGoal(user, 4, g.uid, stopWhen = "Five cycles", budget = "5 cycles") })
-        val rows = changes(g.uid).filter { it.field in setOf("approval", "doneWhen", "stopWhen", "budget") }.map { Triple(it.field, it.oldValue, it.newValue) }
+        val rows = changes(g.uid).filter { it.field in setOf("approval", "doneWhen", "stopWhen", "budget", "sentence") }.map { Triple(it.field, it.oldValue, it.newValue) }
         assertTrue(Triple("doneWhen", "All reviewed", "All have a proposal") in rows, rows.toString())
         assertTrue(Triple("approval", "proposed", "approved") in rows, rows.toString())
         assertTrue(Triple("stopWhen", "Ten cycles", "Five cycles") in rows && Triple("budget", "10 cycles", "5 cycles") in rows, rows.toString())
+        assertTrue(Triple("sentence", "Review the open Williams items", "Review all the Williams items") in rows, rows.toString())
 
-        // A refused change to the locked bar writes nothing.
+        // A refused change to the frozen goal writes nothing.
         val before = changes(g.uid).size
-        assertEquals(GoalEdit.DONE_WHEN_LOCKED, runBlocking { structure.editGoal(user, 5, g.uid, doneWhen = "Easier") })
+        assertEquals(GoalEdit.FROZEN, runBlocking { structure.editGoal(user, 5, g.uid, doneWhen = "Easier") })
         assertEquals(before, changes(g.uid).size)
     }
 
@@ -114,14 +114,16 @@ class GoalGuardsTest {
             assertNotEquals(WorkState.ACTIVE, now.workState, "${op.verb} ${op}: the goal must not be running")
             assertEquals("proposed", now.approval, "${op.verb}: only approve_goal approves")
         }
-        val refused = send(SetState(g.uid, WorkState.ACTIVE, "q")).single()
+        // (The sweep above ended with the goal done or stopped, which is final. A fresh proposal shows the approval refusal.)
+        val fresh = goal("A fresh proposal")
+        val refused = send(SetState(fresh.uid, WorkState.ACTIVE, "q")).single()
         assertFalse(refused.applied)
         assertTrue(refused.summary.contains("not approved") && refused.summary.contains("approve_goal"), refused.summary)
 
         // Once the owner approves it, it can run.
-        assertTrue(send(ApproveGoal(g.uid, "yes, go ahead")).single().applied)
-        assertTrue(send(SetState(g.uid, WorkState.ACTIVE, "q")).single().applied)
-        assertEquals(WorkState.ACTIVE, stored(g.uid).workState)
+        assertTrue(send(ApproveGoal(fresh.uid, "yes, go ahead")).single().applied)
+        assertTrue(send(SetState(fresh.uid, WorkState.ACTIVE, "q")).single().applied)
+        assertEquals(WorkState.ACTIVE, stored(fresh.uid).workState)
     }
 
     // ── The bar does not move ────────────────────────────────────────────────
@@ -145,12 +147,12 @@ class GoalGuardsTest {
         // Stopped and reopened, the bar is still the one that was approved.
         send(SetState(g.uid, WorkState.DROPPED, "q")); send(ReopenItem(g.uid, "q"))
         assertEquals("Every open item has a proposal", stored(g.uid).doneWhen)
-        assertEquals(GoalEdit.DONE_WHEN_LOCKED, runBlocking { structure.editGoal(user, ++cycle, g.uid, doneWhen = "Half of them") })
+        assertEquals(GoalEdit.FROZEN, runBlocking { structure.editGoal(user, ++cycle, g.uid, doneWhen = "Half of them") })
 
-        // The refused edit that also asked for a new stop_when and budget wrote neither; a plain one still can.
+        // Nothing else moved either: a refused edit writes none of its fields, and a plain edit of the others is refused too.
         assertEquals("Ten cycles", stored(g.uid).stopWhen); assertEquals("10 cycles", stored(g.uid).budget)
-        assertTrue(send(EditGoal(g.uid, "q", stopWhen = "Five cycles", budget = "5 cycles")).single().applied)
-        assertEquals("Five cycles", stored(g.uid).stopWhen)
+        assertFalse(send(EditGoal(g.uid, "q", stopWhen = "Five cycles", budget = "5 cycles")).single().applied)
+        assertEquals("Ten cycles", stored(g.uid).stopWhen)
     }
 
     // ── A correction is not a way round ──────────────────────────────────────

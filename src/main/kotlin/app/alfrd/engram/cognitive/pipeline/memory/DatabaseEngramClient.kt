@@ -152,7 +152,10 @@ class DatabaseEngramClient(
                     mapOf("uid" to phraseId),
                 ).use { rs ->
                     if (rs.hasNext()) {
-                        val vertex = rs.next().toElement().asVertex().modify()
+                        val found = rs.next().toElement().asVertex()
+                        // A goal's sentence is the owner's to change while it is proposed (edit_goal) and frozen once approved; this correction path leaves goals alone.
+                        if (found.typeName == "Goal") { logger.warn("amendPhrase: {} is a goal; its sentence is changed with edit_goal", phraseId); return@use }
+                        val vertex = found.modify()
                         vertex.set("text", newContent)
                         vertex.set("hash", sha256(newContent))
                         vertex.set("updatedAt", System.currentTimeMillis())

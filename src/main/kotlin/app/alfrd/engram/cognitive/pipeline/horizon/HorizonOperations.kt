@@ -98,7 +98,10 @@ data class SetState(
 @Serializable
 data class ApproveGoal(val targetUid: String, override val quote: String) : HorizonOperation { override val verb get() = "approve_goal" }
 
-/** Changes a goal's `done_when`, `stop_when` or budget. Once the goal is approved `done_when` cannot change: stop the goal and propose a new one. */
+/**
+ * Changes a proposed goal's sentence, `done_when`, `stop_when` or budget. Only while it is proposed: an approved goal is frozen, and a goal whose meaning must change
+ * is stopped and a new one proposed, linked to the old one with link_items.
+ */
 @Serializable
 data class EditGoal(
     val targetUid: String,
@@ -106,6 +109,8 @@ data class EditGoal(
     val doneWhen: String? = null,
     val stopWhen: String? = null,
     val budget: String? = null,
+    /** The goal's new sentence. */
+    val text: String? = null,
 ) : HorizonOperation { override val verb get() = "edit_goal" }
 
 /** "Yes, still live": refreshes when the item was last confirmed, and changes nothing else. */
@@ -492,8 +497,11 @@ object OperationParser {
                 if (item.kind != ItemKind.GOAL) return One.Rejected("not_a_goal")
                 if (quote.endsWith("?")) return One.Rejected("question_detected")
                 val fields = listOf("done_when", "stop_when", "budget").map { obj.str(it)?.trim()?.takeIf { v -> v.isNotBlank() } }
-                if (fields.all { it == null }) return One.Rejected("nothing_to_change")
-                One.Ok(EditGoal(item.uid, quote, fields[0], fields[1], fields[2]))
+                // A new sentence is a label like any other: at least half of its content words must come from what the owner said (or the goal's old sentence).
+                val rawTitle = obj.str("title")?.trim()?.takeIf { it.isNotBlank() }
+                val title = rawTitle?.let { acceptableTitle(it, quote, item.text) ?: return One.Rejected("title_not_in_quote") }
+                if (fields.all { it == null } && title == null) return One.Rejected("nothing_to_change")
+                One.Ok(EditGoal(item.uid, quote, fields[0], fields[1], fields[2], title))
             }
             "correct_item" -> {
                 val ref = obj.str("item")
