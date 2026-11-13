@@ -36,15 +36,25 @@ import java.time.ZoneId
 enum class RunnerState(val to: WorkState) { RUNNING(WorkState.ACTIVE), PAUSED(WorkState.WAITING) }
 
 @Serializable
-enum class RunOutcome { NO_GOAL, SKIPPED, COMPLETED, PAUSED, YIELDED }
+enum class RunOutcome { NO_GOAL, SKIPPED, COMPLETED, FAILED, PAUSED, YIELDED }
 
 @Serializable
 data class StepReport(
     val number: Int, val title: String, val kind: String, val outcome: String, val millis: Long, val tokens: Long, val completionTokens: Long,
     val wrote: Int, val refused: Int, val covered: Int, val discarded: Int, val impact: String, val note: String,
+    /** What the step was given: open items, evidence lines, the prompt's size, and what was left out for room. */
+    val items: Int = 0, val evidence: Int = 0, val promptChars: Int = 0, val leftOut: List<String> = emptyList(), val evidenceTrimmed: Int = 0,
 )
 
-/** What one cycle did. Counts, timings and the Director's own proposals; nothing from the owner's memory beyond what the Director itself wrote. */
+/** One thing the Director wrote, with the open item it concerns and the evidence lines it cites, by ref. */
+@Serializable
+data class Proposal(val kind: String, val text: String, val about: String? = null, val support: List<String> = emptyList())
+
+/** What a ref in a report stands for, so a reader can check each cited line against the graph. */
+@Serializable
+data class RefInfo(val uid: String, val kind: String, val state: String, val text: String)
+
+/** What one cycle did. Counts, timings and the Director's own proposals; the refs say which graph items they cite. */
 @Serializable
 data class RunReport(
     val outcome: RunOutcome,
@@ -57,9 +67,10 @@ data class RunReport(
     val totalMillis: Long = 0, val totalTokens: Long = 0,
     val replans: Int = 0,
     val looksMet: String? = null,
-    val proposals: List<String> = emptyList(),
+    val proposals: List<Proposal> = emptyList(),
     val messages: List<String> = emptyList(),
     val planRejected: List<String> = emptyList(),
+    val refs: Map<String, RefInfo> = emptyMap(),
 )
 
 private data class Written(val applied: Int, val refused: Int, val covered: Int) { val attempted get() = applied + refused }
@@ -71,7 +82,8 @@ private sealed interface Yielded<out T> {
 
 /**
  * The goal runner: one cycle of one approved goal, when the box is idle. **Code, not the model**: it chooses the goal, moves its state, keeps the budget, decides when
- * to stop, and writes only through [DirectorWriter]. The models plan, do steps and judge; none of them sees a uid, a verb or a state, and none can move a goal.
+ * to stop, retrieves the evidence, and writes only through [DirectorWriter]. The models plan, do steps and judge; none of them sees a uid, a verb or a state, and none
+ * can move a goal.
  *
  * ### Idle
  * A cycle may start only when every one of these holds (the single-shot trigger waives only the first):
@@ -81,8 +93,11 @@ private sealed interface Yielded<out T> {
  *  4. free RAM at least [GoalRunnerConfig.minFreeRamMb] and, where it can be read, free GPU memory at least [GoalRunnerConfig.minFreeGpuMb];
  *  5. the step server has at least two free slots (the runner takes one; conversation always keeps one) and the plan server a free slot.
  * While a cycle runs it re-checks 1, 2, 3 and the step server's other slot between steps and every [GoalRunnerConfig.yieldPollMillis] during a model call; when any
- * fails it cancels the call (which closes the connection and stops generation), pauses the goal and sends a quiet message. What it wrote before stays, and
- * `retract_cycle` removes it.
+ * fails it cancels the call (which closes the connection and stops generation) and **yields**: the cycle is closed as yielded with a change record, the goal keeps
+ * running, and the next idle window tries again. What it wrote before stays, and `retract_cycle` removes it.
+ *
+ * ### Pausing
+ * Only these pause a goal: the budget spent, the replan cap, two failed cycles in a row, and a restart that found a cycle mid-way.
  */
 class GoalRunner(
     private val email: String,
@@ -130,12 +145,12 @@ class GoalRunner(
             if (goal.approval != "approved" || goal.workState != WorkState.ACTIVE) continue
             val thread = messages.thread(email, goal.uid)
             val latest = thread.maxOfOrNull { it.cycle } ?: continue
-            val ended = thread.any { it.cycle == latest && it.usageMillis > 0 }
+            val ended = thread.any { it.cycle == latest && it.closedAs != null }
             if (ended) continue
             move(goal, RunnerState.PAUSED, "restart_recovery")
             messages.post(email, goal.uid, latest, DirectorMessageKind.FAILURE,
                 "The engine restarted while cycle $latest of this goal was running. The goal is paused and nothing was resumed. What the cycle wrote so far is kept; retract_cycle removes it. Resume the goal when you want it to continue.",
-                usageMillis = 1)
+                usageMillis = 1, closedAs = "paused")
             paused += goal.uid
             logger.warn("goal-runner: goal {} was running when the engine stopped; paused", goal.uid)
         }
@@ -186,7 +201,7 @@ class GoalRunner(
         return eligible.firstOrNull() to if (eligible.isEmpty()) "no approved goal is waiting for work" else ""
     }
 
-    /** Null when the runner may work this goal now; otherwise why not. Only an approved goal that is open or running, in an active project, with no finished message waiting for the owner. */
+    /** Null when the runner may work this goal now; otherwise why not. Only an approved goal that is open or running, in an active project, with no finished message waiting. */
     private suspend fun eligibility(g: ItemRecord, requireGap: Boolean): String? {
         if (g.kind != ItemKind.GOAL) return "that is not a goal"
         if (g.approval != "approved") return "the goal is only proposed; the owner has not approved it"
@@ -199,12 +214,13 @@ class GoalRunner(
         val projectUid = g.projectUid ?: return "the goal is not filed under a project"
         if (structure.getContainer(email, projectUid)?.status != "active") return "the goal's project is no longer active"
         val thread = messages.thread(email, g.uid).filter { !it.retracted }
-        if (thread.lastOrNull { it.kind != DirectorMessageKind.PROGRESS || it.usageMillis > 0 }?.kind == DirectorMessageKind.FINISHED) {
+        val lastClosing = thread.lastOrNull { it.closedAs != null }
+        if (thread.lastOrNull { it.kind == DirectorMessageKind.FINISHED }?.let { f -> thread.none { it.closedAs != null && it.createdAt > f.createdAt } } == true) {
             return "the goal looks finished and waits for the owner to close it"
         }
-        if (requireGap) {
-            val lastAt = thread.maxOfOrNull { it.createdAt } ?: 0L
-            if (lastAt > 0 && clock() - lastAt < config.minGapMinutes * 60_000) return "the goal had a cycle less than ${config.minGapMinutes} min ago"
+        // A cycle that yielded to a conversation is not a reason to wait: the next idle window tries again. Any other cycle leaves a gap.
+        if (requireGap && lastClosing != null && lastClosing.closedAs != "yielded" && clock() - lastClosing.createdAt < config.minGapMinutes * 60_000) {
+            return "the goal had a cycle less than ${config.minGapMinutes} min ago"
         }
         return null
     }
@@ -221,7 +237,7 @@ class GoalRunner(
             val n = maxOf(messages.latestCycle(email, goal.uid), 1)
             move(goal, RunnerState.PAUSED, "budget_spent")
             val text = "The goal's budget is spent (${prior.first} of ${budget.tokens} tokens, ${prior.second / 60_000} of ${budget.minutes} min). It is paused; raise the budget by approving a replacement goal, or close this one."
-            messages.post(email, goal.uid, n, DirectorMessageKind.FAILURE, text, usageMillis = 1)
+            messages.post(email, goal.uid, n, DirectorMessageKind.FAILURE, text, usageMillis = 1, closedAs = "paused")
             return RunReport(RunOutcome.PAUSED, "budget spent", goal.uid, n, messages = listOf(text))
         }
 
@@ -231,6 +247,12 @@ class GoalRunner(
         return Cycle(goal, cycle, budget, prior, startedAt).run()
     }
 
+    /** What the cycle knows of the goal's project, read once at its start. */
+    private class ProjectScope(
+        val shownOpen: List<ItemRecord>, val counts: GoalPrompts.ProjectCounts, val pool: List<ItemRecord>, val df: Map<String, Int>,
+        val directorLines: List<String>, val known: Set<String>,
+    )
+
     // ── The cycle's state ────────────────────────────────────────────────────
 
     private inner class Cycle(val goal: ItemRecord, val cycle: DirectorCycle, val budget: GoalBudget, val prior: Pair<Long, Long>, val startedAt: Long) {
@@ -238,8 +260,9 @@ class GoalRunner(
         val stepReports = ArrayList<StepReport>()
         val stepLines = ArrayList<String>()
         val sentMessages = ArrayList<String>()
-        val proposals = ArrayList<String>()
+        val proposals = ArrayList<Proposal>()
         val sourceOf = HashMap<String, String>()
+        val refInfo = LinkedHashMap<String, RefInfo>()
         var planMillis = 0L; var planTokens = 0L; var planCompletion = 0L
         var qcMillis = 0L; var qcTokens = 0L; var qcCompletion = 0L
         var replans = 0
@@ -256,7 +279,7 @@ class GoalRunner(
 
         fun report(outcome: RunOutcome, reason: String) = RunReport(
             outcome, reason, goal.uid, cycle.number, stepReports, planMillis, planTokens, planCompletion, qcMillis, qcTokens, qcCompletion,
-            elapsed(), usage.tokens, replans, looksMet, proposals, sentMessages, planRejected,
+            elapsed(), usage.tokens, replans, looksMet, proposals, sentMessages, planRejected, refInfo,
         )
 
         suspend fun seq() = cycleSeq()
@@ -289,22 +312,31 @@ class GoalRunner(
             }
         }
 
-        suspend fun end(kind: DirectorMessageKind, text: String): DirectorMessage? {
-            val message = writer.send(email, cycle, kind, PromptText.excerpt(text, 560), usageTokens = usage.tokens.coerceAtLeast(1), usageMillis = elapsed().coerceAtLeast(1))
+        /** The one closing message of the cycle: it carries what the cycle used and how it ended, and its change record says the cycle stopped running. */
+        suspend fun end(kind: DirectorMessageKind, text: String, closedAs: String): DirectorMessage? {
+            val message = writer.send(email, cycle, kind, PromptText.excerpt(text, 560), usageTokens = usage.tokens.coerceAtLeast(1), usageMillis = elapsed().coerceAtLeast(1), closedAs = closedAs)
             sentMessages += text
             return message
         }
 
-        suspend fun interrupted(why: String): RunReport {
-            move(goal, RunnerState.PAUSED, "cycle_interrupted")
-            end(DirectorMessageKind.PROGRESS, "Cycle ${cycle.number} was interrupted: $why. The goal is paused. What it wrote so far is kept; retract_cycle removes it.")
+        /** A conversation (or the kill switch, or Hermes) came first: close the cycle as yielded and leave the goal running for the next idle window. */
+        suspend fun yielded(why: String): RunReport {
+            end(DirectorMessageKind.PROGRESS, "Cycle ${cycle.number} yielded: $why. The goal keeps running and will try again when the box is idle. What it wrote so far is kept; retract_cycle removes it.", "yielded")
             return report(RunOutcome.YIELDED, why)
         }
 
-        suspend fun failedAndPaused(cause: String, text: String): RunReport {
+        suspend fun pausedFor(cause: String, text: String): RunReport {
             move(goal, RunnerState.PAUSED, cause)
-            end(DirectorMessageKind.FAILURE, text)
+            end(DirectorMessageKind.FAILURE, text, "paused")
             return report(RunOutcome.PAUSED, text)
+        }
+
+        /** Failed cycles in a row, counting this one: the first leaves the goal running and says so; the second pauses it. */
+        suspend fun failedCycle(cause: String, text: String): RunReport {
+            val before = messages.thread(email, goal.uid).filter { !it.retracted && it.closedAs != null && it.cycle < cycle.number }.sortedBy { it.cycle }.takeLastWhile { it.closedAs == "failed" }.size
+            if (before >= 1) return pausedFor("consecutive_failures", "$text That is the second failed cycle in a row, so the goal is paused.")
+            end(DirectorMessageKind.FAILURE, "$text The goal is still running; the next cycle will try again.", "failed")
+            return report(RunOutcome.FAILED, text)
         }
 
         suspend fun run(): RunReport {
@@ -314,40 +346,64 @@ class GoalRunner(
                 throw e
             } catch (e: Exception) {
                 logger.warn("goal-runner: cycle {} of goal {} failed: {}", cycle.number, goal.uid, e::class.java.simpleName)
-                failedAndPaused("cycle_failed", "Cycle ${cycle.number} failed (${e::class.java.simpleName}). The goal is paused.")
+                failedCycle("cycle_failed", "Cycle ${cycle.number} failed (${e::class.java.simpleName}).")
             }
+        }
+
+        /** The goal's project as the models see it: open items first by date, the closed history and notes as an evidence pool, what the Director already wrote. Read once. */
+        suspend fun loadScope(): ProjectScope {
+            val all = structure.itemsIn(email, goal.projectUid!!).filter { it.kind != ItemKind.GOAL }
+            val director = all.filter { it.directorGoalUid != null && it.workState != WorkState.DROPPED }
+            val owner = all.filter { it.directorGoalUid == null }
+            val open = owner.filter(GoalEvidence::isOpen).sortedWith(compareBy<ItemRecord>({ it.dueAt == null }, { it.dueAt ?: 0L }, { -it.createdAt }))
+            val pool = GoalEvidence.pool(owner)
+            val counts = GoalPrompts.ProjectCounts(open.size, minOf(open.size, config.scopeItems), pool.count { it.kind != ItemKind.FACT }, pool.count { it.kind == ItemKind.FACT }, director.size)
+            return ProjectScope(
+                open.take(config.scopeItems), counts, pool, GoalEvidence.documentFrequency(pool),
+                director.sortedBy { it.createdAt }.takeLast(20).map { "${it.kind.name.lowercase()}: ${GoalText.clean(it.text, 160)}" },
+                all.map { ItemWords.normalize(it.text) }.toHashSet(),
+            )
         }
 
         suspend fun work(): RunReport {
             val project = structure.getContainer(email, goal.projectUid!!)!!
-            val scopeItems = loadScope()
-            val scope = ScopeMap(scopeItems.first)
-            val previous = messages.thread(email, goal.uid).filter { !it.retracted && it.cycle < cycle.number && it.usageMillis > 0 }.lastOrNull()?.text
+            val world = loadScope()
+            val scope = ScopeMap(world.shownOpen)
+            val known = world.known.toHashSet()
+            val previous = messages.thread(email, goal.uid).filter { !it.retracted && it.cycle < cycle.number && it.closedAs != null }.lastOrNull()?.text
 
             fun planPrompt(done: List<String>, reason: String?) =
-                GoalPrompts.plan(goal, project.name, scope, scope.entries.map { it.value }, previous, config.maxSteps, done, reason, scopeItems.second)
+                GoalPrompts.plan(goal, project.name, scope, world.counts, world.directorLines, previous, config.maxSteps, done, reason)
 
-            mustStop(false)?.let { return interrupted(it) }
+            mustStop(false)?.let { return yielded(it) }
             var plan: GoalPlan = when (val r = yieldable { planner.plan(planPrompt(emptyList(), null), 1, scope) }) {
-                is Yielded.Stopped -> return interrupted(r.why)
-                is Yielded.Done -> r.value.also { accountPlan(it.usage) }.let { o -> o.plan ?: return failedAndPaused("plan_failed", "Cycle ${cycle.number} could not make a plan (${o.failure}). The goal is paused.") }
+                is Yielded.Stopped -> return yielded(r.why)
+                is Yielded.Done -> r.value.also { accountPlan(it.usage) }.let { o -> o.plan ?: return failedCycle("plan_failed", "Cycle ${cycle.number} could not make a plan (${o.failure}).") }
             }
             planRejected = plan.rejected
             var index = 0
             var failures = 0
             val ranTitles = ArrayList<String>()
             while (index < plan.steps.size) {
-                mustStop(false)?.let { return interrupted(it) }
-                spent()?.let { return failedAndPaused("budget_spent", "Cycle ${cycle.number} stopped: the goal's budget is spent on $it. The goal is paused.") }
+                mustStop(false)?.let { return yielded(it) }
+                spent()?.let { return pausedFor("budget_spent", "Cycle ${cycle.number} stopped: the goal's budget is spent on $it. The goal is paused.") }
                 val step = plan.steps[index]
-                val items = step.refs.mapNotNull { r -> scope.resolve(r)?.let { r to it } }.take(config.stepItems)
-                val prompt = GoalPrompts.step(goal, step, items, stepLines, config.maxItemsPerStep)
-                val result = when (val r = yieldable { stepper.execute(prompt, scope) }) {
-                    is Yielded.Stopped -> return interrupted(r.why)
+                val views = step.refs.mapNotNull { r ->
+                    scope.resolveOpen(r)?.let { item ->
+                        GoalPrompts.ItemView(r, item, GoalEvidence.related(item, world.pool, world.df, clock(), config.evidencePerItem).map { scope.evidenceRef(it) to it })
+                    }
+                }.take(config.stepItems)
+                val context = GoalPrompts.step(goal, step, views, stepLines, config.maxItemsPerStep, config.stepPromptChars, clock())
+                context.shownRefs.forEach { r -> scope.resolve(r)?.let { refInfo.putIfAbsent(r, RefInfo(it.uid, it.kind.name.lowercase(), it.workState?.wire() ?: "note", it.text)) } }
+                val openShown = context.shownRefs.count { it.startsWith("i") }
+                val result = if (openShown == 0 && step.kind != StepKind.ASK) {
+                    StepResult(StepOutcome.BLOCKED, "no open item fit the prompt budget", emptyList(), emptyList(), Impact.MINOR, "", CallUsage.NONE)
+                } else when (val r = yieldable { stepper.execute(context.prompt, scope, context.shownRefs) }) {
+                    is Yielded.Stopped -> return yielded(r.why)
                     is Yielded.Done -> r.value
                 }
                 usage += result.usage
-                val written = writeStep(step, result, scope)
+                val written = writeStep(step, result, scope, known, context.shownRefs)
                 ranTitles += step.title
                 stepLines += "step ${step.number} ${step.title}: ${result.summary.ifEmpty { result.failure ?: "" }}"
                 if (result.outcome == StepOutcome.FAILED) failures++
@@ -359,20 +415,21 @@ class GoalRunner(
                 stepReports += StepReport(
                     step.number, step.title, step.kind.label, result.outcome.name.lowercase(), result.usage.millis, result.usage.tokens, result.usage.completionTokens,
                     written.applied, written.refused, written.covered, result.discarded, impact.name.lowercase(), note,
+                    items = openShown, evidence = context.shownRefs.count { it.startsWith("e") }, promptChars = context.prompt.length, leftOut = context.leftOutItems, evidenceTrimmed = context.evidenceTrimmed,
                 )
                 if (failures >= 3 || (failures >= 2 && failures == stepReports.size)) {
-                    return failedAndPaused("model_failed", "Cycle ${cycle.number} stopped: the model gave no usable answer for $failures steps. The goal is paused.")
+                    return failedCycle("model_failed", "Cycle ${cycle.number} stopped: the model gave no usable answer for $failures steps.")
                 }
                 if (impact == Impact.MAJOR) {
                     if (replans >= config.replanCap) {
-                        return failedAndPaused("replan_cap", "Cycle ${cycle.number} stopped: the plan changed in a major way ${replans + 1} times (the limit is ${config.replanCap}). The goal is paused for the owner to look at.")
+                        return pausedFor("replan_cap", "Cycle ${cycle.number} stopped: the plan changed in a major way ${replans + 1} times (the limit is ${config.replanCap}). The goal is paused for the owner to look at.")
                     }
                     replans++
-                    mustStop(false)?.let { return interrupted(it) }
+                    mustStop(false)?.let { return yielded(it) }
                     val version = plan.version + 1
                     plan = when (val r = yieldable { planner.plan(planPrompt(ranTitles, note), version, scope) }) {
-                        is Yielded.Stopped -> return interrupted(r.why)
-                        is Yielded.Done -> r.value.also { accountPlan(it.usage) }.let { o -> o.plan ?: return failedAndPaused("plan_failed", "Cycle ${cycle.number} could not replan (${o.failure}). The goal is paused.") }
+                        is Yielded.Stopped -> return yielded(r.why)
+                        is Yielded.Done -> r.value.also { accountPlan(it.usage) }.let { o -> o.plan ?: return failedCycle("plan_failed", "Cycle ${cycle.number} could not replan (${o.failure}).") }
                     }
                     index = 0
                     continue
@@ -384,51 +441,39 @@ class GoalRunner(
 
         fun accountPlan(u: CallUsage) { usage += u; planMillis += u.millis; planTokens += u.tokens; planCompletion += u.completionTokens }
 
-        /** The goal's project as the models see it: open and running things first, then the rest newest first; goals themselves are never shown. */
-        suspend fun loadScope(): Pair<List<ItemRecord>, Int> {
-            val all = structure.itemsIn(email, goal.projectUid!!).filter { it.kind != ItemKind.GOAL && !(it.directorGoalUid != null && it.workState == WorkState.DROPPED) }
-            val live = { i: ItemRecord -> i.workState == null || i.workState == WorkState.OPEN || i.workState == WorkState.ACTIVE || i.workState == WorkState.WAITING }
-            val sorted = all.sortedWith(compareBy<ItemRecord>({ if (live(it)) 0 else 1 }, { -it.createdAt }))
-            return sorted.take(config.scopeItems) to all.size
-        }
-
-        suspend fun writeStep(step: PlanStep, result: StepResult, scope: ScopeMap): Written {
+        suspend fun writeStep(step: PlanStep, result: StepResult, scope: ScopeMap, known: MutableSet<String>, shown: Set<String>): Written {
             var applied = 0; var refused = 0; var covered = 0
-            val known = scope.entries.map { ItemWords.normalize(it.value.text) }.toHashSet()
             val sequence = seq()
             for (item in result.items) {
-                val norm = ItemWords.normalize(item.text)
-                if (!known.add(norm)) { covered++; continue } // the graph already says this
+                if (!known.add(ItemWords.normalize(item.text))) { covered++; continue } // the graph already says this
                 val made = writer.apply(email, cycle, sequence, listOf(RecordItem(item.kind, item.text)), zone).single()
-                if (!made.applied || made.resultUid == null) { refused++; continue }
+                val uid = made.resultUid
+                if (!made.applied || uid == null) { refused++; continue }
                 applied++
-                proposals += "${item.kind.name.lowercase()}: ${item.text}"
-                val target = scope.resolve(item.aboutRef)
-                if (target != null) {
-                    sourceOf[made.resultUid!!] = target.text
-                    val link = writer.apply(email, cycle, sequence, listOf(LinkItems(made.resultUid!!, target.uid, item.text)), zone).single()
-                    if (!link.applied) refused++
+                val about = scope.resolve(item.aboutRef)
+                val support = item.supportRefs.mapNotNull { scope.resolve(it) }
+                proposals += Proposal(item.kind.name.lowercase(), item.text, item.aboutRef, item.supportRefs)
+                sourceOf[uid] = (listOfNotNull(about?.let { "About: ${it.text}" }) + support.map { "Supporting line: ${it.text}" }).joinToString("\n").ifEmpty { "(no source line was cited)" }
+                // The links are the pointers from what the Director wrote to what it rests on; the guard checks each is inside the goal's scope.
+                for (target in listOfNotNull(about) + support) {
+                    if (!writer.apply(email, cycle, sequence, listOf(LinkItems(uid, target.uid, item.text)), zone).single().applied) refused++
                 }
                 if (step.kind == StepKind.ASK && item.kind == ItemKind.QUESTION && questionsSent < MAX_QUESTIONS_PER_CYCLE) {
                     questionsSent++
-                    end2(DirectorMessageKind.QUESTION, item.text, made.resultUid)
+                    writer.send(email, cycle, DirectorMessageKind.QUESTION, PromptText.excerpt(item.text, 560), uid)
+                    sentMessages += item.text
                 }
             }
             for (s in result.suggestions) {
-                val target = scope.resolve(s.targetRef) ?: continue
+                val target = scope.resolveOpen(s.targetRef) ?: continue
                 val out = writer.suggestStateChange(email, cycle, sequence, target.uid, s.state, s.reason, zone)
-                if (out.all { it.applied }) { applied++; proposals += "suggest ${s.state.wire()}: ${target.text.take(80)} — ${s.reason}" } else refused++
+                if (out.all { it.applied }) { applied++; proposals += Proposal("suggestion", "mark \"${target.text.take(80)}\" ${s.state.wire()} — ${s.reason}", s.targetRef) } else refused++
             }
             return Written(applied, refused, covered)
         }
 
-        suspend fun end2(kind: DirectorMessageKind, text: String, answers: String?) {
-            writer.send(email, cycle, kind, PromptText.excerpt(text, 560), answers)
-            sentMessages += text
-        }
-
         suspend fun qcAndClose(scope: ScopeMap): RunReport {
-            mustStop(false)?.let { return interrupted(it) }
+            mustStop(false)?.let { return yielded(it) }
             val mine = structure.directorItems(email, goal.uid, cycle.number)
             val sampleItems = sample(mine, config.sampleSize)
             val samples = sampleItems.mapIndexed { i, item -> "s${i + 1}" to (item to (sourceOf[item.uid] ?: item.sourceQuote ?: "(no source item was named)")) }
@@ -437,14 +482,11 @@ class GoalRunner(
                 samples.map { (ref, p) -> ref to (p.first.text to p.second) },
             )
             val outcome = when (val r = yieldable { qc.decide(prompt, samples.map { it.first }) }) {
-                is Yielded.Stopped -> return interrupted(r.why)
+                is Yielded.Stopped -> return yielded(r.why)
                 is Yielded.Done -> r.value
             }
             usage += outcome.usage; qcMillis = outcome.usage.millis; qcTokens = outcome.usage.tokens; qcCompletion = outcome.usage.completionTokens
-            if (outcome.failure != null) {
-                end(DirectorMessageKind.FAILURE, "Cycle ${cycle.number} finished its steps but the close-out could not run (${outcome.failure}). The goal is still running.")
-                return report(RunOutcome.COMPLETED, "qc failed: ${outcome.failure}")
-            }
+            if (outcome.failure != null) return failedCycle("qc_failed", "Cycle ${cycle.number} finished its steps but the close-out could not run (${outcome.failure}).")
             // The model may not say "met" over an item its own check found unsupported.
             val unsupported = samples.filter { (ref, _) -> outcome.verdicts[ref] == "unsupported" }
             looksMet = if (outcome.looksMet == "yes" && unsupported.isNotEmpty()) "partly" else outcome.looksMet
@@ -455,9 +497,9 @@ class GoalRunner(
             unsupported.forEach { (_, p) -> writer.apply(email, cycle, sequence, listOf(RecordItem(ItemKind.FACT, "Check this: its source does not support \"${p.first.text.take(160)}\"")), zone) }
             val counts = "${stepReports.count { it.outcome == "done" }} of ${stepReports.size} steps done, ${mine.size} items written"
             if (looksMet == "yes") {
-                end(DirectorMessageKind.FINISHED, "The done-when looks met after cycle ${cycle.number} ($counts): ${outcome.summary} Only you can close the goal.")
+                end(DirectorMessageKind.FINISHED, "The done-when looks met after cycle ${cycle.number} ($counts): ${outcome.summary} Only you can close the goal.", "completed")
             } else {
-                end(DirectorMessageKind.PROGRESS, "Cycle ${cycle.number}: $counts. Goal looks met: $looksMet. ${outcome.summary}")
+                end(DirectorMessageKind.PROGRESS, "Cycle ${cycle.number}: $counts. Goal looks met: $looksMet. ${outcome.summary}", "completed")
             }
             return report(RunOutcome.COMPLETED, "cycle complete")
         }

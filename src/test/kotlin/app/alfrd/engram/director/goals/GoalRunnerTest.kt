@@ -355,19 +355,32 @@ class GoalRunnerTest {
     }
 
     @Test
-    fun `stops between steps when a conversation starts and pauses the goal`() {
+    fun `yields between steps when a conversation starts, keeps the goal running and tries again in the next idle window`() {
         val goal = approvedGoal("Review the open Williams items")
         server.onCall = { tool, n -> if (tool == "report_goal_step" && n == 1) { now += 1_000; activity.touch() } }
-        val out = run()
+        val r = runner()
+        val out = run(r)
         assertEquals(RunOutcome.YIELDED, out.outcome, out.reason)
         assertEquals(1, server.calls("report_goal_step"), "the second step never started")
         assertEquals(0, server.calls("record_goal_qc"))
-        assertEquals(WorkState.WAITING, stored(goal.uid).workState)
-        val notes = thread(goal).filter { it.text.contains("interrupted") }
-        assertEquals(1, notes.size)
-        assertEquals(DirectorMessageKind.PROGRESS, notes.single().kind, "an interruption by a conversation is quiet")
-        assertTrue(changes(goal.uid).any { it.cause == "goal_runner:cycle_interrupted" && it.actor == "director" && it.newValue == "waiting" })
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState, "an interruption does not pause the goal")
+        assertFalse(changes(goal.uid).any { it.field == "state" && it.newValue == "waiting" })
+        val closing = thread(goal).single { it.closedAs != null }
+        assertEquals("yielded", closing.closedAs)
+        assertEquals(DirectorMessageKind.PROGRESS, closing.kind, "an interruption by a conversation is quiet")
+        assertTrue(closing.text.contains("yielded") && closing.usageMillis > 0)
+        val record = ChangeLog(dbManager.getDatabase()).forTarget(user, closing.uid).single()
+        assertEquals("running", record.oldValue); assertEquals("yielded", record.newValue)
+        assertEquals("director", record.actor); assertEquals("goal_runner:cycle_yielded", record.cause)
         assertTrue(wrote(goal).isNotEmpty(), "what the first step wrote is kept (and retractable)")
+        // Not idle yet; ten minutes of quiet later the same goal is worked again, with no thirty-minute gap to wait out.
+        assertEquals(RunOutcome.SKIPPED, run(r).outcome)
+        now += 11 * 60_000
+        server.onCall = { _, _ -> }
+        val again = run(config { copy(minGapMinutes = 30) }.let { runner(it) })
+        assertEquals(RunOutcome.COMPLETED, again.outcome, again.reason)
+        assertEquals(goal.uid, again.goalUid)
+        assertEquals(2, again.cycle, "a new cycle with the next number")
     }
 
     @Test
@@ -386,7 +399,8 @@ class GoalRunnerTest {
         assertEquals(RunOutcome.YIELDED, out.outcome, out.reason)
         assertTrue(took < 8_000, "gave way within a few polls, not after the 15 s call: ${took}ms")
         assertTrue(wrote(goal).none { it.text == "Never written" }, "the abandoned step wrote nothing")
-        assertEquals(WorkState.WAITING, stored(goal.uid).workState)
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState, "the goal keeps running")
+        assertEquals("yielded", thread(goal).single { it.closedAs != null }.closedAs)
     }
 
     @Test
@@ -397,7 +411,7 @@ class GoalRunnerTest {
         assertEquals(RunOutcome.YIELDED, out.outcome)
         assertTrue(out.reason.contains("kill switch"))
         assertEquals(1, server.calls("report_goal_step"))
-        assertEquals(WorkState.WAITING, stored(goal.uid).workState)
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState, "stopping is a yield, not a pause")
         assertTrue(run().reason.contains("kill switch"), "and with the file still there no cycle starts")
         killFile.delete()
     }
@@ -459,24 +473,50 @@ class GoalRunnerTest {
     }
 
     @Test
-    fun `a model that gives no usable answer pauses the goal with a failure message`() {
+    fun `a model that gives no usable answer fails the cycle, and a second failed cycle in a row pauses the goal`() {
         val goal = approvedGoal("Review the open Williams items")
         server.on("report_goal_step") { FakeModelServer.Reply("not json at all {{{", noToolCall = true) }
-        val out = run()
-        assertEquals(RunOutcome.PAUSED, out.outcome, out.reason)
+        val first = run()
+        assertEquals(RunOutcome.FAILED, first.outcome, first.reason)
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState, "one failed cycle does not pause the goal")
+        assertTrue(thread(goal).any { it.kind == DirectorMessageKind.FAILURE && it.text.contains("no usable answer") && it.closedAs == "failed" })
+        val second = run()
+        assertEquals(RunOutcome.PAUSED, second.outcome, second.reason)
         assertEquals(WorkState.WAITING, stored(goal.uid).workState)
-        assertTrue(thread(goal).any { it.kind == DirectorMessageKind.FAILURE && it.text.contains("no usable answer") })
+        assertTrue(thread(goal).any { it.kind == DirectorMessageKind.FAILURE && it.closedAs == "paused" && it.text.contains("second failed cycle in a row") })
+        assertTrue(changes(goal.uid).any { it.cause == "goal_runner:consecutive_failures" && it.actor == "director" })
     }
 
     @Test
-    fun `a plan the model cannot make pauses the goal and tells the channel`() {
+    fun `two consecutive QC failures pause the goal with a failure message and one does not`() {
+        val goal = approvedGoal("Review the open Williams items")
+        server.on("record_goal_qc") { FakeModelServer.Reply("garbage", noToolCall = true) }
+        val first = run()
+        assertEquals(RunOutcome.FAILED, first.outcome)
+        assertTrue(first.reason.contains("close-out"))
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState)
+        // A good cycle in between resets the count.
+        server.on("record_goal_qc") { FakeModelServer.Reply(qcJson()) }
+        assertEquals(RunOutcome.COMPLETED, run().outcome)
+        server.on("record_goal_qc") { FakeModelServer.Reply("garbage", noToolCall = true) }
+        assertEquals(RunOutcome.FAILED, run().outcome, "failed once since the good cycle")
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState)
+        assertEquals(RunOutcome.PAUSED, run().outcome, "failed twice in a row")
+        assertEquals(WorkState.WAITING, stored(goal.uid).workState)
+        assertTrue(thread(goal).count { it.kind == DirectorMessageKind.FAILURE } >= 3)
+    }
+
+    @Test
+    fun `a plan the model cannot make fails the cycle and a second one pauses the goal`() {
         val goal = approvedGoal("Review the open Williams items")
         server.on("propose_goal_plan") { FakeModelServer.Reply("[1,2,3]") } // arguments that are not an object
-        val out = run()
-        assertEquals(RunOutcome.PAUSED, out.outcome)
-        assertEquals(WorkState.WAITING, stored(goal.uid).workState)
+        val first = run()
+        assertEquals(RunOutcome.FAILED, first.outcome)
+        assertEquals(WorkState.ACTIVE, stored(goal.uid).workState)
         assertTrue(thread(goal).any { it.kind == DirectorMessageKind.FAILURE && it.text.contains("plan") })
         assertEquals(0, server.calls("report_goal_step"))
+        assertEquals(RunOutcome.PAUSED, run().outcome)
+        assertEquals(WorkState.WAITING, stored(goal.uid).workState)
     }
 
     // ── messages ─────────────────────────────────────────────────────────────
@@ -521,6 +561,67 @@ class GoalRunnerTest {
         assertEquals(WorkState.ACTIVE, stored(betweenCycles.uid).workState, "a goal between cycles was not mid-cycle")
         val out = run(fresh)
         assertEquals(betweenCycles.uid, out.goalUid, "the paused goal is not resumed; the other one is the only candidate")
+    }
+
+    // ── evidence comes from code ─────────────────────────────────────────────
+
+    private fun closedWilliams(text: String): ItemRecord = runBlocking {
+        val i = structure.createItem(user, 1, ItemKind.TASK, text, projectUid = williams.uid)!!
+        assertTrue(structure.setState(user, ++seq, i.uid, WorkState.DONE))
+        stored(i.uid)
+    }
+
+    @Test
+    fun `each step is handed related closed items as labelled evidence with refs, chosen by code`() {
+        val goal = approvedGoal("Review the open Williams items")
+        val closed = closedWilliams("Send the Williams inspection report to Sam")
+        closedWilliams("Order cable for the garden") // unrelated: shares nothing with the open items
+        server.on("report_goal_step") { n ->
+            FakeModelServer.Reply(buildJsonObject {
+                put("outcome", "done"); put("summary", "reviewed"); put("impact", "none")
+                put("items", buildJsonArray {
+                    add(buildJsonObject { put("kind", "note"); put("text", "Likely done: the report was sent (step $n)"); put("about", "i2"); put("support", buildJsonArray { add("e1"); add("e99"); add(closed.uid) }) })
+                })
+            }.toString())
+        }
+        val out = run()
+        assertEquals(RunOutcome.COMPLETED, out.outcome, out.reason)
+        val prompt = server.requests("report_goal_step").first()
+        assertTrue(prompt.contains("evidence e1"), "evidence has a ref")
+        assertTrue(prompt.contains("Send the Williams inspection report to Sam"), "the related closed item is given")
+        assertFalse(prompt.contains("Order cable for the garden"), "an unrelated closed item is not")
+        assertTrue(prompt.contains("UNTRUSTED DATA"))
+        assertTrue(out.steps.all { it.evidence >= 1 && it.items >= 1 })
+        // The proposal cites a line it was given; the ones it was not given (e99, a uid) are dropped.
+        val p = out.proposals.first()
+        assertEquals("i2", p.about); assertEquals(listOf("e1"), p.support)
+        assertEquals(closed.uid, out.refs["e1"]?.uid, "the report says which graph item each cited ref is")
+        assertEquals("done", out.refs["e1"]?.state)
+        assertTrue(runBlocking { structure.getItem(user, out.refs.getValue("e1").uid) } != null, "and it exists")
+        // And it is linked to what it rests on, by a link the Director wrote.
+        val linked = dbManager.getDatabase().query("sql", "SELECT count(*) AS n FROM RELATED_TO WHERE relationType = 'relevant_to' AND directorGoalUid = :g AND @in.uid = :c", mapOf("g" to goal.uid, "c" to closed.uid))
+            .use { it.next().getProperty<Number>("n").toLong() }
+        assertTrue(linked >= 1, "the supporting item is linked")
+    }
+
+    @Test
+    fun `the planner is told how many open and closed items there are and is not asked to name evidence`() {
+        approvedGoal("Review the open Williams items")
+        closedWilliams("Send the Williams inspection report to Sam")
+        run()
+        val plan = server.requests("propose_goal_plan").first()
+        assertTrue(plan.contains("2 open items") && plan.contains("1 closed items") && plan.contains("1 notes"), "project-level counts")
+        assertTrue(plan.contains("Do not name evidence"))
+        assertFalse(plan.contains("Send the Williams inspection report to Sam"), "closed items are not listed to the planner; code gives them to the steps")
+    }
+
+    @Test
+    fun `a step with no open item the step can work is rejected at planning`() {
+        approvedGoal("Review the open Williams items")
+        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("Look at nothing", refs = listOf("e1", "i99"))) }
+        val out = run()
+        assertEquals(RunOutcome.FAILED, out.outcome, "no usable step: the plan failed")
+        assertEquals(0, server.calls("report_goal_step"))
     }
 
     // ── retract ──────────────────────────────────────────────────────────────
@@ -638,7 +739,7 @@ class GoalRunnerTest {
         shapes.forEachIndexed { i, shape ->
             server.on("report_goal_step") { FakeModelServer.Reply(shape) }
             val out = run(runner(config { copy(minGapMinutes = 0) }))
-            assertTrue(out.outcome in setOf(RunOutcome.COMPLETED, RunOutcome.PAUSED), "shape $i: ${out.outcome} ${out.reason}")
+            assertTrue(out.outcome in setOf(RunOutcome.COMPLETED, RunOutcome.PAUSED, RunOutcome.FAILED), "shape $i: ${out.outcome} ${out.reason}")
             if (stored(goal.uid).workState == WorkState.WAITING) runBlocking { assertTrue(structure.setState(user, ++seq, goal.uid, WorkState.ACTIVE)) }
             assertEquals(before, ownerSnapshot(), "shape $i left the owner's world alone")
         }

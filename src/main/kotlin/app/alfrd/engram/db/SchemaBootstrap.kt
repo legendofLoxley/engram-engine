@@ -219,6 +219,7 @@ object SchemaBootstrap {
                 vt.createProperty("createdAt", Type.LONG)
                 vt.createProperty("retractedAt", Type.LONG)     // nullable: set when its cycle is retracted
                 vt.createProperty("usageTokens", Type.LONG)     // the goal runner: model tokens a cycle used (completion tokens counted, prompt tokens estimated); nullable
+                vt.createProperty("closedAs", Type.STRING)      // the goal runner: how the cycle ended (completed, yielded, failed, paused); nullable
                 vt.createProperty("usageMillis", Type.LONG)     // the goal runner: wall-clock milliseconds a cycle used; nullable
             }
             ensureEdge(schema, "MESSAGE_FOR") { }

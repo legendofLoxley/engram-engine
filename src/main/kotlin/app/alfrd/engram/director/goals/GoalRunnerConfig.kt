@@ -39,6 +39,9 @@ data class GoalRunnerConfig(
     /** Items of the goal's project shown to the planner, and per step. */
     val scopeItems: Int = 60,
     val stepItems: Int = 8,
+    /** Related closed items and notes handed to a step with each open item, and the size its prompt may grow to before evidence is trimmed and items left out. */
+    val evidencePerItem: Int = 4,
+    val stepPromptChars: Int = 12_000,
     val maxItemsPerStep: Int = 5,
     val sampleSize: Int = 3,
     val planMaxTokens: Int = 12_000,

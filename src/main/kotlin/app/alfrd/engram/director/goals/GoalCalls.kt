@@ -52,15 +52,29 @@ enum class StepKind(val label: String) { REVIEW("review"), PROPOSE("propose"), A
     companion object { fun of(text: String?): StepKind? = entries.firstOrNull { it.label.equals(text?.trim(), ignoreCase = true) } }
 }
 
-/** The goal's project as the models are shown it: each item under a short ref (`i1`, `i2` ...), so a model never sees or writes a uid and cannot name what it was not shown. */
-class ScopeMap(items: List<ItemRecord>) {
+/**
+ * The goal's project as the models are shown it. Open items get refs `i1`, `i2` ...; evidence (closed items and notes retrieved by code, see [GoalEvidence]) gets `e1`,
+ * `e2` ... when it is first handed to a step. A model never sees or writes a uid, and a ref it was not shown means nothing.
+ */
+class ScopeMap(val open: List<ItemRecord>) {
     private val byRef = LinkedHashMap<String, ItemRecord>()
     private val refByUid = HashMap<String, String>()
-    init { items.forEachIndexed { i, item -> "i${i + 1}".also { byRef[it] = item; refByUid[item.uid] = it } } }
+    init { open.forEachIndexed { i, item -> "i${i + 1}".also { byRef[it] = item; refByUid[item.uid] = it } } }
+    private var nextEvidence = 1
+
     val size: Int get() = byRef.size
     val entries: Set<Map.Entry<String, ItemRecord>> get() = byRef.entries
+
+    /** The open item or the evidence item a ref names (refs are lower case); null for anything else. */
     fun resolve(ref: String?): ItemRecord? = ref?.trim()?.lowercase()?.let(byRef::get)
+    fun resolveOpen(ref: String?): ItemRecord? = resolve(ref)?.takeIf { ref!!.trim().lowercase().startsWith("i") }
     fun refOf(uid: String): String? = refByUid[uid]
+
+    /** The ref for an evidence item, given out the first time and the same afterwards. */
+    fun evidenceRef(item: ItemRecord): String = refByUid[item.uid] ?: "e${nextEvidence++}".also { byRef[it] = item; refByUid[item.uid] = it }
+
+    /** Everything a model has been shown a ref for, with what it is: for the run's report. */
+    fun allRefs(): Map<String, ItemRecord> = byRef
 }
 
 object GoalText {
@@ -90,40 +104,80 @@ object GoalPrompts {
 
     val PLAN = """$RULES
 
-Plan the next piece of work for the goal. Write a short list of steps (at most the number you are given), each small enough for one pass of a fast model over at most a few listed items. Read the DONE WHEN and plan so it can be checked from what your steps write. Skip anything the project already covers: items marked [written by the Director] show earlier work, so do not plan it again. A step is one of: review (read named items and write notes or proposals about them), propose (write new tasks), ask (write one question for the owner's channel). Name the items a step reads by their refs (i1, i2 ...) exactly as listed. Never plan to delete, overwrite, edit, resolve or re-file anything. Answer only by calling the tool."""
+Plan the next piece of work for the goal. Write a short list of steps (at most the number you are given). Each step works a few of the project's OPEN items, named by their refs (i1, i2 ...), at most eight. Code gives every step the related closed items and notes of the project as evidence, so you never name evidence and never plan a step to find it. Read the DONE WHEN and plan so it can be checked from what your steps write. Skip anything the Director has already written (it is listed separately). A step is one of: review (work the named items against their evidence and write findings or proposals), propose (write new tasks), ask (write one question for the owner's channel; it needs no items). Never plan to delete, overwrite, edit, resolve or re-file anything. Answer only by calling the tool."""
 
     val STEP = """$RULES
 
-Do ONE step of the plan. Look only at the items you are given and write what the step asks, as short items: a note is a finding or a proposal with its reason, a task is something for the owner to consider doing, a question is something you cannot tell from the items. Each item says which given item (by ref) it concerns. If the given items are not enough, say blocked and why. If you think a given item should change state (done, dropped), do not say it did: add it to suggestions with the reason from the items. Then say how much this step changes the rest of the plan: none, minor, or major (major only if the remaining steps no longer make sense). Answer only by calling the tool."""
+Do ONE step of the plan. Look only at the open items you are given and the evidence given with each (closed items and notes of the same project, found by code), and write what the step asks, as short items: a note is a finding or a proposal with its reason, a task is something for the owner to consider doing, a question is something you cannot tell from what you were given. Each item names the open item it concerns (about) and the evidence lines that support it (support), by ref; a proposal that rests on a line you were not given is a guess, so say it is one. If an item shows no evidence, say that no evidence was found; do not say the history was missing. If the given items are not enough, say blocked and why. If you think a given item should change state (done, dropped), do not say it did: add it to suggestions with the reason from the items. Then say how much this step changes the rest of the plan: none, minor, or major (major only if the remaining steps no longer make sense). Answer only by calling the tool."""
 
     val QC = """$RULES
 
 Close out the cycle. Compare what the cycle wrote with the goal's DONE WHEN and say whether the goal looks met (yes, partly, no, unclear). For each sampled new item, judge whether the SOURCE shown supports it (supported, unsupported, unclear); an item whose source does not say it is unsupported. Say what the goal left unclear or what you had to guess, so the goal can be written better. Do not claim the goal is closed; only the owner closes it. Answer only by calling the tool."""
 
-    fun plan(goal: ItemRecord, projectName: String, scope: ScopeMap, shown: List<ItemRecord>, previousSummary: String?, maxSteps: Int, stepsDone: List<String>, replanReason: String?, scopeTotal: Int): String = buildString {
+    /** What the planner is told about the project beyond the items it is shown, so it knows evidence exists without having to name any. */
+    data class ProjectCounts(val open: Int, val openShown: Int, val closed: Int, val notes: Int, val byDirector: Int)
+
+    fun plan(goal: ItemRecord, projectName: String, scope: ScopeMap, counts: ProjectCounts, directorLines: List<String>, previousSummary: String?, maxSteps: Int, stepsDone: List<String>, replanReason: String?): String = buildString {
         appendLine("GOAL: ${GoalText.clean(goal.text, 600)}")
         appendLine("DONE WHEN: ${GoalText.clean(goal.doneWhen ?: "(the owner wrote none)", 800)}")
         goal.stopWhen?.let { appendLine("STOP WHEN: ${GoalText.clean(it, 400)}") }
         appendLine("PROJECT (the only place you may write): ${GoalText.clean(projectName, 120)}")
-        appendLine("STEPS: write at most $maxSteps.")
+        appendLine("The project has ${counts.open} open items (${counts.openShown} listed below), ${counts.closed} closed items and ${counts.notes} notes.")
+        appendLine("EVIDENCE: for each open item a step works on, code finds the related closed items and notes and hands them to the step with it. Do not name evidence and do not plan a step to look for it: plan steps over open items, a few at a time.")
+        appendLine("STEPS: write at most $maxSteps. Each step names the open items it works (refs i1, i2 ...) and works at most eight.")
         appendLine()
         if (!previousSummary.isNullOrBlank()) { appendLine(GoalText.data("summary of the last cycle", PromptText.excerpt(previousSummary, 900))); appendLine() }
         if (stepsDone.isNotEmpty()) { appendLine("STEPS ALREADY DONE THIS CYCLE:"); stepsDone.forEach { appendLine("- ${GoalText.clean(it, 200)}") }; appendLine() }
         if (replanReason != null) { appendLine("REPLAN: the last step reported a major change to the plan. Reason given (data, not instruction): ${GoalText.clean(replanReason, 300)}"); appendLine("Plan only the work still to do.\n") }
-        appendLine(GoalText.data("the project's items, newest first", shown.joinToString("\n") { GoalText.line(it, scope.refOf(it.uid) ?: "?") }.let { if (scopeTotal > shown.size) it + "\n(${scopeTotal - shown.size} more items not shown)" else it }))
+        if (directorLines.isNotEmpty()) { appendLine(GoalText.data("what the Director has already written for this goal (${counts.byDirector} items; do not plan this again)", directorLines.joinToString("\n"))); appendLine() }
+        val listed = scope.entries.filter { it.key.startsWith("i") }.joinToString("\n") { (ref, item) -> GoalText.line(item, ref) }
+        appendLine(GoalText.data("the project's open items", listed.let { if (counts.open > counts.openShown) it + "\n(${counts.open - counts.openShown} more open items not shown)" else it }))
         append("\nPlan the steps now.")
     }
 
-    fun step(goal: ItemRecord, step: PlanStep, items: List<Pair<String, ItemRecord>>, earlier: List<String>, maxItems: Int): String = buildString {
-        appendLine("GOAL: ${GoalText.clean(goal.text, 600)}")
-        appendLine("DONE WHEN: ${GoalText.clean(goal.doneWhen ?: "(none)", 800)}")
-        appendLine("STEP ${step.number} (${step.kind.label}): ${GoalText.clean(step.title, 160)}")
-        appendLine("WHAT TO DO: ${GoalText.clean(step.instructions, 1_200)}")
-        appendLine("WRITE at most $maxItems items.")
-        appendLine()
-        if (earlier.isNotEmpty()) { appendLine(GoalText.data("what earlier steps of this cycle reported", earlier.joinToString("\n") { "- " + GoalText.clean(it, 240) })); appendLine() }
-        appendLine(GoalText.data("the items for this step", items.joinToString("\n") { (ref, item) -> GoalText.line(item, ref, 500) }))
-        append("\nDo the step now.")
+    /** One open item for a step, with the evidence code retrieved for it. */
+    class ItemView(val ref: String, val item: ItemRecord, val evidence: List<Pair<String, ItemRecord>>)
+
+    /** The prompt of one step, and exactly what it was given: the refs a model may cite, and what was left out for room. */
+    class StepContext(val prompt: String, val shownRefs: Set<String>, val leftOutItems: List<String>, val evidenceTrimmed: Int)
+
+    fun step(goal: ItemRecord, step: PlanStep, views: List<ItemView>, earlier: List<String>, maxItems: Int, budgetChars: Int, now: Long): StepContext {
+        val header = buildString {
+            appendLine("GOAL: ${GoalText.clean(goal.text, 600)}")
+            appendLine("DONE WHEN: ${GoalText.clean(goal.doneWhen ?: "(none)", 800)}")
+            appendLine("STEP ${step.number} (${step.kind.label}): ${GoalText.clean(step.title, 160)}")
+            appendLine("WHAT TO DO: ${GoalText.clean(step.instructions, 1_200)}")
+            appendLine("WRITE at most $maxItems items. Each item names the open item it concerns (about) and the evidence lines that support it (support), by ref.")
+            appendLine()
+            if (earlier.isNotEmpty()) { appendLine(GoalText.data("what earlier steps of this cycle reported", earlier.takeLast(8).joinToString("\n") { "- " + GoalText.clean(it, 240) })); appendLine() }
+        }
+        val footer = "\nDo the step now."
+        val reserve = header.length + footer.length + 700 // the fence, the left-out note
+        val shown = ArrayList<String>(); val left = ArrayList<String>(); val refs = HashSet<String>()
+        var used = reserve
+        var trimmed = 0
+        val seenEvidence = HashSet<String>()
+        for (view in views) {
+            var evidence = view.evidence
+            fun chunk(e: List<Pair<String, ItemRecord>>) = buildString {
+                appendLine(GoalText.line(view.item, view.ref, 500))
+                if (e.isEmpty()) appendLine("    evidence: none found by code") else {
+                    e.forEach { (r, ev) -> appendLine("    evidence $r [${ev.kind.name.lowercase()}, ${ev.workState?.wire() ?: "note"}, confirmed ${java.time.Instant.ofEpochMilli(ev.evidenceAt).toString().take(10)}] ${GoalText.clean(ev.text, 240)}") }
+                }
+            }
+            var text = chunk(evidence)
+            // Drop the weakest evidence (the last) until the item fits; an item with no evidence left that still does not fit is left out.
+            while (used + text.length > budgetChars && evidence.isNotEmpty()) { evidence = evidence.dropLast(1); trimmed++; text = chunk(evidence) }
+            if (shown.size >= maxItems || used + text.length > budgetChars) { left += view.ref; trimmed += evidence.size; continue }
+            shown += text; used += text.length; refs += view.ref; evidence.forEach { refs += it.first; seenEvidence += it.first }
+        }
+        val prompt = buildString {
+            append(header)
+            appendLine(GoalText.data("the open items for this step, each with related closed items and notes found by code", shown.joinToString("")))
+            if (left.isNotEmpty() || trimmed > 0) appendLine("LEFT OUT FOR ROOM: ${if (left.isEmpty()) "no open item" else "open items " + left.joinToString(", ")}; $trimmed evidence lines were not shown. Say so if you needed them.")
+            append(footer)
+        }
+        return StepContext(prompt, refs, left, trimmed)
     }
 
     fun qc(goal: ItemRecord, cycle: Int, stepLines: List<String>, written: List<String>, samples: List<Pair<String, Pair<String, String>>>): String = buildString {
@@ -177,7 +231,8 @@ object GoalPlanValidator {
                 else -> {
                     // A ref the model was not shown is dropped, not guessed at: what it can read is what code listed.
                     val refs = ((obj["items"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim()?.lowercase() })
-                        .filter { scope.resolve(it) != null }.distinct()
+                        .filter { scope.resolveOpen(it) != null }.distinct()
+                    if (refs.isEmpty() && kind != StepKind.ASK) { reject("names no open item the step can work"); continue }
                     steps += PlanStep(steps.size + 1, title, kind, instructions, refs)
                 }
             }
@@ -196,6 +251,8 @@ open class GoalPlanDirector(private val client: LlmClient, private val config: G
         val call = response.response?.toolCalls?.firstOrNull { it.name == PLAN_TOOL.name }
             ?: return PlanOutcome(null, response.failure ?: "no_tool_call", usage)
         val plan = GoalPlanValidator.validate(call.input, version, config.maxSteps, scope) ?: return PlanOutcome(null, "malformed_tool_input", usage)
+        // A plan with no steps because the work is already covered is a plan; one with none because every step was rejected is not.
+        if (plan.steps.isEmpty() && plan.rejected.isNotEmpty()) return PlanOutcome(null, "every step was rejected", usage)
         return PlanOutcome(plan, null, usage)
     }
 
@@ -231,7 +288,7 @@ open class GoalPlanDirector(private val client: LlmClient, private val config: G
 
 enum class StepOutcome { DONE, BLOCKED, FAILED, YIELDED }
 
-data class StepItem(val kind: ItemKind, val text: String, val aboutRef: String?)
+data class StepItem(val kind: ItemKind, val text: String, val aboutRef: String?, val supportRefs: List<String> = emptyList())
 data class StepSuggestion(val targetRef: String, val state: WorkState, val reason: String)
 
 class StepResult(
@@ -241,11 +298,12 @@ class StepResult(
 
 object GoalStepValidator {
     const val MAX_TEXT = 400
+    const val MAX_SUPPORT = 3
     private val ALLOWED = mapOf("task" to ItemKind.TASK, "note" to ItemKind.FACT, "question" to ItemKind.QUESTION)
     private val SUGGESTED = mapOf("done" to WorkState.DONE, "dropped" to WorkState.DROPPED, "waiting" to WorkState.WAITING, "active" to WorkState.ACTIVE)
 
     /** Keeps at most [maxItems] well-formed items. Anything else the object carries (an `operations` list, a `verb`, a uid) is not read at all. */
-    fun parse(input: JsonObject, maxItems: Int, scope: ScopeMap, usage: CallUsage): StepResult {
+    fun parse(input: JsonObject, maxItems: Int, scope: ScopeMap, shownRefs: Set<String>, usage: CallUsage): StepResult {
         fun str(o: JsonObject?, k: String) = (o?.get(k) as? JsonPrimitive)?.takeIf { it.isString }?.content
         val outcome = if (str(input, "outcome")?.trim()?.lowercase() == "blocked") StepOutcome.BLOCKED else StepOutcome.DONE
         var discarded = 0
@@ -255,13 +313,16 @@ object GoalStepValidator {
             val kind = ALLOWED[str(o, "kind")?.trim()?.lowercase()]
             val text = GoalText.clean(str(o, "text"), MAX_TEXT + 1)
             if (o == null || kind == null || text.isEmpty() || text.length > MAX_TEXT || items.size >= maxItems) { discarded++; continue }
-            val ref = str(o, "about")?.trim()?.lowercase()?.takeIf { scope.resolve(it) != null }
-            items += StepItem(kind, text, ref)
+            // A ref counts only if the step was shown it: the open items and evidence it was given, nothing else in the project.
+            fun shown(r: String?) = r?.trim()?.lowercase()?.takeIf { it in shownRefs && scope.resolve(it) != null }
+            val ref = shown(str(o, "about"))
+            val support = (o["support"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }.mapNotNull(::shown).filter { it != ref }.distinct().take(MAX_SUPPORT)
+            items += StepItem(kind, text, ref, support)
         }
         val suggestions = ArrayList<StepSuggestion>()
         for (element in (input["suggestions"] as? JsonArray).orEmpty()) {
             val o = element as? JsonObject
-            val ref = str(o, "item")?.trim()?.lowercase()?.takeIf { scope.resolve(it) != null }
+            val ref = str(o, "item")?.trim()?.lowercase()?.takeIf { it in shownRefs && scope.resolveOpen(it) != null }
             val state = SUGGESTED[str(o, "state")?.trim()?.lowercase()]
             val reason = GoalText.clean(str(o, "reason"), 300)
             if (ref == null || state == null || reason.isEmpty() || suggestions.size >= 3) { discarded++; continue }
@@ -275,11 +336,11 @@ object GoalStepValidator {
 }
 
 open class GoalStepExecutor(private val client: LlmClient, private val config: GoalRunnerConfig) {
-    open suspend fun execute(prompt: String, scope: ScopeMap): StepResult {
+    open suspend fun execute(prompt: String, scope: ScopeMap, shownRefs: Set<String>): StepResult {
         val response = call(client, config, prompt, GoalPrompts.STEP, STEP_TOOL, config.stepMaxTokens, config.stepTimeoutMs)
         val call = response.response?.toolCalls?.firstOrNull { it.name == STEP_TOOL.name }
             ?: return StepResult(StepOutcome.FAILED, "", emptyList(), emptyList(), Impact.MINOR, "", response.usage, failure = response.failure ?: "no_tool_call")
-        return GoalStepValidator.parse(call.input, config.maxItemsPerStep, scope, response.usage)
+        return GoalStepValidator.parse(call.input, config.maxItemsPerStep, scope, shownRefs, response.usage)
     }
 
     companion object {
@@ -298,7 +359,8 @@ open class GoalStepExecutor(private val client: LlmClient, private val config: G
                             putJsonObject("properties") {
                                 putJsonObject("kind") { put("type", "string"); putJsonArray("enum") { add("note"); add("task"); add("question") } }
                                 putJsonObject("text") { put("type", "string") }
-                                putJsonObject("about") { put("type", "string"); put("description", "Ref (i1 ...) of the given item this one concerns.") }
+                                putJsonObject("about") { put("type", "string"); put("description", "Ref (i1 ...) of the open item this one concerns.") }
+                                putJsonObject("support") { put("type", "array"); putJsonObject("items") { put("type", "string") }; put("description", "Refs (e1 ... or i1 ...) of the given lines that support this item. Only lines you were given; at most three.") }
                             }
                             putJsonArray("required") { add("kind"); add("text") }
                         }

@@ -28,6 +28,7 @@ working memory, not test data. The previous identity, `webui-dev`, is kept untou
 - Never write over the running jar. Build under another name and keep the old jar.
 - Before any deploy, take a graph backup (see `docs/graph-backup-restore.md`) and keep a rollback jar.
 - Compare vertex and edge counts and the constraint rule count before and after the restart.
+- A scratch engine (a restore of a backup, to try something without touching a live file) is started only with `deploy/scripts/scratch-engine.sh`. It sets its own home directory (`-Duser.home`; the JVM ignores `$HOME`), tick directory, tokens, port and every path that defaults to the home directory. Never start one by hand without all of them (the env block is in `docs/goal-runner.md`).
 - Merging to `master` auto-deploys the hosted app (`.do/app.yaml`). That is a separate step from deploying to the box.
 
 ## Observability

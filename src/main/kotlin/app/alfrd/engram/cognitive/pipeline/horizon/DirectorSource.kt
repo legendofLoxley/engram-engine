@@ -194,17 +194,17 @@ class DirectorWriter(
 
     /** Sends the channel a message about a goal, as a node (see [DirectorMessageStore]). Null when there is nothing to send it from: no message store, or a goal the Director may not speak for. */
     suspend fun send(
-        userEmail: String, cycle: DirectorCycle, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L,
-    ): DirectorMessage? = send(userEmail, cycle.goalUid, cycle.number, kind, text, answersUid, usageTokens, usageMillis)
+        userEmail: String, cycle: DirectorCycle, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L, closedAs: String? = null,
+    ): DirectorMessage? = send(userEmail, cycle.goalUid, cycle.number, kind, text, answersUid, usageTokens, usageMillis, closedAs)
 
     internal suspend fun send(
-        userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L,
+        userEmail: String, goalUid: String, cycle: Int, kind: DirectorMessageKind, text: String, answersUid: String? = null, usageTokens: Long = 0L, usageMillis: Long = 0L, closedAs: String? = null,
     ): DirectorMessage? {
         val store = messages ?: return null
         val goal = structure.getItem(userEmail, goalUid) ?: return null
         // A message may be sent for any approved goal, running or not: a finished or stopped goal is exactly when one is wanted.
         if (goal.kind != ItemKind.GOAL || goal.approval != "approved") return null
-        return store.post(userEmail, goalUid, cycle, kind, text, answersUid, usageTokens, usageMillis)
+        return store.post(userEmail, goalUid, cycle, kind, text, answersUid, usageTokens, usageMillis, closedAs)
     }
 }
 

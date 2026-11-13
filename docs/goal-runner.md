@@ -35,11 +35,11 @@ A cycle may start only when all of these hold. The single-shot trigger waives th
 4. Free RAM at least the floor (`MemAvailable`), and, where it can be read (AMD VRAM through sysfs), free GPU memory at least the floor. A figure the box cannot read never blocks; a known low one always does.
 5. The step server has at least two free slots, so the runner takes one and conversation always keeps one. The plan server needs a free slot.
 
-While a cycle runs it re-checks 1 to 3 and the step server's other slot between steps, and every 1.5 s during a model call. When any fails it cancels the call (closing the connection, which stops llama.cpp generating), pauses the goal and sends a quiet message. What it wrote before stays and `retract_cycle` removes it.
+While a cycle runs it re-checks 1 to 3 and the step server's other slot between steps, and every 1.5 s during a model call. When any fails it cancels the call (closing the connection, which stops llama.cpp generating) and **yields**: the cycle is closed as `yielded` (a quiet message that carries what it used, and a change record `running` to `yielded`, actor `director`), the goal **keeps running**, and the next idle window tries again; the 30-minute gap between cycles does not apply after a yield. What the cycle wrote before stays and `retract_cycle` removes it.
 
 ## State
 
-The runner may do two things to a goal's state, and the type that does them (`RunnerState`) has no way to say anything else: approved to running (`active`) at the start, and running to paused (`waiting`) when the budget is spent, the replan cap is hit, the model gives no usable answer, a cycle is interrupted, the cycle fails, or the engine restarted mid-cycle. Every move has a change record whose actor is `director` and whose cause is `goal_runner:<reason>`.
+The runner may do two things to a goal's state, and the type that does them (`RunnerState`) has no way to say anything else: approved to running (`active`) at the start, and running to paused (`waiting`). It pauses a goal for exactly four reasons: the budget is spent, the replan cap is hit, **two cycles in a row failed** (no plan, no usable step answer, QC could not run, an exception), or the engine restarted mid-cycle. A single failed cycle sends a `failure` message and leaves the goal running; an interruption by a conversation is a yield, not a pause. Every move has a change record whose actor is `director` and whose cause is `goal_runner:<reason>`. Every cycle also ends with exactly one closing message (`completed`, `yielded`, `failed` or `paused`) with a change record of its own.
 
 It never marks a goal done or stopped. When QC says the done-when looks met (and none of its sampled items was found unsupported) it sends a `finished` message; the owner closes the goal through the channel. A goal whose latest message is `finished` is not picked again.
 
@@ -47,8 +47,8 @@ A goal is picked only if it is approved, open or running, filed under an active 
 
 ## The cycle
 
-1. **Plan** (strong model). Reads the goal, its done-when, the project's items (as refs `i1`, `i2` ... so a model never sees a uid), what the Director has already written, and the last cycle's summary. Writes at most `GOAL_RUNNER_MAX_STEPS` steps. Code drops a step that is malformed, too long, repeats an earlier one, asks to delete or overwrite something (`ForbiddenActions`, from the Notion cycle), or names a ref it was not shown. Work the graph already covers is skipped: the planner is shown the Director's earlier items, and a step's item whose text matches an item already in the project is counted as covered and not written.
-2. **Execute** (fast model). Each step is one forced tool call over at most eight items. The answer is parsed field by field: at most five items, kinds `note`, `task` or `question` only, text cut to 400 characters, state suggestions limited to four states. Anything else in the answer (an `operations` list, a `verb`, a uid) is never read. Items are written through `DirectorWriter`, so its guard decides every write.
+1. **Plan** (strong model). Reads the goal, its done-when, the project's **open** items (as refs `i1`, `i2` ... so a model never sees a uid), project-level counts of open items, closed items and notes (so it knows evidence exists), what the Director has already written, and the last cycle's summary. Writes at most `GOAL_RUNNER_MAX_STEPS` steps, each naming the open items it works. The planner is **not** asked to name evidence. Code drops a step that is malformed, too long, repeats an earlier one, names no open item (except an `ask` step), asks to delete or overwrite something (`ForbiddenActions`, from the Notion cycle), or names a ref it was not shown. A plan whose every step was rejected is a failed plan. Work the graph already covers is skipped: the planner is shown the Director's earlier items, and a step's item whose text matches an item already in the project is counted as covered and not written.
+2. **Execute** (fast model). For each open item a step covers, **code retrieves up to four related closed items and notes of the same project** (`GoalEvidence`) and hands them to the step as labelled evidence with refs (`e1`, `e2` ...). They are ranked by shared meaningful words (weighted by how rare the word is in the project's evidence), shared concepts (`about` links), and a small recency bonus that only breaks ties; an item that shares no word and no concept is not evidence. Evidence is the owner's closed (done or dropped) items and notes, never the Director's own writing and never a goal. Each step's prompt has a budget (`stepPromptChars`, 12,000): evidence is trimmed from the weakest end, then items are left out, and the prompt says what was left out; a ref that was left out cannot be cited. The answer is parsed field by field: at most five items, kinds `note`, `task` or `question` only, text cut to 400 characters, each item naming the open item it concerns (`about`) and at most three evidence lines that support it (`support`), both checked against what the step was shown; state suggestions limited to four states. Anything else in the answer (an `operations` list, a `verb`, a uid) is never read. Items are written through `DirectorWriter`, so its guard decides every write, and each is linked to the items it cites.
 3. **Gate.** The step reports its impact on the plan: none, minor or major. Major replans, up to the cap, then the goal is paused and a `failure` message is sent. Code raises a step to major when most of its writes were refused.
 4. **QC** (strong model). Recomputes against the done-when, judges a sample of the new items against their sources (the owner's item each one concerns), writes a summary message, and records what the goal left unclear as a Director note.
 
@@ -67,6 +67,21 @@ The runner assigns them (`DirectorCycles.begin`): one past the highest the goal 
 ## Restart
 
 At startup, a goal that is running and whose latest cycle never ended (no closing message) is paused, with a `failure` message and a change record (`goal_runner:restart_recovery`). It is never resumed. A goal that is running between cycles is left as it is.
+
+## A scratch engine
+
+To try a cycle without touching a live file, run `deploy/scripts/scratch-engine.sh [backup.zip]`. It restores the newest backup into a new mode-700 directory and runs the engine on port 8095 with `env -i`, `-Duser.home` pointing at the scratch directory (the JVM ignores `$HOME`, and the Director tick, the owner token and the kill file all default to the home directory), and fresh random tokens, then removes everything when it gets SIGTERM. The environment block it sets, if you would rather run it by hand:
+
+```bash
+env -i PATH=/usr/bin:/bin HOME="$SCR" PORT=8095 HOST=127.0.0.1 DB_PATH="$SCR/engram-db" \
+  DEBUG_CONVERSE_ENABLED=true DEBUG_CONVERSE_TOKEN="$(cat "$SCR/debug-token")" SCHEMA_ENFORCE_CONSTRAINTS=true \
+  LLM_PROVIDER=local LOCAL_LLM_BASE_URL=http://127.0.0.1:8081/v1 NOTION_CYCLES_POLLING=off \
+  OWNER_IDENTITY=owner-jacob OWNER_TOKEN_FILE="$SCR/owner-token" \
+  DIRECTOR_TICK_IDENTITY=owner-jacob DIRECTOR_TICK_DIR="$SCR/tick" GOAL_RUNNER_KILL_FILE="$SCR/never-exists" \
+  java -Duser.home="$SCR" -Xmx768m -jar build/libs/engram-engine.jar
+```
+
+The scratch engine reaches the live model servers, so a cycle on it spends the box's compute; the slot check makes it wait for a conversation, and a scratch cycle has to be run with the single-shot trigger on port 8095.
 
 ## Trying it once
 
