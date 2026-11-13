@@ -1,7 +1,7 @@
 Testing Skill — engram-engine
-Scope: everything under src/test/kotlin/. For repo-wide rules see .github/copilot-instructions.md.
+Scope: everything under src/test/kotlin/.
 Running the suite
-Full suite: ./gradlew test --rerun-tasks
+Full suite: ./gradlew test --rerun-tasks (cloud agent only; on the box, compile only, under the 4 GiB free-RAM guard; a task is not done until the cloud suite is green; the owner's Windows PC is not a valid test environment)
 Single class: ./gradlew test --tests "app.alfrd.engram.<fqcn>" --rerun-tasks
 Compile check only: ./gradlew compileKotlin compileTestKotlin --rerun-tasks
 Always pass --rerun-tasks. Gradle incremental compilation has caused stale-class bugs in this repo.
@@ -19,7 +19,7 @@ grep -h 'failures=' build/test-results/test/*.xml \
 ​
 Report the result verbatim: N tests, M failures.
 Coroutine test patterns
-Reference: Coroutine Testing Pitfalls in .github/copilot-instructions.md. Patterns below are the positive form.
+Reference: Coroutine Testing Pitfalls in CLAUDE.md. Patterns below are the positive form.
 WebSocket / listener-style flows → channelFlow
 fun listen(): Flow<Frame> = channelFlow {
     val bridge = Channel<Frame>(Channel.BUFFERED)

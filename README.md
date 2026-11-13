@@ -154,6 +154,8 @@ Returns vertex and edge types and their properties from the live ArcadeDB schema
 ./gradlew test --rerun-tasks
 ```
 
+On the arx-box, compile only (`./gradlew compileKotlin compileTestKotlin --rerun-tasks`) under the 4 GiB free-RAM guard; the full suite runs on the cloud agent, and a task is not done until it is green. The owner's Windows PC is not a valid test environment (73 failures on identical code, from POSIX permissions, line endings and symlinks).
+
 The suite covers graph schema and CRUD, routing/classification, actor prompt conditioning, retrieval and corrections, modality-correct identity, attunement, topic confidence, mood, and multi-turn stability.
 
 ## Graceful degradation
