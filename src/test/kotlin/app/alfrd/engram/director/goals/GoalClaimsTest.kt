@@ -13,14 +13,14 @@ class GoalClaimsTest {
     private fun rec(uid: String, state: WorkState?, text: String = "Item $uid", kind: ItemKind = ItemKind.TASK) =
         ItemRecord(uid = uid, kind = kind, text = text, status = if (state == WorkState.DONE || state == WorkState.DROPPED) "resolved" else "open", dueAt = null, projectUid = "p", createdAt = 1L, state = state)
 
-    private val scope = ScopeMap(listOf(rec("o1", WorkState.OPEN), rec("o2", WorkState.OPEN)))
+    private val scope = ScopeMap(listOf(rec("o1", WorkState.OPEN), rec("o2", WorkState.OPEN), rec("o3", WorkState.OPEN)))
     private val eDone = scope.evidenceRef(rec("d1", WorkState.DONE))
     private val eDropped = scope.evidenceRef(rec("d2", WorkState.DROPPED))
     private val eOpenish = scope.evidenceRef(rec("d3", WorkState.WAITING))
     private val eNote = scope.evidenceRef(rec("n1", null, kind = ItemKind.FACT))
     private val eNotShownHere = scope.evidenceRef(rec("d4", WorkState.DONE))
-    // i1 was shown with the done item, the dropped one and the waiting one; i2 only with a note. d4 was shown with nothing.
-    private val shown = GoalClaims.Shown(mapOf("i1" to setOf(eDone, eDropped, eOpenish), "i2" to setOf(eNote)), scope, 1.5)
+    // i1 was shown with the done item, the dropped one and the waiting one; i2 only with a note; i3 with nothing. d4 was shown with nothing.
+    private val shown = GoalClaims.Shown(mapOf("i1" to setOf(eDone, eDropped, eOpenish), "i2" to setOf(eNote), "i3" to emptySet()), scope, 1.5)
 
     private fun check(claim: Disposition?, about: String?, support: List<String>, none: Boolean = false) = GoalClaims.check(claim, about, support, none, shown)
 
@@ -50,7 +50,9 @@ class GoalClaimsTest {
     fun `waiting and live need a cited related line or an explicit no evidence found`() {
         for (d in listOf(Disposition.WAITING, Disposition.LIVE)) {
             assertTrue(check(d, "i2", listOf(eNote)).stands, "a related note shown with it")
-            assertTrue(check(d, "i1", emptyList(), none = true).stands, "an explicit no evidence found")
+            assertTrue(check(d, "i3", emptyList(), none = true).stands, "an explicit no evidence found, for an item nothing was shown with")
+            assertFalse(check(d, "i1", emptyList(), none = true).stands, "evidence was shown with i1, so \"no evidence found\" is not believed; it has to cite some")
+            assertFalse(check(d, "i3", emptyList()).stands, "nothing cited and nothing said")
             assertFalse(check(d, "i1", emptyList()).stands, "neither")
             assertFalse(check(d, "i2", listOf(eDone)).stands, "a line not shown with that item")
         }

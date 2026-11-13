@@ -664,29 +664,33 @@ class GoalRunnerTest {
     fun `a done or dropped claim without a fitting shown evidence item is written as unclassifiable and the reasoning kept as a note`() {
         val goal = approvedGoal("Review the open Williams items")
         closedWilliams("Send the Williams inspection report to Sam")
-        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("One")) }
+        // Created last, so it is i1 (newest first), and it shares no word with any closed item: nothing is shown with it.
+        runBlocking { structure.createItem(user, 1, ItemKind.TASK, "Zebra paddock fence", projectUid = williams.uid) }
+        server.on("propose_goal_plan") { FakeModelServer.Reply(planJson("One", refs = listOf("i1", "i2", "i3"))) }
         server.on("report_goal_step") {
             FakeModelServer.Reply(stepOf(
-                claimItem("done", "Proposed done: the report went out", "i1", listOf("e1")),                 // stands: e1 is a done item shown with i1
-                claimItem("done", "Proposed done: surely finished", "i2"),                                  // nothing cited
-                claimItem("dropped", "Proposed dropped: obsolete", "i1", listOf("e1")),                     // e1 is done, not dropped
-                claimItem("waiting", "Proposed waiting: probably", "i2"),                                   // no cited line, no explicit no-evidence
-                claimItem("waiting", "Waiting on Sam. No evidence was found.", "i2", noEvidence = true),    // stands: says so
-                claimItem(null, "Proposed disposition for i2: done, it looks complete", "i2"),               // a claim in the text only
+                claimItem("done", "Proposed done: the report went out", "i2", listOf("e1")),                // stands: e1 is a done item shown with i2
+                claimItem("done", "Proposed done: surely finished", "i3"),                                  // nothing cited
+                claimItem("dropped", "Proposed dropped: obsolete", "i2", listOf("e1")),                     // e1 is done, not dropped
+                claimItem("waiting", "Proposed waiting: probably", "i3"),                                   // no cited line, no explicit no-evidence
+                claimItem("waiting", "Nothing to go on for the fence. No evidence was found.", "i1", noEvidence = true), // stands: nothing was shown with i1
+                claimItem(null, "Proposed disposition for i3: done, it looks complete", "i3"),               // a claim in the text only
+                claimItem("waiting", "Waiting. No evidence was found.", "i2", noEvidence = true),            // evidence was shown with i2, so the flag is not believed
+                claimItem(null, "i3 is done, the work looks finished", "i3"),                                // a plain statement, no field and no key words
             ))
         }
         val out = run(runner(config { copy(maxItemsPerStep = 8) }))
         assertEquals(RunOutcome.COMPLETED, out.outcome, out.reason)
         val step = out.steps.single()
-        assertEquals(4, step.downgraded, "four claims did not stand: ${out.proposals.map { it.text }}")
-        assertEquals(4, out.downgraded)
+        assertEquals(6, step.downgraded, "six claims did not stand: ${out.proposals.map { it.text }}")
+        assertEquals(6, out.downgraded)
         val texts = wrote(goal).map { it.text }
         assertTrue(texts.any { it == "Proposed done: the report went out" }, "the supported claim is written as it was")
-        assertTrue(texts.any { it.startsWith("Waiting on Sam") })
+        assertTrue(texts.any { it.startsWith("Nothing to go on for the fence") })
         assertTrue(texts.count { it.startsWith("Unclassifiable, no supporting evidence for") } >= 2, "written as unclassifiable: $texts")
         assertTrue(texts.any { it.startsWith("Unverified reasoning (proposed dropped") && it.contains("obsolete") }, "the reasoning is kept as a note")
-        assertEquals(4, texts.count { it.startsWith("Unverified reasoning") }, "one for each claim that did not stand")
-        assertTrue(texts.none { it == "Proposed done: surely finished" || it == "Proposed dropped: obsolete" || it.startsWith("Proposed disposition for i2: done") }, "an unsupported claim is not written as a claim")
+        assertEquals(6, texts.count { it.startsWith("Unverified reasoning") }, "one for each claim that did not stand")
+        assertTrue(texts.none { it == "Proposed done: surely finished" || it == "Proposed dropped: obsolete" || it.startsWith("Proposed disposition for i3: done") || it == "i3 is done, the work looks finished" }, "an unsupported claim is not written as a claim")
         assertTrue(out.proposals.filter { it.downgraded }.all { it.disposition == "unclassifiable" })
     }
 
@@ -723,6 +727,7 @@ class GoalRunnerTest {
         val notes = wrote(goal).map { it.text }
         assertTrue(notes.any { it.startsWith("Suggestion: mark") && it.contains("the report went out") })
         assertTrue(notes.none { it.contains("surely") })
+        assertTrue(out.proposals.any { it.downgraded && it.text.startsWith("not written: mark") }, "the dropped suggestion is on the record")
     }
 
     // ── limits and failures ──────────────────────────────────────────────────

@@ -497,7 +497,8 @@ class GoalRunner(
             for (s in result.suggestions) {
                 val target = scope.resolveOpen(s.targetRef) ?: continue
                 val claim = when (s.state) { WorkState.DONE -> Disposition.DONE; WorkState.DROPPED -> Disposition.DROPPED; WorkState.WAITING -> Disposition.WAITING; else -> Disposition.LIVE }
-                if (!GoalClaims.check(claim, s.targetRef, s.supportRefs, s.noEvidenceFound, shown).stands) { downgraded++; continue } // the disposition note already says unclassifiable
+                val verdict = GoalClaims.check(claim, s.targetRef, s.supportRefs, s.noEvidenceFound, shown)
+                if (!verdict.stands) { downgraded++; proposals += Proposal("suggestion", "not written: mark \"${target.text.take(60)}\" ${s.state.wire()} (${verdict.why})", s.targetRef, emptyList(), claim.label, downgraded = true); continue }
                 val out = writer.suggestStateChange(email, cycle, sequence, target.uid, s.state, s.reason, zone)
                 if (out.all { it.applied }) { applied++; proposals += Proposal("suggestion", "mark \"${target.text.take(80)}\" ${s.state.wire()} — ${s.reason}", s.targetRef, s.supportRefs, claim.label) } else refused++
             }

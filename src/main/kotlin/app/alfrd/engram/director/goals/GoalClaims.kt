@@ -22,7 +22,7 @@ enum class Disposition(val label: String) {
  *  - **done** stands only if it cites at least one evidence line that was shown with *that* open item, scored at least the minimum (only qualifying lines are ever shown),
  *    and is itself a **done** item;
  *  - **dropped** the same, citing a **dropped** item (supersession is not read: a superseded item that is still open is not evidence);
- *  - **waiting** and **live** need at least one cited related line shown with the item, or an explicit "no evidence found" from the step;
+ *  - **waiting** and **live** need at least one cited related line shown with the item, or an explicit "no evidence found" from the step *for an item nothing was shown with* (the flag is not believed when evidence was shown);
  *  - **unclassifiable** always stands: it is what an unsupported claim is written as.
  * A claim that names no open item stands for nothing.
  */
@@ -41,7 +41,8 @@ object GoalClaims {
         return when (claim) {
             Disposition.DONE -> if (cited.any { it.workState == WorkState.DONE }) Verdict(true) else Verdict(false, "no cited line is a done item that was shown with ${about.text.take(40)}")
             Disposition.DROPPED -> if (cited.any { it.workState == WorkState.DROPPED }) Verdict(true) else Verdict(false, "no cited line is a dropped item that was shown with ${about.text.take(40)}")
-            Disposition.WAITING, Disposition.LIVE -> if (cited.isNotEmpty() || noEvidenceFound) Verdict(true) else Verdict(false, "${noun(claim)} needs a cited related line or an explicit \"no evidence found\"")
+            // "No evidence found" is believed only when nothing was shown with the item; if evidence was shown, the claim has to cite some of it.
+            Disposition.WAITING, Disposition.LIVE -> if (cited.isNotEmpty() || (noEvidenceFound && allowed.isEmpty())) Verdict(true) else Verdict(false, "${noun(claim)} needs a cited related line, or \"no evidence found\" for an item nothing was shown with")
             Disposition.UNCLASSIFIABLE -> Verdict(true)
         }
     }
