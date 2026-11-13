@@ -329,7 +329,7 @@ object GoalStepValidator {
             val flag = (o["no_evidence_found"] as? JsonPrimitive)?.let { it.content.equals("true", ignoreCase = true) } ?: false
             var finalText = text
             if (kind == ItemKind.QUESTION) { val (shaped, cutIt) = GoalAsk.shape(text); finalText = shaped; if (cutIt) askCut++ }
-            items += StepItem(kind, finalText, ref, support, Disposition.of(str(o, "disposition")) ?: GoalClaims.inferClaim(finalText), flag)
+            items += StepItem(kind, finalText, ref, support, Disposition.of(str(o, "disposition")) ?: (if (ref != null) GoalClaims.inferClaim(finalText) else null), flag)
         }
         val suggestions = ArrayList<StepSuggestion>()
         for (element in (input["suggestions"] as? JsonArray).orEmpty()) {

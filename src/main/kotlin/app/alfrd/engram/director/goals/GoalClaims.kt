@@ -49,10 +49,21 @@ object GoalClaims {
     private val DISPOSITION_PHRASE = Regex("""(?i)\bdisposition\b[^.:;]{0,40}[:\-—,]?\s*[^.]{0,20}\b(done|dropped)\b""")
     private val MARK_PHRASE = Regex("""(?i)^\s*(?:i\s+)?(?:propose|suggest|mark|recommend)\w*\b[^.]{0,60}\b(done|dropped)\b""")
 
-    /** A claim written into the text with no `disposition` field ("Proposed disposition for i4: done"), so the check cannot be sidestepped by leaving the field out. */
+    private val NEGATION = Regex("""(?i)\b(no (?:direct )?evidence|not (?:yet |been )?(?:done|complete|completed|finished|resolved)|unclassifiable|cannot|can't|unable|not enough|isn't|is not|remains?|still|blocked|waiting|unknown|unclear|incomplete|partial(?:ly)?)\b""")
+    private val DONE_WORDS = Regex("""(?i)\b(done|complete|completed|finished|resolved|implemented)\b""")
+    private val DROPPED_WORDS = Regex("""(?i)\b(dropped|abandoned|obsolete|duplicate|superseded|cancell?ed)\b""")
+
+    /**
+     * A claim written into the text with no `disposition` field, so the check cannot be sidestepped by leaving the field out. An explicit form ("Proposed disposition for
+     * i4: done", "Mark i7 done") is a claim; otherwise text that says the item is done or dropped, with no word of doubt in it, is. A sentence that doubts ("no direct
+     * evidence this is complete") is not a claim of anything, and the rule would only turn it into an "unclassifiable" it already says. Call it for an item that names an open item.
+     */
     fun inferClaim(text: String): Disposition? {
-        val m = DISPOSITION_PHRASE.find(text) ?: MARK_PHRASE.find(text) ?: return null
-        return Disposition.of(m.groupValues[1])
+        (DISPOSITION_PHRASE.find(text) ?: MARK_PHRASE.find(text))?.let { return Disposition.of(it.groupValues[1]) }
+        if (NEGATION.containsMatchIn(text)) return null
+        if (DONE_WORDS.containsMatchIn(text)) return Disposition.DONE
+        if (DROPPED_WORDS.containsMatchIn(text)) return Disposition.DROPPED
+        return null
     }
 }
 

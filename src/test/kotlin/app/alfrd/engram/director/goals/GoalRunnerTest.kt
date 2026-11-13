@@ -603,7 +603,7 @@ class GoalRunnerTest {
             FakeModelServer.Reply(buildJsonObject {
                 put("outcome", "done"); put("summary", "reviewed"); put("impact", "none")
                 put("items", buildJsonArray {
-                    add(buildJsonObject { put("kind", "note"); put("text", "Likely done: the report was sent (step $n)"); put("about", "i2"); put("support", buildJsonArray { add("e1"); add("e99"); add(closed.uid) }) })
+                    add(buildJsonObject { put("kind", "note"); put("text", "Likely done: the report was sent (step $n)"); put("about", "i1"); put("support", buildJsonArray { add("e1"); add("e99"); add(closed.uid) }) })
                 })
             }.toString())
         }
@@ -617,7 +617,7 @@ class GoalRunnerTest {
         assertTrue(out.steps.all { it.evidence >= 1 && it.items >= 1 })
         // The proposal cites a line it was given; the ones it was not given (e99, a uid) are dropped.
         val p = out.proposals.first()
-        assertEquals("i2", p.about); assertEquals(listOf("e1"), p.support)
+        assertEquals("i1", p.about); assertEquals(listOf("e1"), p.support)
         assertEquals(closed.uid, out.refs["e1"]?.uid, "the report says which graph item each cited ref is")
         assertEquals("done", out.refs["e1"]?.state)
         assertTrue(runBlocking { structure.getItem(user, out.refs.getValue("e1").uid) } != null, "and it exists")

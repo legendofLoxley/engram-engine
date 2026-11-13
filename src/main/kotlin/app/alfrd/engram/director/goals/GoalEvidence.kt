@@ -33,11 +33,14 @@ object GoalEvidence {
     fun commonWords(projectItems: List<ItemRecord>): Set<String> {
         if (projectItems.size < MIN_ITEMS_FOR_COMMON) return emptySet()
         val df = HashMap<String, Int>()
-        projectItems.forEach { i -> words(i.text).forEach { df.merge(it, 1, Int::plus) } }
+        projectItems.forEach { i -> (words(i.text) + concepts(i)).forEach { df.merge(it, 1, Int::plus) } }
         return df.filterValues { it * 4 > projectItems.size }.keys
     }
 
     const val MIN_ITEMS_FOR_COMMON = 20
+
+    /** The concepts an item is about (its `about` links), as keys that cannot collide with a word. A concept every item shares says as little as a word every item has. */
+    fun concepts(i: ItemRecord): Set<String> = i.about.map { "concept:" + it.trim().lowercase() }.toSet()
 
     /** What may serve as evidence from [projectItems]: the owner's closed items and notes. */
     fun pool(projectItems: List<ItemRecord>): List<ItemRecord> = projectItems.filter { it.directorGoalUid == null && it.kind != ItemKind.GOAL && isClosedOrNote(it) }
@@ -49,7 +52,7 @@ object GoalEvidence {
     /** How many pool items contain each word, for weighting. */
     fun documentFrequency(pool: List<ItemRecord>, ignore: Set<String> = emptySet()): Map<String, Int> {
         val df = HashMap<String, Int>()
-        pool.forEach { p -> words(p.text, ignore).forEach { df.merge(it, 1, Int::plus) } }
+        pool.forEach { p -> (words(p.text, ignore) + concepts(p)).forEach { df.merge(it, 1, Int::plus) } }
         return df
     }
 
@@ -62,13 +65,14 @@ object GoalEvidence {
      */
     fun related(item: ItemRecord, pool: List<ItemRecord>, df: Map<String, Int>, now: Long, limit: Int, ignore: Set<String> = emptySet(), minRelevance: Double = 0.0): List<Scored> {
         val mine = words(item.text, ignore)
-        val myAbout = item.about.map { it.lowercase() }.toSet()
+        val myAbout = concepts(item) - ignore
         if (mine.isEmpty() && myAbout.isEmpty()) return emptyList()
         return pool.asSequence().filter { it.uid != item.uid }.mapNotNull { candidate ->
             val shared = mine.intersect(words(candidate.text, ignore))
-            val sharedAbout = myAbout.intersect(candidate.about.map { it.lowercase() }.toSet())
+            val sharedAbout = myAbout.intersect(concepts(candidate))
             if (shared.isEmpty() && sharedAbout.isEmpty()) return@mapNotNull null
-            val relevance = 3.0 * shared.sumOf { 1.0 / ln(2.0 + (df[it] ?: 1)) } + 1.5 * sharedAbout.size
+            // A shared word and a shared concept weigh the same, each by how rare it is in the project's evidence.
+            val relevance = 3.0 * (shared + sharedAbout).sumOf { 1.0 / ln(2.0 + (df[it] ?: 1)) }
             if (relevance < minRelevance) return@mapNotNull null
             val ageDays = ((now - candidate.evidenceAt).coerceAtLeast(0)) / 86_400_000.0
             Scored(candidate, relevance, relevance + 0.5 * exp(-ageDays / 180.0))

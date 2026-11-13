@@ -68,7 +68,11 @@ class GoalClaimsTest {
         assertEquals(Disposition.DROPPED, GoalClaims.inferClaim("Disposition: dropped. Duplicate of i4."))
         assertEquals(Disposition.DONE, GoalClaims.inferClaim("Mark i7 done, the schema is finished"))
         assertEquals(null, GoalClaims.inferClaim("The invoice call looks still live"))
-        assertEquals(null, GoalClaims.inferClaim("Likely done: the report was sent"))
+        assertEquals(Disposition.DONE, GoalClaims.inferClaim("Likely done: the report was sent"), "no word of doubt: it is a claim")
+        assertEquals(Disposition.DONE, GoalClaims.inferClaim("i9 (Status: In Progress) is done — evidence e11, e12 show the dashboard was built"), "a plain statement with no disposition field")
+        assertEquals(Disposition.DROPPED, GoalClaims.inferClaim("Duplicate of i4: both concern magic-link login"))
+        assertEquals(null, GoalClaims.inferClaim("Related admin portal work is done (e1, e2), but no direct evidence this follow-on task is complete"), "doubt is not a claim")
+        assertEquals(null, GoalClaims.inferClaim("i12 is waiting; the Daily Utility form work is done but the barcodes are not"), "waiting is not done")
         assertEquals(Disposition.DONE, Disposition.of("done")); assertEquals(Disposition.LIVE, Disposition.of("still live")); assertEquals(null, Disposition.of("deleted"))
     }
 

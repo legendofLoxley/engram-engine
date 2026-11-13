@@ -149,4 +149,15 @@ class GoalEvidenceTest {
         assertEquals(setOf("i1"), ctx.shownRefs)
         assertEquals(emptySet<String>(), ctx.evidenceFor["i1"])
     }
+
+    @Test
+    fun `a concept every item shares counts for little and a rare concept still counts`() {
+        val everywhere = (1..24).map { rec("p$it", "Unrelated thing number $it", about = listOf("Williams")) } + rec("rare", "Handover notes", about = listOf("Ron", "Williams"))
+        val common = GoalEvidence.commonWords(everywhere)
+        assertTrue("concept:williams" in common && "concept:ron" !in common)
+        val item = rec("o", "Chase the contract", WorkState.OPEN, about = listOf("Williams", "Ron"))
+        val pool = everywhere.filter { it.uid.startsWith("p") }.take(5) + rec("rare", "Handover notes", about = listOf("Ron", "Williams"))
+        val got = GoalEvidence.related(item, pool, GoalEvidence.documentFrequency(pool, common), now, 10, common, 1.5)
+        assertEquals(listOf("rare"), got.map { it.item.uid }, "only the item that shares the rare concept; the shared project name connects nothing")
+    }
 }
