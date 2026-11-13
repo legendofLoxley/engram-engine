@@ -40,13 +40,13 @@ class ItemKindsTest {
      * [ItemKind] fails [every kind has an explicit answer for every list] instead of being silently left out of a scan.
      */
     private val expected: Map<KindList, Set<ItemKind>> = mapOf(
-        KindList.URGENCY_SCAN to setOf(ItemKind.TASK, ItemKind.EVENT),                              // HorizonSelector.datedScan: scan("Task"), scan("Event")
-        KindList.OPEN_UNFILED_SCAN to setOf(ItemKind.TASK, ItemKind.QUESTION),                      // HorizonSelector.openUnfiledItems: listOf("Task", "Question")
-        KindList.STATE_SCAN to setOf(ItemKind.TASK, ItemKind.EVENT, ItemKind.QUESTION),             // HorizonSelector.stateScan
-        KindList.ALSO_DUE_SCAN to setOf(ItemKind.TASK, ItemKind.EVENT),                             // HorizonAssembler.alsoDueEntries: listOf("Task", "Event")
-        KindList.STATUS_ON_ITEM to setOf(ItemKind.TASK, ItemKind.QUESTION),                         // HorizonAssembler: IN ['Task', 'Question'] (Event reads the assertion's copy)
-        KindList.OPEN_ONLY_LISTING to setOf(ItemKind.TASK, ItemKind.QUESTION),                      // HorizonStructureStore.listRecentItems(openOnly)
-        KindList.CARRIES_STATE to setOf(ItemKind.TASK, ItemKind.EVENT, ItemKind.QUESTION),          // HorizonStructureStore ITEM_STATE_TYPES
+        KindList.URGENCY_SCAN to setOf(ItemKind.TASK, ItemKind.EVENT, ItemKind.GOAL),                              // HorizonSelector.datedScan: scan("Task"), scan("Event")
+        KindList.OPEN_UNFILED_SCAN to setOf(ItemKind.TASK, ItemKind.QUESTION, ItemKind.GOAL),                      // HorizonSelector.openUnfiledItems: listOf("Task", "Question")
+        KindList.STATE_SCAN to setOf(ItemKind.TASK, ItemKind.EVENT, ItemKind.QUESTION, ItemKind.GOAL),             // HorizonSelector.stateScan
+        KindList.ALSO_DUE_SCAN to setOf(ItemKind.TASK, ItemKind.EVENT, ItemKind.GOAL),                             // HorizonAssembler.alsoDueEntries: listOf("Task", "Event")
+        KindList.STATUS_ON_ITEM to setOf(ItemKind.TASK, ItemKind.QUESTION, ItemKind.GOAL),                         // HorizonAssembler: IN ['Task', 'Question'] (Event reads the assertion's copy)
+        KindList.OPEN_ONLY_LISTING to setOf(ItemKind.TASK, ItemKind.QUESTION, ItemKind.GOAL),                      // HorizonStructureStore.listRecentItems(openOnly)
+        KindList.CARRIES_STATE to setOf(ItemKind.TASK, ItemKind.EVENT, ItemKind.QUESTION, ItemKind.GOAL),          // HorizonStructureStore ITEM_STATE_TYPES
     )
 
     @Test
@@ -63,19 +63,19 @@ class ItemKindsTest {
 
     @Test
     fun `list order is the order the hardcoded lists used`() {
-        assertEquals(listOf("Task", "Event"), ItemKinds.typeNames(KindList.URGENCY_SCAN))
-        assertEquals(listOf("Task", "Question"), ItemKinds.typeNames(KindList.OPEN_UNFILED_SCAN))
-        assertEquals(listOf("Task", "Event", "Question"), ItemKinds.typeNames(KindList.STATE_SCAN))
-        assertEquals("['Task', 'Question']", ItemKinds.sqlTypeList(KindList.STATUS_ON_ITEM))
+        assertEquals(listOf("Task", "Event", "Goal"), ItemKinds.typeNames(KindList.URGENCY_SCAN))
+        assertEquals(listOf("Task", "Question", "Goal"), ItemKinds.typeNames(KindList.OPEN_UNFILED_SCAN))
+        assertEquals(listOf("Task", "Event", "Question", "Goal"), ItemKinds.typeNames(KindList.STATE_SCAN))
+        assertEquals("['Task', 'Question', 'Goal']", ItemKinds.sqlTypeList(KindList.STATUS_ON_ITEM))
     }
 
     @Test
-    fun `the four kinds keep their type names, labels and due properties`() {
+    fun `the five kinds keep their type names, labels and due properties`() {
         assertEquals(
-            listOf(Triple("Phrase", "Fact", null), Triple("Task", "Task", "dueAt"), Triple("Event", "Event", "occursAt"), Triple("Question", "Question", null)),
+            listOf(Triple("Phrase", "Fact", null), Triple("Task", "Task", "dueAt"), Triple("Event", "Event", "occursAt"), Triple("Question", "Question", null), Triple("Goal", "Goal", "dueAt")),
             ItemKinds.all.map { Triple(it.typeName, it.horizonLabel, it.dueProperty) },
         )
-        assertEquals(setOf("Phrase", "Task", "Event", "Question"), ItemKinds.phraseTypeNames())
+        assertEquals(setOf("Phrase", "Task", "Event", "Question", "Goal"), ItemKinds.phraseTypeNames())
         for (kind in ItemKind.entries) assertEquals(kind, ItemKinds.fromLabel(app.alfrd.engram.notion.NotionSchema.kindLabel(kind)))
         assertEquals(null, ItemKinds.fromLabel("Insight"))
     }

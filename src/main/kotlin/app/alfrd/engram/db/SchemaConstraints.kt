@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory
 object SchemaConstraints {
     const val ENV_FLAG = "SCHEMA_ENFORCE_CONSTRAINTS"
     const val STATE_PATTERN = "^(open|active|waiting|done|dropped)$"
+    const val APPROVAL_PATTERN = "^(proposed|approved)$"
 
     private val log = LoggerFactory.getLogger(SchemaConstraints::class.java)
 
@@ -110,7 +111,27 @@ object SchemaConstraints {
                 { db -> badState(db, name) },
                 { s -> s.getType(name).getProperty("state").setRegexp(STATE_PATTERN) })
         }
+        // A goal is proposed or approved, never anything else, and a goal written without an approval is not allowed to exist.
+        if (schema.existsType("Goal")) {
+            out += Rule("approval-vocabulary:Goal", "Goal.approval is proposed or approved",
+                { s -> s.getType("Goal").getProperty("approval").regexp == APPROVAL_PATTERN },
+                { db -> badApproval(db) },
+                { s -> s.getType("Goal").getProperty("approval").setRegexp(APPROVAL_PATTERN) })
+            out += mandatory("Goal", "approval")
+        }
         return out
+    }
+
+    private fun badApproval(db: Database): Violations {
+        var n = 0L
+        val examples = mutableListOf<String>()
+        val ok = Regex(APPROVAL_PATTERN)
+        db.scanType("Goal", false) { doc ->
+            val a = doc.getString("approval")
+            if (a == null || !ok.matches(a)) { n++; if (examples.size < 3) examples += (doc.getString("uid") ?: doc.identity.toString()) }
+            true
+        }
+        return Violations(n, examples)
     }
 
     private fun mandatory(type: String, property: String) = Rule(

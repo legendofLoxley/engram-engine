@@ -55,6 +55,13 @@ source has touched (confirmed or changed items are never lowered). Without `last
 `title` (task or event only) is kept only if at least half of its content words (four letters or more) come from the quote; otherwise it is dropped
 and the quote becomes the item's label, so write a title from the quote's own words.
 
+Goals are what the owner wants worked on: record_item with kind goal (a one-sentence `title`, optional `done_when`, `stop_when` and `budget`, and the project it
+serves) writes a proposal from the owner's words. Only the owner's own words approve it (`approve_goal`, with a quote; a question or a "no" is refused), and
+approving freezes it: its sentence, done_when, stop_when, budget and project cannot change again. A proposed goal can still be re-worded and re-filed with
+`edit_goal` and `file_item`. To change what an approved goal means, stop it (`set_state` stopped), write a new goal, and link the two with `link_items`; every
+refusal says so. A goal runs (`set_state` running) only after approval, can be paused and resumed, and once done or stopped it is final and cannot be reopened.
+The board's Goals line reads running (active only), approved (not started), waiting for approval and stalled.
+
 Items have a state: open, active, waiting, done or dropped (record_item takes an optional `state`; `set_state` moves an existing item, with an
 optional `nudge` date to check in and `waiting_on`, who or what it waits on; waiting is accepted without waiting_on, and the result says so).
 `resolve_item` is set_state done and `reopen_item` is set_state open. A due date can be marked `due_kind` hard or soft (soft when not said);

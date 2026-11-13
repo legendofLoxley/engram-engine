@@ -151,6 +151,9 @@ data class HorizonPolicy(
     val boardPinnedCap: Int = 8,
     /** At most this many items listed under one project line. */
     val boardItemsPerNode: Int = 2,
+    /** The Goals section of the board: at most this many goal lines, and the whole section within [boardGoalTokens] however many goals there are. */
+    val boardGoalLines: Int = 4,
+    val boardGoalTokens: Int = 150,
     /** At most this many lines in the "since last time" section. */
     val boardSinceLines: Int = 4,
     /** At most this many quiet-area lines before the rest are counted in one. */

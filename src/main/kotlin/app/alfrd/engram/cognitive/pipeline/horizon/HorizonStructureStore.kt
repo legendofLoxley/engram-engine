@@ -21,6 +21,8 @@ enum class ItemKind(val typeName: String) {
     TASK("Task"),
     EVENT("Event"),
     QUESTION("Question"),
+    /** What the owner wants worked on, in a sentence: a [GOAL] is proposed, then approved by the owner, then run by the Director. See [GoalApproval]. */
+    GOAL("Goal"),
 }
 
 /**
@@ -110,7 +112,25 @@ data class ItemExtras(
     val fromSource: Boolean = false,
     /** When the item's evidence clock starts, instead of now: a source's `last_edited`. Bounded by now at the write; null means now. */
     val evidenceAt: Long? = null,
+    /** A goal's check that anyone could apply to see it is met. Locked once the goal is approved. Ignored for other kinds. */
+    val doneWhen: String? = null,
+    /** A goal's condition for giving up. Ignored for other kinds. */
+    val stopWhen: String? = null,
+    /** A goal's budget, in the owner's words (a count of cycles, an hour limit). Ignored for other kinds. */
+    val budget: String? = null,
 )
+
+/** What approving a goal came to. */
+enum class GoalApproval { APPROVED, ALREADY_APPROVED, NOT_A_GOAL, NOT_FOUND, MISSING_QUOTE }
+
+/**
+ * What editing a goal came to. An approved goal is [FROZEN]: its sentence, done-when, stop-when and budget do not change (and it is not re-filed).
+ * To change what a goal means, stop it, propose a new goal and link the two with link_items.
+ */
+enum class GoalEdit { EDITED, UNCHANGED, FROZEN, NOT_A_GOAL, NOT_FOUND }
+
+/** What every refusal of a change to a frozen (approved) or final (done or stopped) goal says, so the channel always reads the same rule. */
+const val GOAL_FROZEN_RULE = "a goal is frozen once it is approved and final once it is done or stopped. To change what it means, stop it, propose a new goal, and link it to the old one with link_items"
 
 /** Zoom levels a focus can carry: broad, one container, one item's neighborhood. */
 enum class FocusZoom {
@@ -193,6 +213,11 @@ data class ItemRecord(
     /** When anything last confirmed the item (see [HorizonStructureStore.touchEvidence]); null when never stamped, in which case [evidenceAt] falls back. */
     val lastEvidenceAt: Long? = null,
     val updatedAt: Long = 0L,
+    /** A goal only: `proposed` or `approved` (the owner's say-so). Null for every other kind. */
+    val approval: String? = null,
+    val doneWhen: String? = null,
+    val stopWhen: String? = null,
+    val budget: String? = null,
 ) {
     /** When the item was last confirmed: its stamp, else when it was last changed, else when it was made. */
     val evidenceAt: Long get() = lastEvidenceAt ?: updatedAt.takeIf { it > 0L } ?: createdAt
@@ -295,6 +320,19 @@ interface HorizonStructureStore {
      * The coarse `status` follows. A no-op when nothing would change. False for a fact, a container, or a target the user doesn't own.
      */
     suspend fun setState(userEmail: String, cycleSeq: Long, targetUid: String, state: WorkState, nudge: TimeValue? = null, waitingOn: String? = null): Boolean
+
+    /**
+     * The owner approves a proposed goal. [quote] is the owner's own words (the caller has already checked it against what they said) and is kept on the goal.
+     * Approval is the owner's say-so and nothing else sets it. A goal that is already approved is left as it is ([GoalApproval.ALREADY_APPROVED]).
+     */
+    suspend fun approveGoal(userEmail: String, cycleSeq: Long, targetUid: String, quote: String): GoalApproval
+
+    /**
+     * Changes a goal's sentence, `done_when`, `stop_when` or budget; a null argument leaves that field alone. Only while the goal is proposed: once it is approved
+     * it is frozen, and asking for any different value is refused as a whole ([GoalEdit.FROZEN], nothing written), because what a goal means must not move after
+     * the owner approved it. Asking for the values it already has changes nothing.
+     */
+    suspend fun editGoal(userEmail: String, cycleSeq: Long, targetUid: String, doneWhen: String? = null, stopWhen: String? = null, budget: String? = null, text: String? = null): GoalEdit
 
     /**
      * Records that the item was confirmed just now ("yes, still live"): sets `lastEvidenceAt` and nothing else. True for a task, event or
@@ -437,6 +475,8 @@ interface HorizonStructureStore {
 }
 
 private const val MAX_WAITING_ON = 120
+private const val MAX_GOAL_FIELD = 500
+private const val MAX_GOAL_BUDGET = 200
 
 /** One `PROGRESS_OF` edge: [fromUid] is progress on [toUid]. */
 data class ProgressLink(val fromUid: String, val toUid: String, val createdAt: Long, val cycleSeq: Long, val writer: String)
@@ -553,9 +593,17 @@ class ArcadeHorizonStructureStore(
                     if (dueAt != null) { set(property, dueAt); if (extras.dueHasTime) set("dueHasTime", true) }
                 }
                 if (kind == ItemKind.QUESTION) set("askedBy", askedBy)
+                if (kind == ItemKind.GOAL) {
+                    // A goal is always proposed when it is written; only the owner's approval (see approveGoal) makes it approved.
+                    set("approval", "proposed")
+                    extras.doneWhen?.trim()?.takeIf { it.isNotBlank() }?.let { set("doneWhen", it.take(MAX_GOAL_FIELD)) }
+                    extras.stopWhen?.trim()?.takeIf { it.isNotBlank() }?.let { set("stopWhen", it.take(MAX_GOAL_FIELD)) }
+                    extras.budget?.trim()?.takeIf { it.isNotBlank() }?.let { set("budget", it.take(MAX_GOAL_BUDGET)) }
+                }
                 if (ItemKinds.of(kind).carriesState) {
                     // The state is the item's own; `status` is its coarse open/resolved projection (indexed, and what older readers use).
-                    val state = extras.state ?: WorkState.OPEN
+                    // A goal is written open (and proposed): running needs the owner's approval, which setState checks, so it cannot be asked for here.
+                    val state = if (kind == ItemKind.GOAL) WorkState.OPEN else extras.state ?: WorkState.OPEN
                     set("state", state.wire())
                     set("status", state.status)
                     // An item filed from a source starts as fresh as the source says (never in the future); otherwise as of now.
@@ -587,6 +635,13 @@ class ArcadeHorizonStructureStore(
     override suspend fun file(userEmail: String, cycleSeq: Long, childUid: String, parentUid: String): Boolean =
         mutate("file", false) {
             val child = resolveFilable(userEmail, childUid) ?: return@mutate false
+            // Where an approved goal is filed is its scope: it does not move. (Filed where it already is, it is not a change; see below.)
+            if (child.typeName == ItemKind.GOAL.typeName && child.get("approval") == "approved" &&
+                child.getEdges(Vertex.DIRECTION.OUT, "PART_OF").none { it.getVertex(Vertex.DIRECTION.IN)?.get("uid") == parentUid }
+            ) {
+                logger.warn("file: goal {} is approved and frozen; it is not re-filed", childUid)
+                return@mutate false
+            }
             // An item files under a project; a project files under a domain. Nothing else nests.
             val parentKind = if (child.typeName == ContainerKind.PROJECT.typeName) ContainerKind.DOMAIN else ContainerKind.PROJECT
             val parent = findOwnedContainer(userEmail, parentUid, parentKind) ?: run {
@@ -656,7 +711,9 @@ class ArcadeHorizonStructureStore(
             }
             if (!ItemKinds.isStateful(target.typeName)) return@mutate false
             // Resolve is set_state done; reopen is set_state open. The item's own state is the only record of it.
-            applyState(userEmail, target, if (resolved) WorkState.DONE else WorkState.OPEN, null, null)
+            val desired = if (resolved) WorkState.DONE else WorkState.OPEN
+            if (finalGoalRefuses(target, desired)) { logger.warn("resolve: goal {} is done or stopped and final", targetUid); return@mutate false }
+            applyState(userEmail, target, desired, null, null)
             true
         }
 
@@ -664,8 +721,76 @@ class ArcadeHorizonStructureStore(
         mutate("setState", false) {
             val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate false
             if (!ItemKinds.isStateful(target.typeName)) return@mutate false
+            // A goal that is done or stopped is final; it stays as it is.
+            if (finalGoalRefuses(target, state)) { logger.warn("setState: goal {} is done or stopped and final", targetUid); return@mutate false }
+            // A goal runs only once the owner has approved it.
+            if (target.typeName == ItemKind.GOAL.typeName && state == WorkState.ACTIVE && target.get("approval") != "approved") {
+                logger.warn("setState: goal {} is not approved; it cannot be marked running", targetUid)
+                return@mutate false
+            }
             applyState(userEmail, target, state, nudge, waitingOn)
             true
+        }
+
+    /** A goal that is done or stopped is final: no state change but staying as it is (done to done is not a change). Paused goals are not final: they may resume. */
+    private fun finalGoalRefuses(target: Vertex, state: WorkState): Boolean {
+        if (target.typeName != ItemKind.GOAL.typeName) return false
+        val current = WorkState.of(target.get("state") as? String, target.get("status") as? String)
+        return current?.closed == true && current != state
+    }
+
+    override suspend fun approveGoal(userEmail: String, cycleSeq: Long, targetUid: String, quote: String): GoalApproval =
+        mutate("approveGoal", GoalApproval.NOT_FOUND) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate GoalApproval.NOT_FOUND
+            if (target.typeName != ItemKind.GOAL.typeName) return@mutate GoalApproval.NOT_A_GOAL
+            if (quote.isBlank()) return@mutate GoalApproval.MISSING_QUOTE
+            if (target.get("approval") == "approved") return@mutate GoalApproval.ALREADY_APPROVED
+            val now = System.currentTimeMillis()
+            target.modify().apply {
+                set("approval", "approved")
+                set("approvedAt", now)
+                set("approvalQuote", quote.trim().take(MAX_GOAL_FIELD))
+                set("lastEvidenceAt", now)
+                set("updatedAt", now)
+                save()
+            }
+            recordChange(userEmail, target, "approval", "proposed", "approved")
+            GoalApproval.APPROVED
+        }
+
+    override suspend fun editGoal(userEmail: String, cycleSeq: Long, targetUid: String, doneWhen: String?, stopWhen: String?, budget: String?, text: String?): GoalEdit =
+        mutate("editGoal", GoalEdit.NOT_FOUND) {
+            val target = resolveOwnedVertex(userEmail, targetUid) ?: return@mutate GoalEdit.NOT_FOUND
+            if (target.typeName != ItemKind.GOAL.typeName) return@mutate GoalEdit.NOT_A_GOAL
+            val newDone = doneWhen?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_FIELD)
+            val newStop = stopWhen?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_FIELD)
+            val newBudget = budget?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_BUDGET)
+            val newText = text?.trim()?.takeIf { it.isNotBlank() }?.take(MAX_GOAL_FIELD)
+            val oldText = target.get("text") as? String
+            val oldDone = target.get("doneWhen") as? String
+            val oldStop = target.get("stopWhen") as? String
+            val oldBudget = target.get("budget") as? String
+            val changeText = newText != null && newText != oldText
+            val changeDone = newDone != null && newDone != oldDone
+            val changeStop = newStop != null && newStop != oldStop
+            val changeBudget = newBudget != null && newBudget != oldBudget
+            if (!changeText && !changeDone && !changeStop && !changeBudget) return@mutate GoalEdit.UNCHANGED
+            // An approved goal is frozen: any change at all is refused, and the refusal is whole, whatever else is asked in the same call.
+            if (target.get("approval") == "approved") return@mutate GoalEdit.FROZEN
+            val now = System.currentTimeMillis()
+            target.modify().apply {
+                if (changeText) { set("text", newText); set("hash", sha256(newText!!)) }
+                if (changeDone) set("doneWhen", newDone)
+                if (changeStop) set("stopWhen", newStop)
+                if (changeBudget) set("budget", newBudget)
+                set("updatedAt", now)
+                save()
+            }
+            if (changeText) recordChange(userEmail, target, "sentence", oldText, newText)
+            if (changeDone) recordChange(userEmail, target, "doneWhen", oldDone, newDone)
+            if (changeStop) recordChange(userEmail, target, "stopWhen", oldStop, newStop)
+            if (changeBudget) recordChange(userEmail, target, "budget", oldBudget, newBudget)
+            GoalEdit.EDITED
         }
 
     override suspend fun setTiming(userEmail: String, cycleSeq: Long, targetUid: String, dueKind: DueKind?, nudge: TimeValue?): Boolean =
@@ -1239,6 +1364,10 @@ class ArcadeHorizonStructureStore(
             attention = attentionOf(),
             sourceQuote = get("sourceQuote") as? String,
             askedBy = if (kind == ItemKind.QUESTION) get("askedBy") as? String else null,
+            approval = if (kind == ItemKind.GOAL) (get("approval") as? String ?: "proposed") else null,
+            doneWhen = if (kind == ItemKind.GOAL) get("doneWhen") as? String else null,
+            stopWhen = if (kind == ItemKind.GOAL) get("stopWhen") as? String else null,
+            budget = if (kind == ItemKind.GOAL) get("budget") as? String else null,
             // SQL, not getVertices(IN, "ASSERTS"): ASSERTS edges are unidirectional, so incoming traversal is silently empty (see HorizonOwnership).
             channelSourced = db.query("sql", "SELECT count(*) AS n FROM ASSERTS WHERE @in.uid = :u AND @out.type = :t", mapOf("u" to (get("uid") as String), "t" to CHANNEL_SOURCED_SOURCE_TYPE))
                 .use { rs -> rs.hasNext() && (rs.next().getProperty<Number>("n")?.toLong() ?: 0L) > 0 },

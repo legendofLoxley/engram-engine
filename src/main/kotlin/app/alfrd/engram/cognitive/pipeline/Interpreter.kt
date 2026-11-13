@@ -344,6 +344,10 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             "nudge" to str("For a waiting item: the date to check in on it, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
             "waiting_on" to str("For a waiting item: who or what it waits on, in a few words."),
             "happened" to str("When an event or fact took place, if known: ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+            "kind" to enumOf("task", "event", "fact", "question", "goal"),
+            "done_when" to str("For a goal: a check anyone could apply to see it is met. Frozen once the goal is approved."),
+            "stop_when" to str("For a goal: when to give up on it. Frozen once the goal is approved."),
+            "budget" to str("For a goal: how much effort it may take, in the owner's words. Frozen once the goal is approved."),
         )
 
         private fun verbOf(variant: JsonObject): String? =
@@ -358,13 +362,40 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             mapOf("due_kind" to enumOf("hard", "soft"), "nudge" to str("New check-in date for a waiting item, ISO date or date and time.")),
         )
 
+        /** The owner tool's `reopen_item` and `file_item`: the base ones, with what changes for goals said in the item's own description. */
+        private val OWNER_REOPEN_VARIANT: JsonObject = extend(
+            OPERATION_VARIANTS.first { verbOf(it) == "reopen_item" },
+            mapOf("item" to str("Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal and link it to the old one with link_items. A paused goal resumes with set_state.")),
+        )
+        private val OWNER_FILE_VARIANT: JsonObject = extend(
+            OPERATION_VARIANTS.first { verbOf(it) == "file_item" },
+            mapOf("item" to str("Ref of the item or project to move. An approved goal is frozen and is not re-filed; a proposed goal may be.")),
+        )
+
         /** `set_state`: move an item to open, active, waiting, done or dropped. `resolve_item` and `reopen_item` are this with done and open. */
         private val SET_STATE_VARIANT: JsonObject = variant("set_state", listOf("item", "state", "quote")) {
             mapOf(
-                "item" to str("Ref of a task, event or question."),
-                "state" to enumOf(*STATE_VALUES),
+                "item" to str("Ref of a task, event, question or goal. For a goal, running is active, paused is waiting and stopped is dropped. A goal runs only after the owner approves it; a done or stopped goal is final and cannot be reopened (write a new goal and link it to the old one)."),
+                "state" to enumOf(*STATE_VALUES, "running", "paused", "stopped"),
                 "nudge" to str("For waiting: the date to check in, ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
                 "waiting_on" to str("For waiting: who or what it waits on, in a few words. Waiting is accepted without it."),
+                "quote" to QUOTE,
+            )
+        }
+
+        /** `approve_goal`: the owner says a proposed goal may go ahead. The quote must be their words; nothing else makes a goal approved. Approving freezes it. */
+        private val APPROVE_GOAL_VARIANT: JsonObject = variant("approve_goal", listOf("item", "quote")) {
+            mapOf("item" to str("Ref of a proposed goal the owner approves. Approving freezes the goal: its sentence, done-when, stop-when, budget and project can no longer change."), "quote" to QUOTE)
+        }
+
+        /** `edit_goal`: change a proposed goal's sentence, done-when, stop-when or budget. An approved goal is frozen. */
+        private val EDIT_GOAL_VARIANT: JsonObject = variant("edit_goal", listOf("item", "quote")) {
+            mapOf(
+                "item" to str("Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal and link the two with link_items."),
+                "title" to str("The goal's new sentence. At least half of its content words (four letters or more) must come from the quote or the old sentence."),
+                "done_when" to str("New done-when."),
+                "stop_when" to str("New stop-when."),
+                "budget" to str("New budget."),
                 "quote" to QUOTE,
             )
         }
@@ -416,7 +447,8 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
                         when (verbOf(v)) {
                             "record_item" -> add(OWNER_RECORD_VARIANT)
                             "correct_item" -> add(OWNER_CORRECT_VARIANT)
-                            "reopen_item" -> { add(v); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT) }
+                            "reopen_item" -> { add(OWNER_REOPEN_VARIANT); add(SET_STATE_VARIANT); add(CONFIRM_ITEM_VARIANT); add(APPROVE_GOAL_VARIANT); add(EDIT_GOAL_VARIANT) }
+                            "file_item" -> add(OWNER_FILE_VARIANT)
                             else -> add(v)
                         }
                     }

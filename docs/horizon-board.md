@@ -69,6 +69,41 @@ A casual mention fades by the selector's own function (`HorizonPolicy.nudgeStren
 Staleness is the existing rule, called from one place: `StateRules.stale` (open or active, due date passed, no evidence for more than `staleEvidenceDays`,
 default 14). A soft stale item is asked about; a hard one keeps its overdue alarm. The assembler and the board both call it.
 
+## Goals
+
+A goal is an item kind (`goal`) that the owner proposes and approves; the board shows them in their own section, after the one-line summary and before "Needs attention". Zero goals renders nothing.
+
+```
+Goals: 1 running, 1 approved, 1 waiting for approval, 1 stalled.
+  ! i4 "Review the open Williams items": stalled, no evidence since 2026-10-01
+  ? i7 "Propose project tags": waiting for approval
+  - i5 "Check the import dates": approved, not started
+  - i2 "Tidy the import": running
+```
+
+- **Running means active and nothing else.** An approved goal that has not been started reads "approved, not started". Waiting for approval: only proposed. Stalled: approved and paused (waiting), or running with no evidence for the stale window (an approved goal that has not started is never stalled). Order: stalled, waiting for approval, approved, running.
+- The section is bounded on its own: the counts line, then at most `boardGoalLines` (4) goal lines, and the whole section within `boardGoalTokens` (150) tokens however many goals there are. What is left out is counted ("N more goals").
+- Goals are not counted among the open items.
+- A goal's state words: running is active, paused is waiting, done is done, stopped is dropped (`set_state` accepts both).
+
+### The rules for a goal
+
+The owner's decision: **an approved goal is frozen.** What a goal means is changed by stopping it and writing a new goal, linked to the old one with `link_items`, never by editing it.
+
+| | Proposed | Approved |
+|---|---|---|
+| Sentence, `done_when`, `stop_when`, budget (`edit_goal`) | may change, from the owner's words (a new sentence must use their words or the old one's) | refused |
+| Re-file under another project (`file_item`) | allowed | refused (the project is its scope) |
+| `correct_item` | refused (use `edit_goal`) | refused |
+| Start, pause, resume, stop, done (`set_state`) | start is refused until approved; the rest allowed | allowed |
+| Evidence, `confirm_item`, pin or suppress | allowed | allowed |
+
+- **Approval** needs the owner's own words as a grounded quote (a question, a negation or an ungrounded quote is refused). Approving freezes the goal and keeps the quote.
+- **Done and stopped goals are final.** `reopen_item` on one is refused, and so is any other state change to a done or stopped goal. A paused goal may resume.
+- Every refusal carries the same words: *a goal is frozen once it is approved and final once it is done or stopped. To change what it means, stop it, propose a new goal, and link it to the old one with link_items.*
+- A goal cannot be recorded from a document, and the legacy correction path (`amendPhrase`) leaves a goal's text alone.
+- Changes to `approval`, the sentence (`sentence`), `done_when` (`doneWhen`), `stop_when` (`stopWhen`) and the budget leave change records; "since last time" shows them as *approval*, *sentence*, *done-when*, *stop-when* and *budget*.
+
 ## Settings
 
 | Setting | Default | Environment override |

@@ -58,6 +58,11 @@ object ItemKinds {
             kind, kind.typeName, "Question", null, false,
             setOf(KindList.OPEN_UNFILED_SCAN, KindList.STATE_SCAN, KindList.STATUS_ON_ITEM, KindList.OPEN_ONLY_LISTING, KindList.CARRIES_STATE),
         )
+        // A goal is a task-shaped item (state, due date, evidence, staleness) with its own board section; it can be filed, focused and changed with the existing verbs.
+        ItemKind.GOAL -> ItemKindSpec(
+            kind, kind.typeName, "Goal", "dueAt", false,
+            setOf(KindList.URGENCY_SCAN, KindList.OPEN_UNFILED_SCAN, KindList.STATE_SCAN, KindList.ALSO_DUE_SCAN, KindList.STATUS_ON_ITEM, KindList.OPEN_ONLY_LISTING, KindList.CARRIES_STATE),
+        )
     }
 
     /** Every kind, in declaration order (the order the old hardcoded lists used). */
