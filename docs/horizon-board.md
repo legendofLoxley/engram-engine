@@ -88,7 +88,7 @@ Goals: 1 running, 1 approved, 1 waiting for approval, 1 stalled.
 
 ### The rules for a goal
 
-The owner's decision: **an approved goal is frozen.** What a goal means is changed by stopping it and writing a new goal, linked to the old one with `link_items`, never by editing it.
+The owner's decision: **an approved goal is frozen.** What a goal means is changed by stopping it and writing a new goal with `replaces` set to the old one (which writes the link in the same step; `link_items` still works), never by editing it.
 
 | | Proposed | Approved |
 |---|---|---|
@@ -100,7 +100,7 @@ The owner's decision: **an approved goal is frozen.** What a goal means is chang
 
 - **Approval** needs the owner's own words as a grounded quote (a question, a negation or an ungrounded quote is refused). Approving freezes the goal and keeps the quote.
 - **Done and stopped goals are final.** `reopen_item` on one is refused, and so is any other state change to a done or stopped goal. A paused goal may resume.
-- Every refusal carries the same words: *a goal is frozen once it is approved and final once it is done or stopped. To change what it means, stop it, propose a new goal, and link it to the old one with link_items.*
+- Every refusal carries the same words: *a goal is frozen once it is approved and final once it is done or stopped. To change what it means, stop it, then propose a new goal with record_item and replaces set to the old goal, which writes the link to it in the same step.*
 - A goal cannot be recorded from a document, and the legacy correction path (`amendPhrase`) leaves a goal's text alone.
 - Changes to `approval`, the sentence (`sentence`), `done_when` (`doneWhen`), `stop_when` (`stopWhen`) and the budget leave change records; "since last time" shows them as *approval*, *sentence*, *done-when*, *stop-when* and *budget*.
 

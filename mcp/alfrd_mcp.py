@@ -58,7 +58,7 @@ and the quote becomes the item's label, so write a title from the quote's own wo
 Goals are what the owner wants worked on: record_item with kind goal (a one-sentence `title`, optional `done_when`, `stop_when` and `budget`, and the project it
 serves) writes a proposal from the owner's words. Only the owner's own words approve it (`approve_goal`, with a quote; a question or a "no" is refused), and
 approving freezes it: its sentence, done_when, stop_when, budget and project cannot change again. A proposed goal can still be re-worded and re-filed with
-`edit_goal` and `file_item`. To change what an approved goal means, stop it (`set_state` stopped), write a new goal, and link the two with `link_items`; every
+`edit_goal` and `file_item`. To change what an approved goal means, stop it (`set_state` stopped), write a new goal with `record_item` and `replaces` set to the old one (it writes the link to it in the same step); every
 refusal says so. A goal runs (`set_state` running) only after approval, can be paused and resumed, and once done or stopped it is final and cannot be reopened.
 The board's Goals line reads running (active only), approved (not started), waiting for approval and stalled.
 

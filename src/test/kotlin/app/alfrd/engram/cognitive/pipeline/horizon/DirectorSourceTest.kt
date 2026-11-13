@@ -446,7 +446,7 @@ class DirectorSourceTest {
         assertTrue(ownerSend(replaceOp(stored(old.uid))).single().applied)
         val second = ownerSend(replaceOp(stored(old.uid), "A second replacement of the same goal")).single()
         assertFalse(second.applied, "a goal already replaced is not replaced again")
-        assertEquals(before + 1, count("Goal"))
+        assertEquals(before + 2, count("Goal"), "the goal made to be replaced, and its one replacement; the second attempt wrote nothing")
     }
 
     @Test

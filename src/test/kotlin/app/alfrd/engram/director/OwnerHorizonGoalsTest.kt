@@ -139,7 +139,7 @@ class OwnerHorizonGoalsTest {
 
         // The bar does not move, however it is asked.
         val easier = c.send("Make it easier: done when half are reviewed.", """[{"verb":"edit_goal","item":"$ref","done_when":"half are reviewed","quote":"Make it easier"}]""")
-        assertFalse(easier.applied(0)); assertTrue("frozen" in easier.reasonOf(0) && "link_items" in easier.reasonOf(0), easier.toString())
+        assertFalse(easier.applied(0)); assertTrue("frozen" in easier.reasonOf(0) && "replaces" in easier.reasonOf(0), easier.toString())
         val corrected = c.send("Change the goal to something easier.", """[{"verb":"correct_item","item":"$ref","title":"Something easier","quote":"Change the goal to something easier"}]""")
         assertEquals("goal_uses_edit_goal", corrected.reasonOf(0))
         assertEquals("every open item has a proposal", goalRow("Review the Williams items").get("doneWhen"))
@@ -188,7 +188,7 @@ class OwnerHorizonGoalsTest {
         for ((label, fields) in listOf("sentence" to """"title":"Review every Williams item now"""", "stop_when" to """"stop_when":"never"""", "budget" to """"budget":"50 cycles"""")) {
             val frozen = c.send("Change the $label: every Williams item now.", """[{"verb":"edit_goal","item":"$ref",$fields,"quote":"every Williams item now"}]""")
             assertFalse(frozen.applied(0), label)
-            assertTrue("frozen" in frozen.reasonOf(0) && "stop it, propose a new goal, and link it to the old one with link_items" in frozen.reasonOf(0), frozen.reasonOf(0))
+            assertTrue("frozen" in frozen.reasonOf(0) && "stop it, then propose a new goal with record_item and replaces set to the old goal, which writes the link to it in the same step" in frozen.reasonOf(0), frozen.reasonOf(0))
         }
         assertEquals("Review every Williams item", goalRow("Review every Williams item").get("text"))
 
@@ -200,7 +200,7 @@ class OwnerHorizonGoalsTest {
         // A just-stopped goal can still be named (so that an item can be reopened), and reopening a goal is refused with the same rule.
         val reopen = c.send("Bring it back.", """[{"verb":"reopen_item","item":"$ref","quote":"Bring it back"}]""")
         assertFalse(reopen.applied(0), reopen.toString())
-        assertTrue("link_items" in reopen.reasonOf(0) && "propose a new goal" in reopen.reasonOf(0), reopen.reasonOf(0))
+        assertTrue("replaces" in reopen.reasonOf(0) && "propose a new goal" in reopen.reasonOf(0), reopen.reasonOf(0))
         assertEquals("dropped", goalRow("Review every Williams item").get("state"))
     }
 }

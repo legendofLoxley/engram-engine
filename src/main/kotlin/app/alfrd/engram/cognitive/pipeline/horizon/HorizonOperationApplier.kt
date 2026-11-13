@@ -435,7 +435,9 @@ class HorizonOperationApplier(
             val chunk = store.chunk(userEmail, chunkUid) ?: return null
             store.versionsOf(userEmail, chunk.sourceUid)
         }
-        return structure.listRecentItems(userEmail, DUPLICATE_SCAN).firstOrNull { existing ->
+        // The Director's items are asserted from its own source, which the owner's recent-items listing does not reach: its candidates are what it wrote for this goal.
+        val candidates = if (directorGoalUid != null) structure.directorItems(userEmail, directorGoalUid, newest = DUPLICATE_SCAN).asReversed() else structure.listRecentItems(userEmail, DUPLICATE_SCAN)
+        return candidates.firstOrNull { existing ->
             existing.kind == op.kind && existing.status == "open" &&
                 // The owner saying the same thing as a document's item is their adoption, not a duplicate of it: it is recorded as theirs.
                 (op.chunkUid != null || !existing.channelSourced) &&

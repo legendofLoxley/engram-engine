@@ -366,7 +366,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         /** The owner tool's `reopen_item` and `file_item`: the base ones, with what changes for goals said in the item's own description. */
         private val OWNER_REOPEN_VARIANT: JsonObject = extend(
             OPERATION_VARIANTS.first { verbOf(it) == "reopen_item" },
-            mapOf("item" to str("Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal and link it to the old one with link_items. A paused goal resumes with set_state.")),
+            mapOf("item" to str("Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal with record_item and replaces set to the old one (the link is written with it). A paused goal resumes with set_state.")),
         )
         private val OWNER_FILE_VARIANT: JsonObject = extend(
             OPERATION_VARIANTS.first { verbOf(it) == "file_item" },
@@ -392,7 +392,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
         /** `edit_goal`: change a proposed goal's sentence, done-when, stop-when or budget. An approved goal is frozen. */
         private val EDIT_GOAL_VARIANT: JsonObject = variant("edit_goal", listOf("item", "quote")) {
             mapOf(
-                "item" to str("Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal and link the two with link_items."),
+                "item" to str("Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal with record_item and replaces set to the old one, which writes the link to it in the same step."),
                 "title" to str("The goal's new sentence. At least half of its content words (four letters or more) must come from the quote or the old sentence."),
                 "done_when" to str("New done-when."),
                 "stop_when" to str("New stop-when."),

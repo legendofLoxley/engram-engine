@@ -135,7 +135,7 @@ enum class GoalApproval { APPROVED, ALREADY_APPROVED, NOT_A_GOAL, NOT_FOUND, MIS
 enum class GoalEdit { EDITED, UNCHANGED, FROZEN, NOT_A_GOAL, NOT_FOUND }
 
 /** What every refusal of a change to a frozen (approved) or final (done or stopped) goal says, so the channel always reads the same rule. */
-const val GOAL_FROZEN_RULE = "a goal is frozen once it is approved and final once it is done or stopped. To change what it means, stop it, propose a new goal, and link it to the old one with link_items"
+const val GOAL_FROZEN_RULE = "a goal is frozen once it is approved and final once it is done or stopped. To change what it means, stop it, then propose a new goal with record_item and replaces set to the old goal, which writes the link to it in the same step"
 
 /** Zoom levels a focus can carry: broad, one container, one item's neighborhood. */
 enum class FocusZoom {
@@ -439,10 +439,10 @@ interface HorizonStructureStore {
 
     /** Records the wall-clock time of the user's latest turn, only ever moving it forward. False for an unknown user. */
     /**
-     * What the Director wrote for [goalUid], in [cycle] when given (else in every cycle), oldest first. Read only. Items only: the messages it sent are
+     * What the Director wrote for [goalUid], in [cycle] when given (else in every cycle), oldest first; only the [newest] of them when that is given. Read only. Items only: the messages it sent are
      * kept apart (see [DirectorMessageStore]).
      */
-    suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int? = null): List<ItemRecord> = emptyList()
+    suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int? = null, newest: Int? = null): List<ItemRecord> = emptyList()
 
     /**
      * Retracts everything the Director wrote for [goalUid] in [cycle]: each item is set to dropped, with a change record (cause `retract_cycle`), and nothing is
@@ -1095,8 +1095,10 @@ class ArcadeHorizonStructureStore(
             out.sortedBy { it.createdAt }
         }
 
-    override suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int?): List<ItemRecord> = read("directorItems", emptyList()) {
-        val sql = "SELECT FROM Phrase WHERE ownerEmail = :e AND directorGoalUid = :g" + if (cycle != null) " AND directorCycle = :c" else ""
+    override suspend fun directorItems(userEmail: String, goalUid: String, cycle: Int?, newest: Int?): List<ItemRecord> = read("directorItems", emptyList()) {
+        if (newest != null && newest <= 0) return@read emptyList()
+        val sql = "SELECT FROM Phrase WHERE ownerEmail = :e AND directorGoalUid = :g" + (if (cycle != null) " AND directorCycle = :c" else "") +
+            (if (newest != null) " ORDER BY createdAt DESC LIMIT $newest" else "")
         val params = mutableMapOf<String, Any>("e" to userEmail, "g" to goalUid).apply { if (cycle != null) put("c", cycle) }
         db.query("sql", sql, params).use { rs ->
             val out = mutableListOf<ItemRecord>()

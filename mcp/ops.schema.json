@@ -142,7 +142,7 @@
                         },
                         "item": {
                             "type": "string",
-                            "description": "Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal and link it to the old one with link_items. A paused goal resumes with set_state."
+                            "description": "Ref of the item. A goal that is done or stopped is final and cannot be reopened: write a new goal with record_item and replaces set to the old one (the link is written with it). A paused goal resumes with set_state."
                         },
                         "quote": {
                             "type": "string",
@@ -264,7 +264,7 @@
                         },
                         "item": {
                             "type": "string",
-                            "description": "Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal and link the two with link_items."
+                            "description": "Ref of a goal that is still proposed. An approved goal is frozen and refuses every change; to change what it means, stop it (set_state stopped), write a new goal with record_item and replaces set to the old one, which writes the link to it in the same step."
                         },
                         "title": {
                             "type": "string",

@@ -267,7 +267,8 @@ class BoardComposer(private val policy: HorizonPolicy = HorizonPolicy(), private
 
         /** The listing of what is on the line: flagged items first (hard overdue, due soon, waiting past check-in), then pinned ones; stale soft ones are asked together. */
         fun itemsToList(s: Stats): List<Flags> {
-            val order = compareBy<Flags>({ if (it.hardOverdue) 0 else if (it.softOverdue) 1 else if (it.dueSoon) 2 else if (it.waitingDue) 3 else 4 }, { it.item.dueAt ?: Long.MAX_VALUE })
+            // The owner's own items are named first: what the Director wrote can fill only the lines the owner's leave, however many it wrote or however overdue.
+            val order = compareBy<Flags>({ if (it.item.byDirector) 1 else 0 }, { if (it.hardOverdue) 0 else if (it.softOverdue) 1 else if (it.dueSoon) 2 else if (it.waitingDue) 3 else 4 }, { it.item.dueAt ?: Long.MAX_VALUE })
             val listed = (s.flags.filter { it.flagged }.sortedWith(order) + s.pinnedItems.filterNot { it.flagged }).distinctBy { it.item.uid }
             return listed.take(policy.boardItemsPerNode)
         }
