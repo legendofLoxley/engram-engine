@@ -240,6 +240,17 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             put("additionalProperties", false)
         }
 
+        private fun emailParty(description: String) = buildJsonObject {
+            put("type", "object")
+            put("description", description)
+            putJsonObject("properties") {
+                put("address", str("The email address."))
+                put("name", str("The display name the header gave, if any."))
+            }
+            putJsonArray("required") { add("address") }
+            put("additionalProperties", false)
+        }
+
         private fun enumOf(vararg values: String) = buildJsonObject { put("type", "string"); putJsonArray("enum") { values.forEach { add(it) } } }
         private val BOOLEAN = buildJsonObject { put("type", "boolean") }
 
@@ -481,11 +492,21 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             putJsonObject("items") {
                 put("type", "object")
                 putJsonObject("properties") {
-                    put("id", str("Stable external id (the Notion page id). The same id again is the same document."))
-                    put("title", str("The document's title."))
-                    put("kind", enumOf("notion_page"))
+                    put("id", str("Stable external id: the Notion page id, or for an email its Message-ID exactly as the header gives it. The same id again is the same document (an email is stored once per Message-ID)."))
+                    put("title", str("The document's title (for an email, its subject)."))
+                    put("kind", enumOf("notion_page", "email_message"))
                     put("url", str("Where the document lives."))
-                    put("text", str("The full text. Send this or `chunks`, not both."))
+                    put("text", str("The full text. Send this or `chunks`, not both. An email is sent as `text` (its body; quoted history is dropped when it is cut) and never as `chunks`."))
+                    put("subject", str("Email only: the subject."))
+                    put("sent_at", str("Email only: when it was sent (ISO date or time)."))
+                    put("from", emailParty("Email only: the sender."))
+                    for (field in listOf("to", "cc", "bcc")) putJsonObject(field) {
+                        put("type", "array")
+                        put("items", emailParty("One recipient."))
+                        put("description", "Email only: the $field recipients (at most 500 across to, cc and bcc together).")
+                    }
+                    put("gmail_message_id", str("Email only: Gmail's id for the message, if known."))
+                    put("gmail_thread_id", str("Email only: Gmail's thread id, if known."))
                     putJsonObject("chunks") {
                         put("type", "array")
                         putJsonObject("items") {

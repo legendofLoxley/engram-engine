@@ -18,6 +18,7 @@ import app.alfrd.engram.cognitive.pipeline.horizon.CLAUDE_SESSION_SOURCE_TYPE
 import app.alfrd.engram.cognitive.pipeline.horizon.ItemWords
 import app.alfrd.engram.cognitive.pipeline.horizon.RecordItem
 import app.alfrd.engram.db.ChunkDraft
+import app.alfrd.engram.db.EmailGraph
 import app.alfrd.engram.db.SourceChunker
 import app.alfrd.engram.db.SourceEditTime
 import app.alfrd.engram.db.SourceInput
@@ -60,7 +61,13 @@ data class OwnerOperationReport(
 
 /** What happened to one entry of the `sources` array. [stored] false means nothing was written for it. */
 @Serializable
-data class OwnerSourceReport(val id: String, val title: String, val stored: Boolean, val detail: String, val chunks: Int = 0)
+data class OwnerSourceReport(
+    val id: String, val title: String, val stored: Boolean, val detail: String, val chunks: Int = 0,
+    /** Email only: `new`, `repeat` (this Message-ID was already stored with this text) or `repeat_text_differed` (stored with other text: the first text is kept). */
+    val outcome: String? = null,
+    /** Email only, and only when true: the Message-ID was already stored with a different body. Nothing of the offered body was kept. */
+    val sourceTextDiffered: Boolean = false,
+)
 
 /**
  * [horizon] is the standing prompt exactly as the Director tick renders it, after any writes. [refs] is what the operation verbs may name
@@ -226,7 +233,8 @@ class OwnerHorizonService(
                 obj == null -> refused("malformed_source")
                 index >= MAX_SOURCES -> refused("too_many_sources")
                 rawId.isEmpty() -> refused("missing_id")
-                title.isEmpty() -> refused("missing_title")
+                title.isEmpty() && !(obj.str("kind") == KIND_EMAIL_MESSAGE && !obj.str("subject").isNullOrBlank()) -> refused("missing_title")
+                obj.str("kind") == KIND_EMAIL_MESSAGE -> if (!seen.add("$KIND_EMAIL_MESSAGE|${rawId.trim()}")) refused("duplicate_source_id") else storeEmail(obj, rawId, title)
                 obj.str("kind") != KIND_NOTION_PAGE -> refused("unsupported_source_kind")
                 !seen.add(locatorOf(rawId)) -> refused("duplicate_source_id")
                 else -> try {
@@ -270,6 +278,71 @@ class OwnerHorizonService(
     }
 
     /**
+     * One entry of kind `email_message`: the Message-ID (`id`), the body (`text`) and what the message says about itself (`subject`, `sent_at`, `from`, `to`,
+     * `cc`, `bcc`, `gmail_message_id`, `gmail_thread_id`) go to [SourceStore.ingest] as an email, which makes the Email, its address nodes and its SENT_BY and SENT_TO
+     * edges. Identity is the engine's: one Email per owner and Message-ID, the first text kept. Unlike a page there is no version to supersede, so nothing is
+     * marked current and no item is re-confirmed; a repeat with another body is reported (`repeat_text_differed`) and writes nothing. The body is sent as `text`
+     * (the engine strips quoted history when it chunks a message); cut `chunks` are not accepted.
+     */
+    private fun storeEmail(obj: JsonObject, rawId: String, rawTitle: String): OwnerSourceReport {
+        val locator = rawId.trim()
+        val subject = obj.str("subject")?.trim()?.takeIf { it.isNotEmpty() }
+        val title = rawTitle.ifEmpty { subject.orEmpty() }
+        fun refused(reason: String) = OwnerSourceReport(locator.ifEmpty { "?" }, title, false, "refused: $reason")
+        return try {
+            if (obj.containsKey("chunks")) return refused("send_text_for_email")
+            val body = obj.str("text")
+            if (body.isNullOrBlank()) return refused("empty_text")
+            val sentRaw = obj.str("sent_at")?.trim()?.takeIf { it.isNotEmpty() }
+            val sentAt = SourceEditTime.parse(sentRaw)
+            if (sentRaw != null && sentAt == null) return refused("invalid_sent_at")
+            val from = obj["from"]?.let { party(it) ?: return refused("invalid_sender") }
+            val to = parties(obj, "to") ?: return refused("invalid_recipients")
+            val cc = parties(obj, "cc") ?: return refused("invalid_recipients")
+            val bcc = parties(obj, "bcc") ?: return refused("invalid_recipients")
+            val facts = EmailGraph.Facts(
+                subject = subject, sentAt = sentAt,
+                gmailMessageId = obj.str("gmail_message_id")?.trim()?.takeIf { it.isNotEmpty() },
+                gmailThreadId = obj.str("gmail_thread_id")?.trim()?.takeIf { it.isNotEmpty() },
+                from = from, to = to, cc = cc, bcc = bcc,
+            )
+            if (facts.recipients().size > EmailGraph.MAX_RECIPIENTS) return refused("too_many_recipients")
+            val result = sourceStore.ingest(
+                email,
+                SourceInput(
+                    type = SOURCE_TYPE_EMAIL, locator = locator, title = title, text = body, threadId = facts.gmailThreadId,
+                    suppliedBy = CHANNEL, url = obj.str("url")?.trim()?.takeIf { it.isNotEmpty() }, email = facts,
+                ),
+            )
+            val (outcome, detail) = when {
+                result.created -> "new" to "stored: new email"
+                result.contentChanged -> "repeat_text_differed" to "this Message-ID is already stored with different text; the first text is kept as the evidence and the body sent now was not stored. Nothing was added"
+                else -> "repeat" to "unchanged: this email is already stored, nothing was added"
+            }
+            OwnerSourceReport(locator, title, true, detail, result.source.chunkCount, outcome, sourceTextDiffered = result.contentChanged)
+        } catch (e: IllegalArgumentException) {
+            refused("invalid_source")
+        } catch (e: Exception) {
+            logger.warn("owner-horizon: storing an email failed: {}", e::class.java.simpleName)
+            refused("could_not_store")
+        }
+    }
+
+    /** A sender or recipient: `{"address": ..., "name": ...}` or a bare address string. Null when it is neither. */
+    private fun party(e: JsonElement): EmailGraph.Party? = when (e) {
+        is JsonPrimitive -> e.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }?.let { EmailGraph.Party(it) }
+        is JsonObject -> e.str("address")?.trim()?.takeIf { it.isNotEmpty() }?.let { EmailGraph.Party(it, e.str("name")) }
+        else -> null
+    }
+
+    /** The recipients under [key]: empty when absent, null when the field or any entry is malformed. */
+    private fun parties(obj: JsonObject, key: String): List<EmailGraph.Party>? {
+        val raw = obj[key] ?: return emptyList()
+        val list = raw as? JsonArray ?: return null
+        return list.map { party(it) ?: return null }
+    }
+
+    /**
      * A document sent again, unchanged or not, confirms what was filed from it: every item that quotes any stored version of this page, and whose
      * quoted passage is still in the text just sent, has its evidence refreshed. An item whose passage is gone is left as it was.
      */
@@ -300,7 +373,8 @@ class OwnerHorizonService(
         if (id.isEmpty()) return no("missing_source")
         if (quote.isBlank()) return no("missing_quote")
         val (source, chunks) = withContext(Dispatchers.IO) {
-            val found = sourceStore.currentByLocator(email, SOURCE_TYPE_NOTION, locatorOf(id))
+            // A Notion page by its id; failing that, an email by its Message-ID (a Message-ID is never a page id, and the owner's graph is all this reads).
+            val found = sourceStore.currentByLocator(email, SOURCE_TYPE_NOTION, locatorOf(id)) ?: sourceStore.currentByLocator(email, SOURCE_TYPE_EMAIL, id)
             found to found?.let { sourceStore.chunks(email, it.uid) }.orEmpty()
         }
         if (source == null) return no("unknown_source")
@@ -395,7 +469,9 @@ class OwnerHorizonService(
         const val CHANNEL = "claude"
         const val LEDGER_SESSION = "claude-owner"
         const val KIND_NOTION_PAGE = "notion_page"
+        const val KIND_EMAIL_MESSAGE = "email_message"
         private const val SOURCE_TYPE_NOTION = "notion_page"
+        private const val SOURCE_TYPE_EMAIL = "email_message"
         private const val MAX_SOURCES = 5
         private const val MAX_CHUNKS = 200
     }

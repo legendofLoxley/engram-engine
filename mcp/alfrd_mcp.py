@@ -55,6 +55,14 @@ source has touched (confirmed or changed items are never lowered). Without `last
 `title` (task or event only) is kept only if at least half of its content words (four letters or more) come from the quote; otherwise it is dropped
 and the quote becomes the item's label, so write a title from the quote's own words.
 
+An email is a source too: `kind` email_message, `id` its Message-ID exactly as the header gives it, `title` and `subject` its subject, `text` its body, `sent_at`,
+`from` ({address, name}), and `to`, `cc`, `bcc` lists of the same, plus `gmail_message_id` and `gmail_thread_id` if known. Send the body as `text`, never as
+`chunks` (quoted history is dropped when it is cut), and at most 500 recipients in all. The engine stores it as an Email with an address node for each address
+and sent-by and sent-to edges, and nothing more: it does not say whose an address is. A record_item then cites it by the Message-ID as `source`, with a `quote`
+from the body. Each email's result says `new`, `repeat` (already stored; nothing added) or `repeat_text_differed` (the Message-ID is stored with other text:
+the first text is kept as the evidence, the body sent now is not stored and `sourceTextDiffered` is true). An email is not versioned, so there is nothing to
+supersede.
+
 Goals are what the owner wants worked on: record_item with kind goal (a one-sentence `title`, optional `done_when`, `stop_when` and `budget`, and the project it
 serves) writes a proposal from the owner's words. Only the owner's own words approve it (`approve_goal`, with a quote; a question or a "no" is refused), and
 approving freezes it: its sentence, done_when, stop_when, budget and project cannot change again. A proposed goal can still be re-worded and re-filed with
