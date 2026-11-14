@@ -59,6 +59,15 @@ object EmailGraph {
     /** A display name as the edge keeps it: control characters and runs of whitespace become one space, cut to 200 characters; null when nothing is left. */
     fun cleanName(raw: String?): String? = raw?.map { if (it.isISOControl() || it.isWhitespace()) ' ' else it }?.joinToString("")?.replace(Regex(" +"), " ")?.trim()?.take(200)?.takeIf { it.isNotEmpty() }
 
+    /**
+     * A Message-ID as it is stored and looked up: trimmed, with one surrounding pair of angle brackets taken off. A header prints `<abc@x>`; a client that has
+     * already unwrapped it sends `abc@x`; both are the same message. Only an outer pair goes (`<<a@x>>` keeps its inner pair), and the case is the sender's.
+     */
+    fun messageId(raw: String?): String {
+        val t = raw?.trim().orEmpty()
+        return if (t.length >= 2 && t.startsWith('<') && t.endsWith('>')) t.substring(1, t.length - 1).trim() else t
+    }
+
     /** What follows the @ of a normalized address. */
     fun domainOf(address: String): String = address.substringAfter('@')
 }

@@ -147,7 +147,9 @@ class SourceStore(private val db: Database) {
 
     private val logger = LoggerFactory.getLogger(SourceStore::class.java)
 
-    fun ingest(userEmail: String, input: SourceInput): IngestResult {
+    fun ingest(userEmail: String, offered: SourceInput): IngestResult {
+        // One message is one Email whichever way its Message-ID was written (with or without the brackets a header prints), for every caller: the horizon tool, the debug route.
+        val input = if (offered.type == EMAIL) offered.copy(locator = EmailGraph.messageId(offered.locator)) else offered
         require(input.type in TYPES) { "unknown source type" }
         require(input.readMode in READ_MODES) { "readMode must be one of: ${READ_MODES.joinToString(", ")}" }
         require(input.locator.isNotBlank() && input.text.isNotBlank()) { "a source needs a locator and text" }

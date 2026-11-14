@@ -145,7 +145,7 @@ class OwnerHorizonEmailTest {
         assertEquals(items + 2, sourcedItems())
 
         val store = SourceStore(manager.getDatabase())
-        val e1 = store.currentByLocator(email, "email_message", a1)!!
+        val e1 = store.currentByLocator(email, "email_message", EmailGraph.messageId(a1))!!
         val v1 = store.emailView(email, e1.uid)!!
         assertEquals("ana@y.org", v1.from); assertEquals(listOf("lee@y.org", "sam@y.org"), v1.to.sorted()); assertEquals(listOf("kim@y.org"), v1.cc)
         assertEquals("Offsite venue", v1.subject)
@@ -153,7 +153,7 @@ class OwnerHorizonEmailTest {
         assertEquals("t-1", e1.threadId)
         val quotes = manager.getDatabase().query("sql", "SELECT draftQuote AS q FROM QUOTES WHERE @in.sourceUid = :u", mapOf("u" to e1.uid)).use { rs -> rs.asSequence().map { it.getProperty<String>("q") }.toList() }
         assertEquals(listOf("The venue costs 3,000 euros for the offsite"), quotes)
-        val e2 = store.currentByLocator(email, "email_message", a2)!!
+        val e2 = store.currentByLocator(email, "email_message", EmailGraph.messageId(a2))!!
         assertEquals("sam@y.org", store.emailView(email, e2.uid)!!.from)
     }
 
@@ -188,7 +188,7 @@ class OwnerHorizonEmailTest {
         assertFalse(j.applied(0)); assertEquals("quote_not_in_source", j.detail(0))
         assertEquals(counts, listOf("Source", "Email", "EmailAddress", "Chunk", "SENT_BY", "SENT_TO", "QUOTES").map { n(it) })
         val store = SourceStore(manager.getDatabase())
-        val texts = store.chunks(email, store.currentByLocator(email, "email_message", m1)!!.uid).joinToString("\n") { it.text }
+        val texts = store.chunks(email, store.currentByLocator(email, "email_message", EmailGraph.messageId(m1))!!.uid).joinToString("\n") { it.text }
         assertTrue(texts.contains("book the venue by Friday") && !texts.contains("deposit"), texts)
     }
 

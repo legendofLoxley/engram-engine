@@ -103,7 +103,7 @@ class EmailGraphTest {
         val item = report.items.single()
         val provenance = store.provenanceOf(ana, item.uid!!)
         assertEquals(1, provenance.size)
-        assertEquals(report.sourceUid, provenance[0].sourceUid); assertEquals("email_message", provenance[0].sourceType); assertEquals("<m1@mail.example.org>", provenance[0].sourceLocator)
+        assertEquals(report.sourceUid, provenance[0].sourceUid); assertEquals("email_message", provenance[0].sourceType); assertEquals("m1@mail.example.org", provenance[0].sourceLocator, "stored without the header's angle brackets")
         assertEquals(chunks[0].uid, provenance[0].chunkUid)
     }
 
@@ -195,8 +195,8 @@ class EmailGraphTest {
                 set("uid", UUID.randomUUID().toString()); set("ownerEmail", owner); set("type", "email_message"); set("locator", locator); set("contentHash", "h"); save()
             }
         }
-        assertTrue(rejected { second(ana, mail.locator) }, "the index, not only the code, stops it")
-        assertFalse(rejected { second(ben, mail.locator) }, "another owner is not a clash")
+        assertTrue(rejected { second(ana, EmailGraph.messageId(mail.locator)) }, "the index, not only the code, stops it")
+        assertFalse(rejected { second(ben, EmailGraph.messageId(mail.locator)) }, "another owner is not a clash")
         assertFalse(rejected { second(ana, "<other@x>") }, "another locator is not a clash")
     }
 
@@ -214,7 +214,7 @@ class EmailGraphTest {
     fun `a message stored as a plain Source before the subtype existed is found by its hash and no Email is made beside it`() {
         db.transaction {
             db.newVertex("Source").apply {
-                set("uid", UUID.randomUUID().toString()); set("ownerEmail", ana); set("type", "email_message"); set("locator", mail.locator); set("name", "old")
+                set("uid", UUID.randomUUID().toString()); set("ownerEmail", ana); set("type", "email_message"); set("locator", EmailGraph.messageId(mail.locator)); set("name", "old")
                 set("contentHash", SourceChunker.contentHash(mail.text)); set("readAt", 1L); set("readMode", "full"); save()
             }
         }

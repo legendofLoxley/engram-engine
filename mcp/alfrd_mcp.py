@@ -55,7 +55,7 @@ source has touched (confirmed or changed items are never lowered). Without `last
 `title` (task or event only) is kept only if at least half of its content words (four letters or more) come from the quote; otherwise it is dropped
 and the quote becomes the item's label, so write a title from the quote's own words.
 
-An email is a source too: `kind` email_message, `id` its Message-ID exactly as the header gives it, `title` and `subject` its subject, `text` its body, `sent_at`,
+An email is a source too: `kind` email_message, `id` its Message-ID (with or without the angle brackets; the same message either way), `title` and `subject` its subject, `text` its body, `sent_at`,
 `from` ({address, name}), and `to`, `cc`, `bcc` lists of the same, plus `gmail_message_id` and `gmail_thread_id` if known. Send the body as `text`, never as
 `chunks` (quoted history is dropped when it is cut), and at most 500 recipients in all. The engine stores it as an Email with an address node for each address
 and sent-by and sent-to edges, and nothing more: it does not say whose an address is. A record_item then cites it by the Message-ID as `source`, with a `quote`

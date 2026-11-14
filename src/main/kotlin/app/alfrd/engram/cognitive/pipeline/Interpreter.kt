@@ -492,7 +492,7 @@ Examples (each shows a message and the ops to return; refs here belong to an ima
             putJsonObject("items") {
                 put("type", "object")
                 putJsonObject("properties") {
-                    put("id", str("Stable external id: the Notion page id, or for an email its Message-ID exactly as the header gives it. The same id again is the same document (an email is stored once per Message-ID)."))
+                    put("id", str("Stable external id: the Notion page id, or for an email its Message-ID (with or without the angle brackets a header prints: the same message either way). The same id again is the same document (an email is stored once per Message-ID)."))
                     put("title", str("The document's title (for an email, its subject)."))
                     put("kind", enumOf("notion_page", "email_message"))
                     put("url", str("Where the document lives."))

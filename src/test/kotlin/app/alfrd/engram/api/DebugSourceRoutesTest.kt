@@ -143,6 +143,22 @@ class DebugSourceRoutesTest {
     }
 
     @Test
+    fun `the debug route stores one Email per Message-ID whether or not it carries the header's angle brackets`() = withDb { manager ->
+        fun body(id: String) = """{"syntheticUserId":"sources-route-3","source":{"type":"email_message","locator":${"\""}$id${"\""},"title":"Brackets","text":"The caterer wants a deposit of 500 euros by Friday.","email":{"from":{"address":"a@x.org"},"to":[{"address":"b@x.org"}]}},"items":[]}"""
+        testApplication {
+            application { module(manager) }
+            suspend fun post(id: String): JsonObject = Json.parseToJsonElement(client.post("/debug/sources/commit") {
+                header(HttpHeaders.Authorization, auth); header(HttpHeaders.ContentType, "application/json"); setBody(body(id))
+            }.bodyAsText()).jsonObject
+            assertEquals("true", post("<br@x.org>")["sourceCreated"]!!.jsonPrimitive.content)
+            for (again in listOf("br@x.org", " <br@x.org> ")) assertEquals("false", post(again)["sourceCreated"]!!.jsonPrimitive.content, again)
+            assertEquals(1L, n(manager, "Email")); assertEquals(2L, n(manager, "EmailAddress"))
+            val s = Json.parseToJsonElement(client.get("/debug/sources?syntheticUserId=sources-route-3") { header(HttpHeaders.Authorization, auth) }.bodyAsText()).jsonArray.single().jsonObject
+            assertEquals("br@x.org", s["locator"]!!.jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `a bad item kind or a quote that is not in the chunk is refused and writes nothing`() = withDb { manager ->
         testApplication {
             application { module(manager) }

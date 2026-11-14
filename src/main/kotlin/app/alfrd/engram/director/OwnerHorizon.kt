@@ -234,7 +234,7 @@ class OwnerHorizonService(
                 index >= MAX_SOURCES -> refused("too_many_sources")
                 rawId.isEmpty() -> refused("missing_id")
                 title.isEmpty() && !(obj.str("kind") == KIND_EMAIL_MESSAGE && !obj.str("subject").isNullOrBlank()) -> refused("missing_title")
-                obj.str("kind") == KIND_EMAIL_MESSAGE -> if (!seen.add("$KIND_EMAIL_MESSAGE|${rawId.trim()}")) refused("duplicate_source_id") else storeEmail(obj, rawId, title)
+                obj.str("kind") == KIND_EMAIL_MESSAGE -> if (!seen.add("$KIND_EMAIL_MESSAGE|${EmailGraph.messageId(rawId)}")) refused("duplicate_source_id") else storeEmail(obj, rawId, title)
                 obj.str("kind") != KIND_NOTION_PAGE -> refused("unsupported_source_kind")
                 !seen.add(locatorOf(rawId)) -> refused("duplicate_source_id")
                 else -> try {
@@ -285,7 +285,7 @@ class OwnerHorizonService(
      * (the engine strips quoted history when it chunks a message); cut `chunks` are not accepted.
      */
     private fun storeEmail(obj: JsonObject, rawId: String, rawTitle: String): OwnerSourceReport {
-        val locator = rawId.trim()
+        val locator = EmailGraph.messageId(rawId)
         val subject = obj.str("subject")?.trim()?.takeIf { it.isNotEmpty() }
         val title = rawTitle.ifEmpty { subject.orEmpty() }
         fun refused(reason: String) = OwnerSourceReport(locator.ifEmpty { "?" }, title, false, "refused: $reason")
@@ -330,8 +330,8 @@ class OwnerHorizonService(
 
     /** A sender or recipient: `{"address": ..., "name": ...}` or a bare address string. Null when it is neither. */
     private fun party(e: JsonElement): EmailGraph.Party? = when (e) {
-        is JsonPrimitive -> e.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }?.let { EmailGraph.Party(it) }
-        is JsonObject -> e.str("address")?.trim()?.takeIf { it.isNotEmpty() }?.let { EmailGraph.Party(it, e.str("name")) }
+        is JsonPrimitive -> e.takeIf { it.isString }?.content?.trim()?.takeIf { EmailGraph.normalize(it) != null }?.let { EmailGraph.Party(it) }
+        is JsonObject -> e.str("address")?.trim()?.takeIf { EmailGraph.normalize(it) != null }?.let { EmailGraph.Party(it, e.str("name")) }
         else -> null
     }
 
@@ -374,7 +374,7 @@ class OwnerHorizonService(
         if (quote.isBlank()) return no("missing_quote")
         val (source, chunks) = withContext(Dispatchers.IO) {
             // A Notion page by its id; failing that, an email by its Message-ID (a Message-ID is never a page id, and the owner's graph is all this reads).
-            val found = sourceStore.currentByLocator(email, SOURCE_TYPE_NOTION, locatorOf(id)) ?: sourceStore.currentByLocator(email, SOURCE_TYPE_EMAIL, id)
+            val found = sourceStore.currentByLocator(email, SOURCE_TYPE_NOTION, locatorOf(id)) ?: sourceStore.currentByLocator(email, SOURCE_TYPE_EMAIL, EmailGraph.messageId(id))
             found to found?.let { sourceStore.chunks(email, it.uid) }.orEmpty()
         }
         if (source == null) return no("unknown_source")
@@ -384,7 +384,13 @@ class OwnerHorizonService(
         parsed.rejections.firstOrNull()?.let { return no(it.reason) }
         val op = parsed.operations.singleOrNull() as? RecordItem ?: return no("not_recordable")
         val author = obj.str("author")?.trim()?.takeIf { it.isNotEmpty() }
-        val claimant = if (author != null) "$author (in ${source.title})" else "source: ${source.title} (author unknown)"
+        // An email states its own sender; a page has no author unless the caller names one.
+        val sender = if (source.type == SOURCE_TYPE_EMAIL) withContext(Dispatchers.IO) { sourceStore.emailView(email, source.uid) }?.let { it.fromName ?: it.from } else null
+        val claimant = when {
+            author != null -> "$author (in ${source.title})"
+            sender != null -> "$sender (in ${source.title})"
+            else -> "source: ${source.title} (author unknown)"
+        }
         val digest = java.security.MessageDigest.getInstance("SHA-256")
             .digest("${op.kind.name}|${ItemWords.normalize(op.title ?: op.quote)}|${chunk.ordinal}".toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }.take(24)

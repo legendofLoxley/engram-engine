@@ -636,7 +636,7 @@
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Stable external id: the Notion page id, or for an email its Message-ID exactly as the header gives it. The same id again is the same document (an email is stored once per Message-ID)."
+                    "description": "Stable external id: the Notion page id, or for an email its Message-ID (with or without the angle brackets a header prints: the same message either way). The same id again is the same document (an email is stored once per Message-ID)."
                 },
                 "title": {
                     "type": "string",
