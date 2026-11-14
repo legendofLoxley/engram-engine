@@ -636,16 +636,17 @@
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Stable external id (the Notion page id). The same id again is the same document."
+                    "description": "Stable external id: the Notion page id, or for an email its Message-ID (with or without the angle brackets a header prints: the same message either way). The same id again is the same document (an email is stored once per Message-ID)."
                 },
                 "title": {
                     "type": "string",
-                    "description": "The document's title."
+                    "description": "The document's title (for an email, its subject)."
                 },
                 "kind": {
                     "type": "string",
                     "enum": [
-                        "notion_page"
+                        "notion_page",
+                        "email_message"
                     ]
                 },
                 "url": {
@@ -654,7 +655,107 @@
                 },
                 "text": {
                     "type": "string",
-                    "description": "The full text. Send this or `chunks`, not both."
+                    "description": "The full text. Send this or `chunks`, not both. An email is sent as `text` (its body; quoted history is dropped when it is cut) and never as `chunks`."
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email only: the subject."
+                },
+                "sent_at": {
+                    "type": "string",
+                    "description": "Email only: when it was sent (ISO date or time)."
+                },
+                "from": {
+                    "type": "object",
+                    "description": "Email only: the sender.",
+                    "properties": {
+                        "address": {
+                            "type": "string",
+                            "description": "The email address."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "The display name the header gave, if any."
+                        }
+                    },
+                    "required": [
+                        "address"
+                    ],
+                    "additionalProperties": false
+                },
+                "to": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "description": "One recipient.",
+                        "properties": {
+                            "address": {
+                                "type": "string",
+                                "description": "The email address."
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "The display name the header gave, if any."
+                            }
+                        },
+                        "required": [
+                            "address"
+                        ],
+                        "additionalProperties": false
+                    },
+                    "description": "Email only: the to recipients (at most 500 across to, cc and bcc together)."
+                },
+                "cc": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "description": "One recipient.",
+                        "properties": {
+                            "address": {
+                                "type": "string",
+                                "description": "The email address."
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "The display name the header gave, if any."
+                            }
+                        },
+                        "required": [
+                            "address"
+                        ],
+                        "additionalProperties": false
+                    },
+                    "description": "Email only: the cc recipients (at most 500 across to, cc and bcc together)."
+                },
+                "bcc": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "description": "One recipient.",
+                        "properties": {
+                            "address": {
+                                "type": "string",
+                                "description": "The email address."
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "The display name the header gave, if any."
+                            }
+                        },
+                        "required": [
+                            "address"
+                        ],
+                        "additionalProperties": false
+                    },
+                    "description": "Email only: the bcc recipients (at most 500 across to, cc and bcc together)."
+                },
+                "gmail_message_id": {
+                    "type": "string",
+                    "description": "Email only: Gmail's id for the message, if known."
+                },
+                "gmail_thread_id": {
+                    "type": "string",
+                    "description": "Email only: Gmail's thread id, if known."
                 },
                 "chunks": {
                     "type": "array",
