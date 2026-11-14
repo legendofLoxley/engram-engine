@@ -48,11 +48,16 @@ object EmailGraph {
     /** The address in the form it is stored and found by: trimmed and lower-cased, or null when it is not `local@domain`. */
     fun normalize(raw: String?): String? {
         val a = raw?.trim()?.trim('<', '>')?.trim()?.lowercase() ?: return null
-        if (a.isEmpty() || a.length > 320 || a.any { it.isWhitespace() || it == '<' || it == '>' || it == ',' || it == ';' }) return null
+        // Not an address: whitespace or a control character anywhere (a NUL or a newline in a header is not part of one), list separators, brackets, quotes, or a colon (a
+        // `mailto:` prefix, or a header's own label, that was not stripped).
+        if (a.isEmpty() || a.length > 320 || a.any { it.isWhitespace() || it.isISOControl() || it in "<>,;:\"" }) return null
         val at = a.indexOf('@')
         if (at <= 0 || at != a.lastIndexOf('@') || at == a.length - 1) return null
         return a
     }
+
+    /** A display name as the edge keeps it: control characters and runs of whitespace become one space, cut to 200 characters; null when nothing is left. */
+    fun cleanName(raw: String?): String? = raw?.map { if (it.isISOControl() || it.isWhitespace()) ' ' else it }?.joinToString("")?.replace(Regex(" +"), " ")?.trim()?.take(200)?.takeIf { it.isNotEmpty() }
 
     /** What follows the @ of a normalized address. */
     fun domainOf(address: String): String = address.substringAfter('@')

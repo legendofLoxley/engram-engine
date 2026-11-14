@@ -255,7 +255,7 @@ class SourceStore(private val db: Database) {
             val address = EmailGraph.normalize(party.address) ?: run { skipped++; return }
             email.newEdge(type, node(address), true).apply {
                 set("ownerEmail", userEmail); set("createdAt", now)
-                party.name?.trim()?.takeIf { it.isNotEmpty() }?.let { set("displayName", it.take(200)) }
+                EmailGraph.cleanName(party.name)?.let { set("displayName", it) }
                 kind?.let { set("kind", it) }
                 save()
             }
