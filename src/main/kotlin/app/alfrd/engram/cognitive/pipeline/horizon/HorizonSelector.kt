@@ -538,8 +538,7 @@ internal class HorizonSelector(
     private fun Vertex.isContainer() = typeName == "Domain" || typeName == "Project"
     // An established document claim, or the passage it was taken from, is evidence from a source, not something the user said: it stays
     // out of the Horizon until the Horizon can present it as the source's (docs/claim-extraction.md, "Claims in context").
-    private fun Vertex.isItem() = !isContainer() && typeName != "Concept" && typeName != "User" && typeName != "Source" &&
-        get("claimSourceUid") == null && get("role") != "passage"
+    private fun Vertex.isItem() = !isContainer() && typeName !in NON_ITEM_VERTEX_TYPES && get("claimSourceUid") == null && get("role") != "passage"
 
     /** A container is the user's if it says so; an item's ownership is proved by the assembler through its own Sources before it is surfaced. */
     private fun Vertex.ownedBy(userEmail: String): Boolean = if (isContainer()) get("ownerEmail") == userEmail else true
@@ -562,3 +561,9 @@ internal class HorizonSelector(
         const val DEFAULT_LINK_WINDOW = HorizonLimits.DEFAULT_RELEVANCE_CYCLES.toLong()
     }
 }
+
+/**
+ * Vertex types that are never items: matched by exact type name (a subtype is not matched by its parent's name), so a Source subtype has to be listed here by
+ * name. Email and Email Address are the two the email design adds; a test derives the Source subtypes from the schema so a later one cannot be forgotten.
+ */
+internal val NON_ITEM_VERTEX_TYPES: Set<String> = setOf("Concept", "User", "Source", app.alfrd.engram.db.EmailGraph.EMAIL, app.alfrd.engram.db.EmailGraph.ADDRESS)

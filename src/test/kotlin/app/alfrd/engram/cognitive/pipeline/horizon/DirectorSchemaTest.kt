@@ -45,7 +45,7 @@ class DirectorSchemaTest {
         val outcome = SchemaConstraints.apply(db)
         assertTrue(outcome.skipped.isEmpty(), "no rule skipped over existing rows: ${outcome.skipped}")
         val total = outcome.applied.size + outcome.alreadyInPlace.size
-        assertTrue(total in 42..46, "rule count $total (applied ${outcome.applied.size}, in place ${outcome.alreadyInPlace.size})")
+        assertEquals(50, total, "rule count $total (applied ${outcome.applied.size}, in place ${outcome.alreadyInPlace.size})")
         assertTrue("readonly:Phrase.directorGoalUid" in outcome.applied && "readonly:Phrase.directorCycle" in outcome.applied, outcome.applied.toString())
 
         // The whole Director flow, constraints on.

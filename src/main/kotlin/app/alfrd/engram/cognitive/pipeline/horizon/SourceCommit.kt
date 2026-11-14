@@ -38,6 +38,8 @@ data class CommitReport(
     val itemsCreated: Int,
     val itemsAlreadyThere: Int,
     val itemsHealed: Int = 0,
+    /** Email only: the Message-ID was already stored with different text. Nothing of the offered body was kept, and no item was written from it. */
+    val sourceTextDiffered: Boolean = false,
 )
 
 /**
@@ -69,7 +71,7 @@ class SourceCommitService(
     private val cycles: CycleSequencer,
 ) {
     suspend fun commit(userEmail: String, input: SourceInput, items: List<SourceItemDraft>, writer: String = "director", runId: String? = null): CommitReport =
-        commitWith(userEmail, items, writer, runId) { store.ingest(userEmail, input).let { Triple(it.source, it.created, it.chunksCreated) } }
+        commitWith(userEmail, items, writer, runId) { store.ingest(userEmail, input).let { Loaded(it.source, it.created, it.chunksCreated, it.contentChanged) } }
 
     /**
      * Commits [items] to a Source that is already stored and owned by [userEmail], with the same checks, keys and replay behaviour
@@ -77,11 +79,11 @@ class SourceCommitService(
      */
     suspend fun commitStored(userEmail: String, sourceUid: String, items: List<SourceItemDraft>, writer: String = "director", runId: String? = null): CommitReport =
         commitWith(userEmail, items, writer, runId) {
-            Triple(store.sourceByUid(userEmail, sourceUid) ?: throw IllegalArgumentException("unknown source"), false, 0)
+            Loaded(store.sourceByUid(userEmail, sourceUid) ?: throw IllegalArgumentException("unknown source"), false, 0, false)
         }
 
     private suspend fun commitWith(
-        userEmail: String, items: List<SourceItemDraft>, writer: String, runId: String?, load: () -> Triple<SourceRecord, Boolean, Int>,
+        userEmail: String, items: List<SourceItemDraft>, writer: String, runId: String?, load: () -> Loaded,
     ): CommitReport =
         PerUserCycleLock.withLock(userEmail) {
             // Refuse drafts that are one item but disagree, before anything is written.
@@ -94,7 +96,12 @@ class SourceCommitService(
                 }
             }
 
-            val (source, sourceCreated, chunksCreated) = load()
+            val (source, sourceCreated, chunksCreated, textDiffered) = load()
+            // A Message-ID already stored with other text: the first text stays the evidence, so items read from the offered body (quotes the stored chunks do not hold)
+            // are not written. The report says so.
+            if (textDiffered) {
+                return@withLock CommitReport(source.uid, false, store.chunks(userEmail, source.uid).size, 0, emptyList(), 0, 0, sourceTextDiffered = true)
+            }
             val chunks = store.chunks(userEmail, source.uid)
             val requestId = "src:${source.uid}"
 
@@ -161,6 +168,8 @@ class SourceCommitService(
                 itemsHealed = out.count { it.healed },
             )
         }
+
+    private data class Loaded(val source: SourceRecord, val created: Boolean, val chunksCreated: Int, val textDiffered: Boolean)
 
     private fun sameDetails(a: SourceItemDraft, b: SourceItemDraft): Boolean =
         SourceChunker.normalize(a.quote) == SourceChunker.normalize(b.quote) &&

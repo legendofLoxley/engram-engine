@@ -87,6 +87,15 @@ object SchemaConstraints {
                 { db -> duplicates(db, name, "uid") },
                 { s -> makeUnique(s, name, "uid") })
         }
+        // An Email is a Source subtype: its uid is the Source's (mandatory and unique across Source and Email by Source's rules, as Task's is by Phrase's), so it has
+        // no uid rules of its own. What is its own is its identity: a Message-ID is stored once per owner, and an address once per owner.
+        for ((name, props) in listOf(EmailGraph.EMAIL to listOf("ownerEmail", "type", "locator"), EmailGraph.ADDRESS to listOf("ownerEmail", "address"))) {
+            if (!schema.existsType(name)) continue
+            out += Rule("identity-unique:$name", "$name (${props.joinToString(", ")}) has a unique index",
+                { s -> s.getType(name).getAllIndexes(false).any { it.isUnique && it.propertyNames == props } },
+                { db -> duplicatesOn(db, name, props) },
+                { s -> makeUniqueComposite(s, name, props) })
+        }
         // Containers: an owner and a creation time. (Items inherit ownerEmail from Phrase, which has legitimately ownerless rows, so it cannot be
         // made mandatory for the subtypes alone.)
         for (name in listOf("Domain", "Project")) {
@@ -178,6 +187,19 @@ object SchemaConstraints {
         return Violations(n, examples)
     }
 
+    /** Rows of [type] (not its subtypes) that share the whole combination of [properties]; a row missing one of them is not a duplicate of anything. */
+    private fun duplicatesOn(db: Database, type: String, properties: List<String>): Violations {
+        val seen = HashSet<String>()
+        var n = 0L
+        val examples = mutableListOf<String>()
+        db.scanType(type, false) { doc ->
+            val parts = properties.map { doc.get(it) ?: return@scanType true }
+            if (!seen.add(parts.joinToString("\u0000"))) { n++; if (examples.size < 3) examples += (doc.getString("uid") ?: doc.identity.toString()) }
+            true
+        }
+        return Violations(n, examples)
+    }
+
     private fun badState(db: Database, type: String): Violations {
         var n = 0L
         val examples = mutableListOf<String>()
@@ -188,6 +210,20 @@ object SchemaConstraints {
             true
         }
         return Violations(n, examples)
+    }
+
+    /** The same for an index over several properties: a non-unique one on exactly these is replaced, and put back if the unique one cannot be built. */
+    internal fun makeUniqueComposite(schema: Schema, typeName: String, properties: List<String>) {
+        val type = schema.getType(typeName)
+        val old = type.getAllIndexes(false).firstOrNull { it.propertyNames == properties }
+        if (old != null && old.isUnique) return
+        if (old != null) schema.dropIndex(old.name)
+        try {
+            type.getOrCreateTypeIndex(Schema.INDEX_TYPE.LSM_TREE, true, *properties.toTypedArray())
+        } catch (e: Exception) {
+            if (old != null) type.getOrCreateTypeIndex(Schema.INDEX_TYPE.LSM_TREE, false, *properties.toTypedArray())
+            throw e
+        }
     }
 
     /**

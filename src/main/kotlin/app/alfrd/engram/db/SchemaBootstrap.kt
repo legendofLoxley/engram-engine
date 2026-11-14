@@ -619,7 +619,44 @@ object SchemaBootstrap {
             ensureProperty(schema, "ASSERTS", "propagationStatus", Type.STRING) // "completed" | "incomplete", null before first propagate() attempt
             ensureProperty(schema, "ASSERTS", "incompletePropagationTargets", Type.STRING) // JSON array of {toPhraseUid,strength} still owed — precise retry target, never a blind full recompute
 
+            // ── Email (Source subtype), Email Address, sent-by / sent-to ──────
+            // One message is one Email, a subtype of Source: its chunks, the User -TRUSTS-> Source edge, QUOTES to its chunks, `lastEditedAt` and every
+            // Source index (uid, name, contentHash) are inherited. `type` stays on the row as `email_message` (see EmailGraph). The subtype carries what is
+            // true of a message and of no other source: its subject, when it was sent and the Gmail ids.
+            ensureVertex(schema, EmailGraph.EMAIL) { vt ->
+                vt.addSuperType("Source")
+                vt.createProperty("subject", Type.STRING)
+                vt.createProperty("sentAt", Type.LONG)             // epoch millis, nullable: the Date header, as the message said
+                vt.createProperty("gmailMessageId", Type.STRING)
+                vt.createProperty("gmailThreadId", Type.STRING)
+            }
+            // One node per address seen, per owner, with no guess about whose it is. `address` is lower-cased; `domain` is what follows the @.
+            ensureVertex(schema, EmailGraph.ADDRESS) { vt ->
+                vt.createProperty("uid", Type.STRING)
+                vt.createProperty("ownerEmail", Type.STRING)
+                vt.createProperty("address", Type.STRING)
+                vt.createProperty("domain", Type.STRING)
+                vt.createProperty("createdAt", Type.LONG)
+            }
+            // Email -SENT_BY-> Email Address, Email -SENT_TO-> Email Address (`kind` is to, cc or bcc). Facts of the message, so no confidence and no source:
+            // a judgment about whose address it is will be an edge of its own. `displayName` is the name the header printed beside the address.
+            // Bidirectional on creation (like PART_OF and ABOUT) so the emails of an address can be read by incoming traversal.
+            for (edge in listOf(EmailGraph.SENT_BY, EmailGraph.SENT_TO)) {
+                ensureEdge(schema, edge) { et ->
+                    et.createProperty("ownerEmail", Type.STRING)
+                    et.createProperty("createdAt", Type.LONG)
+                    et.createProperty("displayName", Type.STRING)
+                }
+            }
+            ensureProperty(schema, EmailGraph.SENT_TO, "kind", Type.STRING)
+
             // ── Indexes ───────────────────────────────────────────────────
+            // A Message-ID is stored once per owner: unique on Email only, because a Notion page or a document legitimately has several Sources with
+            // one locator (a changed text is a new version, see SourceStore.markCurrent). The types are new, so the unique indexes can always be built.
+            ensureUniqueCompositeIndex(schema, EmailGraph.EMAIL, "ownerEmail", "type", "locator")
+            ensureUniqueCompositeIndex(schema, EmailGraph.ADDRESS, "ownerEmail", "address")
+            ensureIndex(schema, EmailGraph.ADDRESS, "uid")
+            ensureIndex(schema, EmailGraph.ADDRESS, "domain")
             ensureIndex(schema, "Phrase",      "uid")
             ensureIndex(schema, "Phrase",      "hash")
             ensureIndex(schema, "Phrase",      "userId")
@@ -755,6 +792,17 @@ object SchemaBootstrap {
                 Schema.INDEX_TYPE.LSM_TREE,
                 false,
                 property
+            )
+        }
+    }
+
+    /** A unique index on exactly these properties. If a non-unique one is there it is left (the constraint rules replace it, or report the rows that stop them). */
+    private fun ensureUniqueCompositeIndex(schema: Schema, typeName: String, vararg properties: String) {
+        if (schema.existsType(typeName) && !hasIndexOn(schema, typeName, *properties)) {
+            schema.getType(typeName).getOrCreateTypeIndex(
+                Schema.INDEX_TYPE.LSM_TREE,
+                true,
+                *properties
             )
         }
     }

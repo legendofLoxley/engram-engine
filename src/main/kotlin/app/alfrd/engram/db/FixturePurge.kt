@@ -60,7 +60,7 @@ object FixturePurge {
     /** Columns of the per-user table, in delete order. Edges are counted under `edge:<Type>`. */
     val COLUMNS: List<String> = listOf("ChangeRecord") +
         app.alfrd.engram.cognitive.pipeline.horizon.ItemKinds.all.map { it.typeName } +   // Phrase, Task, Event, Question, from the registry
-        listOf("Chunk", "Source", "Utterance", "ProcessedRequest", "EntityAlias", "ExtractionRun", "ClaimDisagreement", "Project", "Domain", "UserScaffoldState", "User")
+        listOf("Chunk", "Email", "EmailAddress", "Source", "Utterance", "ProcessedRequest", "EntityAlias", "ExtractionRun", "ClaimDisagreement", "Project", "Domain", "UserScaffoldState", "User")
     private val HANDLED_VERTEX_TYPES = COLUMNS.toSet()
     private val OWNERLESS_TYPES = setOf("Concept", "ResponsePhrase", "ScoreType", "Scope")
 
@@ -159,7 +159,7 @@ object FixturePurge {
 
     // ── plan ─────────────────────────────────────────────────────────────────
 
-    private class Src(val rid: RID, val uid: String, val owner: String?)
+    private class Src(val rid: RID, val uid: String, val owner: String?, val type: String = "Source")
     private class Itm(val rid: RID, val type: String, val uid: String, val owner: String?)
     private class Chk(val rid: RID, val uid: String, val owner: String?)
 
@@ -191,7 +191,10 @@ object FixturePurge {
         forEachEdge(db, "CONTAINS") { e -> containedBy.getOrPut(e.`in`) { ArrayList() } += e.out }
 
         val sources = ArrayList<Src>()
-        forEachVertex(db, "Source") { v -> sources += Src(v.identity, (v.get("uid") as? String) ?: v.identity.toString(), v.get("ownerEmail") as? String) }
+        // Scanned by exact type, so a Source subtype is listed by name: an Email is a source and is purged with the user's other sources (under its own column).
+        for (t in vertexTypes.filter { it.name == "Source" || it.isSubTypeOf("Source") }) {
+            forEachVertex(db, t.name) { v -> sources += Src(v.identity, (v.get("uid") as? String) ?: v.identity.toString(), v.get("ownerEmail") as? String, t.name) }
+        }
         val sourceRids = sources.map { it.rid }.toSet()
         val items = ArrayList<Itm>()
         for (t in phraseFamily) forEachVertex(db, t) { v -> items += Itm(v.identity, t, (v.get("uid") as? String) ?: v.identity.toString(), v.get("ownerEmail") as? String) }
@@ -214,7 +217,7 @@ object FixturePurge {
             when {
                 wholly && s.rid in seedSources -> kept += Kept("Source", s.uid, firstListed(t) ?: s.owner!!, "asserts shared seed phrases")
                 wholly && ownerElsewhere -> kept += Kept("Source", s.uid, firstListed(t) ?: "?", "ownerEmail ${s.owner} is outside the list")
-                wholly -> { val u = (firstListed(t) ?: s.owner!!.lowercase()); delete[s.rid] = u; sourceOwnerOf[s.rid] = u; plans.getValue(u).add("Source", s.rid) }
+                wholly -> { val u = (firstListed(t) ?: s.owner!!.lowercase()); delete[s.rid] = u; sourceOwnerOf[s.rid] = u; plans.getValue(u).add(s.type, s.rid) }
                 touches -> kept += Kept("Source", s.uid, firstListed(t) ?: s.owner!!.lowercase(), "also trusted outside the list")
             }
         }
@@ -256,7 +259,7 @@ object FixturePurge {
         }
         byKey("Utterance", "userId"); byKey("ProcessedRequest", "userEmail")
         byKey("EntityAlias", "ownerEmail"); byKey("ExtractionRun", "ownerEmail"); byKey("ClaimDisagreement", "ownerEmail")
-        byKey("Domain", "ownerEmail"); byKey("Project", "ownerEmail"); byKey("ChangeRecord", "ownerEmail")
+        byKey("EmailAddress", "ownerEmail"); byKey("Domain", "ownerEmail"); byKey("Project", "ownerEmail"); byKey("ChangeRecord", "ownerEmail")
         byKey("UserScaffoldState", "userId") { k -> (if (isL(k)) k.lowercase() else userUidToEmail[k]?.takeIf { isL(it) }) }
         for ((rid, email) in userEmailByRid) if (isL(email)) { delete[rid] = email; plans.getValue(email).add("User", rid) }
 
